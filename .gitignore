@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.scratch/
+
+# Task Master is local planning state. The reviewable roadmap is docs/ROADMAP.md.
+.taskmaster/
