@@ -11,11 +11,11 @@ PROTOCOL = "jacquard-host-v0"
 CARRIER = "stdio-u32-json-v0"
 CORE_VERSION = "0.2.0"
 
-# jacquard-lang branch task/206-host-kit (pull request 115), reviewed and
-# pushed but not yet squash-merged when this pin was taken. A squash merge
-# keeps the tree, so the file digests below remain the durable pin; the commit
-# is recorded so the origin of the kit can be audited.
-CORE_COMMIT = "c9947c22554196a809b780bc1f1afd8ba06274de"
+# jacquard-lang main after the squash merge of pull request 115 (the
+# conformance kit). The kit files are byte-identical to the reviewed branch
+# head c9947c2 they were first pinned from; the file digests below remain the
+# durable pin and the commit records where the kit lives on Core main.
+CORE_COMMIT = "61575c7bcd98c8922e739de647556d1368729ad8"
 
 # SHA-256 of the kit files as published under spec/host-protocol-v0/ in Core,
 # keyed by their path relative to that directory. The vendored copies under

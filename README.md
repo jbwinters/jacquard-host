@@ -42,8 +42,8 @@ boundary and the evidence required to widen it.
 ## Current compatibility
 
 The adapter is pinned to the exact conformance-kit files of Core's
-`jacquard-host-v0` protocol at a reviewed but not yet merged Core commit
-(the worker and kit postdate the `jacquard-core-0.2.0` tag), vendored under
+`jacquard-host-v0` protocol as merged on Core `main` (the worker and kit
+postdate the `jacquard-core-0.2.0` tag), vendored under
 `conformance/host-protocol-v0/` and digest-checked by the test suite. The pin,
 its provisional status, and the refresh procedure are in
 [COMPATIBILITY.md](docs/COMPATIBILITY.md).
@@ -193,6 +193,34 @@ import syntax:
 cat jacquard/http.jac jacquard/http-tests.jac > .scratch/http-all.jac
 jacquard test .scratch/http-all.jac --seed 42
 ```
+
+## The synthetic trial slice
+
+`jacquard/trial.jac` is the end-to-end proof (roadmap H1.3): `GET /trial`
+returns one deterministic synthetic trial, `POST /response` validates a
+`trial=…&session=…&answer=a|b` body (exactly those three keys, raw token
+values with no URL encoding, each 1..128 characters starting alphanumeric,
+the same rule the persistence operation enforces), calls `save-response`, and answers
+`201 receipt=…`, `200` for an identical repeat, `409` for a different answer
+under the same session, and Jacquard-authored `400`/`404`/`405`/`501`/`505`
+for everything else. `jacquard_host.trial.TrialApp` assembles the three
+Jacquard files, populates a store, binds the persistence operation, and
+serves the term behind the socket host:
+
+```sh
+PYTHONPATH=src JACQUARD_BIN=/path/to/jacquard JACQUARD_PRELUDE=/path/to/prelude \
+  python3 -m jacquard_host.trial --workdir .scratch/trial --port 8080
+curl -s http://127.0.0.1:8080/trial
+curl -s -d 'trial=trial-synthetic-1&session=sess-1&answer=b' http://127.0.0.1:8080/response
+```
+
+Every request runs in a fresh worker; every response, including every
+error, is rendered by Jacquard (the host itself only ever closes a
+connection, on its own ceilings or on an invocation failure); the only
+outside action is the one named persistence operation. The work directory's
+store is built once from the assembled source and its digest is recorded;
+a later start with a different source is refused rather than repopulated in
+place. This is synthetic data on loopback, not the readability study.
 
 ## Development
 
