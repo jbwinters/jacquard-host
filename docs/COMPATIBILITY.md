@@ -12,8 +12,10 @@ under `conformance/host-protocol-v0/`, this document, and that module disagree.
   `spec/host-protocol-v0.md` in jacquard-lang)
 - carrier: `stdio-u32-json-v0`
 - Core version recorded by the kit: `0.2.0`
-- kit source commit: `c9947c22554196a809b780bc1f1afd8ba06274de`
-  (jacquard-lang branch `task/206-host-kit`, pull request 115)
+- kit source commit: `61575c7bcd98c8922e739de647556d1368729ad8`
+  (jacquard-lang `main` after the squash merge of pull request 115; the kit
+  files are byte-identical to the reviewed branch head `c9947c2` they were
+  first pinned from)
 
 Kit file digests (SHA-256, paths relative to `spec/host-protocol-v0/` in
 Core and to `conformance/host-protocol-v0/` here):
@@ -34,14 +36,12 @@ normative and is reported, never normalised.
 
 ## Status of the pin
 
-The pinned commit is the reviewed head of Core's conformance-kit pull
-request. It was pushed and armed for squash merge when this pin was taken, but
-it had not merged. The file digests are the durable part of the pin: a squash
-merge preserves the tree, so they stay valid; the commit hash is recorded so
-the origin of the kit can be audited and updated to the merged commit in a
-follow-up. Until Core's Task 206 closes with its evidence pack, this adapter's
-conformance claim is "replays the pinned kit", not "conforms to a released
-protocol".
+The kit is merged on Core `main`. The file digests are the durable part of
+the pin; the commit hash records where the kit lives. Core's Task 206 still
+owes its evidence and limitations pack (its second pull request), so this
+adapter's conformance claim remains "replays the pinned kit", not "conforms
+to a released protocol", until that pack is published and this document is
+updated.
 
 ## Adoption rule
 
@@ -54,9 +54,8 @@ of the following together:
 4. explicit bounds and unknown-input behavior; and
 5. an evidence and limitations statement.
 
-Items 1 through 4 are satisfied by the pinned specification, worker, and kit.
-Item 5 is the evidence pack that closes Core's Task 206; the pin above will be
-refreshed to the merged commit when it lands. Adapter-specific normalization
+Items 1 through 4 are satisfied by the pinned specification, worker, and kit,
+now on Core `main`. Item 5 is the evidence pack that closes Core's Task 206. Adapter-specific normalization
 may not weaken, repair, or silently reinterpret a fixture. Protocol divergence
 is reported upstream or fixed in the adapter; it is never hidden behind a
 language-specific compatibility rule.
