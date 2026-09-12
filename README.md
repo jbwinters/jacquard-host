@@ -113,6 +113,28 @@ The result carries every Core frame, every host frame, the exit status, the
 bounded operator text, and any host-owned evidence such as a deadline kill,
 so a run can be audited without trusting the adapter's summary.
 
+## The study persistence operation
+
+`jacquard/study.jac` declares `once effect Study where { save-response :
+(Text, Text, Text) -> SaveOutcome }` and `jacquard_host.study` implements it
+behind that one identity: host-owned SQLite, one `BEGIN IMMEDIATE`
+transaction per save, a deterministic SHA-256 receipt, idempotent repeats
+(`Duplicate`), and `Conflict` for a different answer under the same
+`(trial, session)`. Inputs are validated before any write and refused as
+`refused_authority`; a failed write is `outside_failure`; a failed commit is
+reported as unknown and never retried. Jacquard decides what each outcome
+means. No SQL, handle, path, or participant identity crosses the boundary;
+`session` is a synthetic application token.
+
+```python
+from jacquard_host.study import StudyIdentities, StudyStore, bind_study
+
+with StudyStore("study.sqlite") as study:
+    registry = OperationRegistry()
+    bind_study(registry, StudyIdentities.from_names(names), study)
+    result = host.invoke(names["record-response"], interface, ["trial-7", "sess-1", "B"], registry)
+```
+
 ## Development
 
 There are no third-party runtime dependencies. The offline suite needs only
