@@ -97,8 +97,8 @@ class TrialApp:
         """One request through the worker without a socket (for tests and tools)."""
         return self.host.invoke(self.target, self.interface, (raw_request,), self.registry)
 
-    def server(self, *, bind: tuple[str, int] = ("127.0.0.1", 0), ceilings: Ceilings = Ceilings()) -> SerialSocketHost:
-        return SerialSocketHost.for_term(self.host, self.target, self.interface, self.registry, bind=bind, ceilings=ceilings)
+    def server(self, *, bind: tuple[str, int] = ("127.0.0.1", 0), ceilings: Ceilings = Ceilings(), backlog: int = 1) -> SerialSocketHost:
+        return SerialSocketHost.for_term(self.host, self.target, self.interface, self.registry, bind=bind, ceilings=ceilings, backlog=backlog)
 
     def close(self) -> None:
         self.study.close()

@@ -32,6 +32,12 @@ class MeasurementTest(unittest.TestCase):
         for scenario in data["scenarios"]:
             self.assertEqual(scenario["served_outcomes"], ["served"], scenario)
             self.assertIn(scenario["statuses"], (["HTTP/1.1 200 OK"], ["HTTP/1.1 201 Created"]))
+            self.assertIn("connect_wait", scenario)
+            self.assertIn("accept_backlog", scenario)
+        with_backlog = [s for s in data["scenarios"] if s["accept_backlog"] > 1]
+        self.assertTrue(with_backlog, "a matching-backlog control scenario must exist")
+        for scenario in with_backlog:
+            self.assertLess(scenario["connect_wait"]["max"], 0.5, "with a matching backlog no client waits on the kernel")
         self.assertLess(data["worker_spawn_negotiate_shutdown"]["median"], 5.0)
 
     def test_recorded_measurement_matches_the_document(self) -> None:
@@ -39,7 +45,12 @@ class MeasurementTest(unittest.TestCase):
         self.assertEqual(data["schema"], "jacquard-host-serial-measurement-v0")
         text = (REPO / "docs" / "C4-REQUIREMENTS.md").read_text(encoding="utf-8")
         self.assertIn("measurements-serial-2026-09-12.json", text)
-        self.assertEqual(len(data["scenarios"]), 4)
+        self.assertEqual(len(data["scenarios"]), 11)
+        names = [s["scenario"] for s in data["scenarios"]]
+        self.assertIn("burst GET x40, backlog 40", names)
+        self.assertIn("burst GET x40, backlog 1, clients give up after 10 s", names)
+        starved = next(s for s in data["scenarios"] if s["scenario"].startswith("burst GET x40, backlog 1"))
+        self.assertGreater(starved["clients_gave_up"], 0, "the recorded run shows starvation at backlog 1")
 
 
 if __name__ == "__main__":
