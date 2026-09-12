@@ -16,6 +16,10 @@ under `conformance/host-protocol-v0/`, this document, and that module disagree.
   (jacquard-lang `main` after the squash merge of pull request 115; the kit
   files are byte-identical to the reviewed branch head `c9947c2` they were
   first pinned from)
+- kit evidence pack: `docs/release/host-boundary/` in jacquard-lang at
+  `49ed2d0590682d5f0be2eb2693b3781035039187` (pull request 116), which
+  records the kit's evidence, its still-active limits, and two pending
+  decisions (`noncanonical-target-hash`, diagnostic prose)
 
 Kit file digests (SHA-256, paths relative to `spec/host-protocol-v0/` in
 Core and to `conformance/host-protocol-v0/` here):
@@ -36,12 +40,14 @@ normative and is reported, never normalised.
 
 ## Status of the pin
 
-The kit is merged on Core `main`. The file digests are the durable part of
-the pin; the commit hash records where the kit lives. Core's Task 206 still
-owes its evidence and limitations pack (its second pull request), so this
-adapter's conformance claim remains "replays the pinned kit", not "conforms
-to a released protocol", until that pack is published and this document is
-updated.
+The kit and its evidence pack are both on Core `main`, so all five items of
+the adoption rule below are met. The file digests are the durable part of
+the pin; the commit hashes record where the kit and the pack live. The
+adapter's claim is that it replays the pinned kit in full and agrees with
+every recording; the protocol itself remains the experimental `v0` carrier
+that Core's pack describes, with the limits and pending decisions recorded
+there. A "stable v1" claim is Core's to make and is gated on a second
+independent adapter.
 
 ## Adoption rule
 
@@ -54,8 +60,8 @@ of the following together:
 4. explicit bounds and unknown-input behavior; and
 5. an evidence and limitations statement.
 
-Items 1 through 4 are satisfied by the pinned specification, worker, and kit,
-now on Core `main`. Item 5 is the evidence pack that closes Core's Task 206. Adapter-specific normalization
+All five items are satisfied by the pinned specification, worker, kit, and
+evidence pack on Core `main`. Adapter-specific normalization
 may not weaken, repair, or silently reinterpret a fixture. Protocol divergence
 is reported upstream or fixed in the adapter; it is never hidden behind a
 language-specific compatibility rule.

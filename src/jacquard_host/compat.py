@@ -17,6 +17,12 @@ CORE_VERSION = "0.2.0"
 # durable pin and the commit records where the kit lives on Core main.
 CORE_COMMIT = "61575c7bcd98c8922e739de647556d1368729ad8"
 
+# jacquard-lang main after the squash merge of pull request 116, which
+# published the kit's evidence pack (docs/release/host-boundary/) with the
+# still-active limits and the two pending decisions. The kit files are
+# unchanged between the two commits.
+CORE_EVIDENCE_COMMIT = "49ed2d0590682d5f0be2eb2693b3781035039187"
+
 # SHA-256 of the kit files as published under spec/host-protocol-v0/ in Core,
 # keyed by their path relative to that directory. The vendored copies under
 # conformance/host-protocol-v0/ must match byte for byte.

@@ -55,7 +55,7 @@ class PinTest(unittest.TestCase):
 
     def test_compatibility_document_records_the_same_pin(self) -> None:
         text = (REPO / "docs" / "COMPATIBILITY.md").read_text(encoding="utf-8")
-        for value in (compat.PROTOCOL, compat.CARRIER, compat.CORE_VERSION, compat.CORE_COMMIT, *compat.KIT_DIGESTS.values()):
+        for value in (compat.PROTOCOL, compat.CARRIER, compat.CORE_VERSION, compat.CORE_COMMIT, compat.CORE_EVIDENCE_COMMIT, *compat.KIT_DIGESTS.values()):
             self.assertIn(value, text, f"COMPATIBILITY.md does not record {value}")
         for name in compat.PENDING_DECISIONS:
             self.assertIn(name, text)
