@@ -128,6 +128,25 @@ class StudyStoreTest(unittest.TestCase):
         self.assertFalse(self.store._connection.in_transaction)
         self.assertEqual(self.store.save("t", "s5", "a")[0], "saved")
 
+    def test_reopen_after_a_failed_rollback_keeps_the_configuration(self) -> None:
+        store = StudyStore(self.path, busy_timeout=0.2)
+        try:
+            store.save("t", "s", "a")
+            real_execute = store._execute
+
+            def failing_rollback(sql, *args):
+                if sql.lstrip().startswith("ROLLBACK"):
+                    raise sqlite3.OperationalError("cannot rollback")
+                return real_execute(sql, *args)
+
+            with mock.patch.object(store, "_execute", side_effect=failing_rollback):
+                store.save("t", "s", "a")
+            self.assertEqual(int(store._connection.execute("PRAGMA busy_timeout").fetchone()[0]), 200)
+            self.assertEqual(int(store._connection.execute("PRAGMA synchronous").fetchone()[0]), 2)
+            self.assertEqual(store.journal_mode, "wal")
+        finally:
+            store.close()
+
     def test_journal_mode_is_recorded_not_assumed(self) -> None:
         self.assertIn(self.store.journal_mode, ("wal", "delete", "truncate", "persist", "memory"))
 

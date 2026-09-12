@@ -112,11 +112,18 @@ class StudyStore:
 
     def __init__(self, path: str | os.PathLike[str], *, busy_timeout: float = DEFAULT_BUSY_TIMEOUT) -> None:
         self.path = os.fspath(path)
-        self._connection = sqlite3.connect(self.path, isolation_level=None, timeout=busy_timeout, check_same_thread=False)
-        # WAL when the filesystem allows it; the effective mode is recorded, not assumed
-        self.journal_mode = str(self._connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
-        self._connection.execute("PRAGMA synchronous=FULL")
+        self.busy_timeout = busy_timeout
+        self.journal_mode = ""
+        self._connection = self._connect()
         self._connection.execute(_DDL)
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open and configure a connection; used at construction and after a failed rollback."""
+        connection = sqlite3.connect(self.path, isolation_level=None, timeout=self.busy_timeout, check_same_thread=False)
+        # WAL when the filesystem allows it; the effective mode is recorded, not assumed
+        self.journal_mode = str(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
 
     def _execute(self, sql: str, parameters: tuple = ()) -> sqlite3.Cursor:
         """The one path every statement takes (tests fault-inject here)."""
@@ -193,7 +200,7 @@ class StudyStore:
             try:
                 self._connection.close()
             finally:
-                self._connection = sqlite3.connect(self.path, isolation_level=None, timeout=DEFAULT_BUSY_TIMEOUT, check_same_thread=False)
+                self._connection = self._connect()
 
 
 def bind_study(registry: OperationRegistry, identities: StudyIdentities, store: StudyStore) -> None:
