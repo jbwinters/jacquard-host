@@ -99,5 +99,6 @@ Each row of [LIMITS.md](LIMITS.md) is a non-claim with the condition for
 removing it. In particular this evidence does not show hostile-code isolation,
 a production security posture, a public network service, throughput, or any
 readability result; the trial is synthetic data on loopback. The conformance
-claim is "replays the pinned kit" until Core publishes the kit's evidence
-pack.
+claim is "replays the pinned kit and agrees with every recording"; the
+protocol's own status, limits, and pending decisions are Core's, in the
+evidence pack the pin names.
