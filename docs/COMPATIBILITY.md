@@ -1,16 +1,47 @@
 # Compatibility
 
-## Planning baseline
+## Pinned Core artifacts
 
-The repository currently plans against:
+The adapter is pinned to these Jacquard Core artifacts. The same values live
+in `src/jacquard_host/compat.py`, and the test suite fails if the vendored kit
+under `conformance/host-protocol-v0/`, this document, and that module disagree.
 
-- Jacquard release: `jacquard-core-0.2.0`
-- release commit: `aceca65e364db6dcf91cbdd54586c136646dfa37`
-- host protocol: **not released**
-- conformance fixture set: **not released**
+- Jacquard release baseline: `jacquard-core-0.2.0`
+  (release commit `aceca65e364db6dcf91cbdd54586c136646dfa37`)
+- host protocol: `jacquard-host-v0` (frozen HB.1 contract,
+  `spec/host-protocol-v0.md` in jacquard-lang)
+- carrier: `stdio-u32-json-v0`
+- Core version recorded by the kit: `0.2.0`
+- kit source commit: `c9947c22554196a809b780bc1f1afd8ba06274de`
+  (jacquard-lang branch `task/206-host-kit`, pull request 115)
 
-The release pin identifies the semantic baseline; it does not imply that Core
-0.2 contains a foreign-host ABI or process protocol. It does not.
+Kit file digests (SHA-256, paths relative to `spec/host-protocol-v0/` in
+Core and to `conformance/host-protocol-v0/` here):
+
+| File | SHA-256 |
+|---|---|
+| `kit/kit.json` | `a286328c457696a898aaa6731f0044fb90c78d8657d57270384a76976b070b53` |
+| `kit/transcripts.json` | `ebaf590e3d1b7e8399f56de5ad85043ac3658416dd7f0af7b55b9f9f3ce93240` |
+| `kit/fixtures.jac` | `037bb8209ca0344ba0a2cd0fcc16e69f13c8f9b91e3404dc3f3161e351831d80` |
+| `vectors.json` | `9ba1bff8eee0b6dbea6475dc0c7e9cc6313d847ad80bd8d832457115eb1c738a` |
+
+The kit records one pending Core decision, `noncanonical-target-hash`: the
+HB.1 vector expects E1603 while the shipped preflight classifies an uppercase
+target hash as a malformed scalar (E1601). The transcript is recorded as
+`diverges`, and the adapter reproduces that recording rather than hiding it.
+Six diagnostic prose fields also drift from the HB.1 vector text; prose is not
+normative and is reported, never normalised.
+
+## Status of the pin
+
+The pinned commit is the reviewed head of Core's conformance-kit pull
+request. It was pushed and armed for squash merge when this pin was taken, but
+it had not merged. The file digests are the durable part of the pin: a squash
+merge preserves the tree, so they stay valid; the commit hash is recorded so
+the origin of the kit can be audited and updated to the merged commit in a
+follow-up. Until Core's Task 206 closes with its evidence pack, this adapter's
+conformance claim is "replays the pinned kit", not "conforms to a released
+protocol".
 
 ## Adoption rule
 
@@ -23,11 +54,30 @@ of the following together:
 4. explicit bounds and unknown-input behavior; and
 5. an evidence and limitations statement.
 
-This repository pins that exact set before consuming it. Adapter-specific
-normalization may not weaken, repair, or silently reinterpret a fixture.
-Protocol divergence is reported upstream or fixed in the adapter; it is never
-hidden behind a language-specific compatibility rule.
+Items 1 through 4 are satisfied by the pinned specification, worker, and kit.
+Item 5 is the evidence pack that closes Core's Task 206; the pin above will be
+refreshed to the merged commit when it lands. Adapter-specific normalization
+may not weaken, repair, or silently reinterpret a fixture. Protocol divergence
+is reported upstream or fixed in the adapter; it is never hidden behind a
+language-specific compatibility rule.
 
 The process carrier is expected to be provisional. A later native or
 WebAssembly carrier may replace it while preserving the transport-neutral
 invocation, effect, diagnostic, cancellation, and evidence contract.
+
+## Refreshing the pin
+
+1. Copy the four kit files from the Core commit into
+   `conformance/host-protocol-v0/`.
+2. Update the digests and commit in `src/jacquard_host/compat.py` and in this
+   document.
+3. Run the offline suite, then replay the kit against the matching Core build:
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src JACQUARD_BIN=/path/to/jacquard JACQUARD_PRELUDE=/path/to/prelude \
+  python3 -m jacquard_host.kit --report .scratch/kit-replay.json
+```
+
+A transcript that stops matching its recording is a protocol or
+implementation finding to report upstream, not something to normalise here.
