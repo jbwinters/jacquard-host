@@ -41,8 +41,14 @@ def post(session: str) -> bytes:
 
 
 def talk(address, data: bytes, timeout: float) -> tuple[float, float, bytes | None]:
-    """Return (connect wait, total wall, reply); reply is None when the client gave up."""
+    """Return (connect wait, total wall, reply); reply is None when the client gave up.
+
+    Under a full accept backlog a client can complete its handshake and still
+    never be accepted by the host (the kernel dropped its final ACK); such a
+    client reports the handshake time as connect wait and then times out.
+    """
     started = time.monotonic()
+    connected = None
     try:
         with socket.create_connection(address, timeout=timeout) as client:
             connected = time.monotonic()
@@ -54,7 +60,8 @@ def talk(address, data: bytes, timeout: float) -> tuple[float, float, bytes | No
                     break
                 chunks.append(chunk)
     except OSError:
-        return time.monotonic() - started, time.monotonic() - started, None
+        now = time.monotonic()
+        return (connected or now) - started, now - started, None
     return connected - started, time.monotonic() - started, b"".join(chunks)
 
 

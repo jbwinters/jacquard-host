@@ -25,7 +25,7 @@ of 1, and with a backlog at least as large as the burst.
 | Bursts of 4, 8, 12, and 40 `GET` clients with a matching backlog | connect wait under 1 ms for every client; request wall grows by about 45 ms per queued request: max 0.18 s, 0.36 s, 0.54 s, 1.84 s |
 | Burst of 12 `POST` clients with a matching backlog | max 0.82 s, about 68 ms per queued request |
 | Bursts of 4, 8, 12 `GET` clients with backlog 1 | clients beyond the backlog wait 1 s, then 2 s, before the kernel accepts them (SYN retransmit), so wall times step to 1.09 s, 1.35 s, 2.17 s while the wait after connect stays at the 45 ms line |
-| Burst of 40 `GET` clients with backlog 1, clients giving up after 10 s | 35 served, 5 clients never connected; wall 13.1 s for about 1.8 s of work; connect wait up to 13.1 s |
+| Burst of 40 `GET` clients with backlog 1, clients giving up after 10 s | 35 served; 5 clients completed a handshake on a retransmit but were never accepted by the host and timed out; wall 13.1 s for about 1.8 s of work (in the recorded run those five report their whole wait as connect wait; the script now separates the handshake time) |
 
 Every accepted request in every scenario was served with the expected
 status.
@@ -37,8 +37,9 @@ status.
    (this Linux does not reset them: `tcp_abort_on_overflow` is 0). Those
    clients retransmit after 1 s, then 2 s, 4 s, and so on, so the host sits
    idle while clients back off: 40 clients took 13 s for under 2 s of work
-   and five gave up. The failure mode is starvation, not refusal, and no
-   host record exists for a client the kernel never accepted.
+   and five gave up (they completed a handshake on a retransmit, were never
+   accepted by the host, and timed out). The failure mode is starvation, not
+   refusal, and no host record exists for a client the host never accepted.
 2. **Head-of-line wait once admitted.** With a backlog that admits the
    burst, wall time is queue wait growing linearly with position: about
    45 ms per queued `GET`, about 68 ms per queued `POST`. A single slow
