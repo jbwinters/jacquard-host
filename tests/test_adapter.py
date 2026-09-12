@@ -91,6 +91,11 @@ class ReplayedAdapterTest(unittest.TestCase):
         result = replay_host("selected-shutdown").invoke(IDS["kit-double"], Interface((Nominal(IDS["int"]),), Nominal(IDS["int"])), (True,))
         self.assertEqual((result.kind, result.host_evidence["code"]), ("host_error", "E1604"))
 
+    def test_a_host_frame_over_the_selected_limits_is_a_host_error(self) -> None:
+        host = replay_host("pure-success", limits={**__import__("jacquard_host.protocol.limits", fromlist=["HARD_LIMITS"]).HARD_LIMITS, "max_frame_bytes": 64})
+        result = host.invoke(IDS["kit-ready"], Interface((), TupleType()))
+        self.assertEqual((result.kind, result.host_evidence["reason"], result.host_evidence["code"]), ("host_error", "host_frame_refused", "E1602"))
+
     def test_long_failure_messages_are_cut_to_the_selected_limit(self) -> None:
         registry = OperationRegistry()
         registry.bind(IDS["kit-world"], IDS["send"], lambda body: (_ for _ in ()).throw(HostFailure("refused_authority", "not_started", "é" * 3000)))

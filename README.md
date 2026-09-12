@@ -11,7 +11,9 @@ spawns one `jacquard host worker` per invocation, runs one checked Jacquard
 term with typed arguments, and serves the term's declared `once` effect
 operations from Python functions bound by exact identity. The strict
 `stdio-u32-json-v0` codecs and a replayer for Core's conformance kit back it.
-No socket host, HTTP server, or deployment surface exists yet.
+A bounded serial loopback socket host relays one raw request at a time to
+such a term and writes back the bytes it returns; no HTTP semantics live in
+the host, and no deployment surface exists yet.
 
 ## Repository boundary
 
@@ -134,6 +136,28 @@ with StudyStore("study.sqlite") as study:
     registry = OperationRegistry()
     bind_study(registry, StudyIdentities.from_names(names), study)
     result = host.invoke(names["record-response"], interface, ["trial-7", "sess-1", "B"], registry)
+```
+
+## The serial socket host
+
+`jacquard_host.socket_host.SerialSocketHost` owns one loopback listener and
+serves one connection at a time, whichever thread calls it. For each
+connection it reads one bounded request (the head up to the first CRLFCRLF,
+then exactly `Content-Length` more bytes when that header is present), hands
+the raw bytes to one worker as
+Latin-1 `Text` through `Host.invoke`, writes back the bytes the term returned,
+and closes. It enforces byte and time ceilings for its own resource safety and
+does nothing else: on a ceiling violation, an early disconnect, or a failed
+invocation it closes the connection without writing a response and records
+the reason as host-owned evidence. Every HTTP meaning, including error
+responses, is produced by Jacquard code (roadmap H1.1).
+
+```python
+from jacquard_host.socket_host import Ceilings, SerialSocketHost
+
+server = SerialSocketHost.for_term(host, names["serve"], interface, ceilings=Ceilings(max_request_bytes=65536))
+print(server.address)          # ("127.0.0.1", <port>)
+server.serve_forever()         # strictly one request at a time; server.stop() closes the listener and ends it
 ```
 
 ## Development
