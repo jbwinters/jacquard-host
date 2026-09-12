@@ -121,8 +121,9 @@ behind that one identity: host-owned SQLite, one `BEGIN IMMEDIATE`
 transaction per save, a deterministic SHA-256 receipt, idempotent repeats
 (`Duplicate`), and `Conflict` for a different answer under the same
 `(trial, session)`. Inputs are validated before any write and refused as
-`refused_authority`; a failed write is `outside_failure`; a failed commit is
-reported as unknown and never retried. Jacquard decides what each outcome
+`refused_authority`; a failed write, or a failed commit whose transaction is
+still open, is `outside_failure` and rolled back; a commit failure that
+leaves no transaction behind is reported as unknown and never retried. Jacquard decides what each outcome
 means. No SQL, handle, path, or participant identity crosses the boundary;
 `session` is a synthetic application token.
 

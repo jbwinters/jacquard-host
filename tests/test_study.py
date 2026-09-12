@@ -55,6 +55,9 @@ class StudyStoreTest(unittest.TestCase):
             ("t" * 129, "s", "a"),
             ("t", "s", "x" * (MAX_ANSWER_BYTES + 1)),
             ("t", "s", "a\0b"),
+            ("t\n", "s", "a"),
+            ("t", "s\n", "a"),
+            ("t\ns", "s", "a"),
         ):
             with self.subTest(trial=trial, session=session), self.assertRaises(HostFailure) as caught:
                 self.store.save(trial, session, answer)
@@ -93,7 +96,65 @@ class StudyStoreTest(unittest.TestCase):
         with mock.patch.object(self.store, "_execute", side_effect=failing_commit):
             with self.assertRaises(HostFailure) as caught:
                 self.store.save("t", "s2", "a")
+        # the transaction was still open when COMMIT failed: it is rolled back and the failure is definite
+        self.assertEqual((caught.exception.category, caught.exception.completion), ("outside_failure", "failed"))
+        self.assertFalse(self.store._connection.in_transaction)
+        self.assertEqual(self.store.count(), 0)
+        # the store and a second store on the same file remain usable
+        self.assertEqual(self.store.save("t", "s2", "a")[0], "saved")
+        with StudyStore(self.path) as other:
+            self.assertEqual(other.save("t", "s3", "a")[0], "saved")
+
+        def vanishing_commit(sql, *args):
+            if sql.lstrip().startswith("COMMIT"):
+                real_execute("ROLLBACK")  # the transaction disappears underneath the failed commit
+                raise sqlite3.OperationalError("disk I/O error")
+            return real_execute(sql, *args)
+
+        with mock.patch.object(self.store, "_execute", side_effect=vanishing_commit):
+            with self.assertRaises(HostFailure) as caught:
+                self.store.save("t", "s4", "a")
         self.assertEqual((caught.exception.category, caught.exception.completion), ("completion_unknown", "unknown"))
+        self.assertFalse(self.store._connection.in_transaction)
+        self.assertEqual(self.store.save("t", "s4", "a")[0], "saved")
+
+        def failing_rollback(sql, *args):
+            if sql.lstrip().startswith("ROLLBACK"):
+                raise sqlite3.OperationalError("cannot rollback")
+            return real_execute(sql, *args)
+
+        with mock.patch.object(self.store, "_execute", side_effect=failing_rollback):
+            self.assertEqual(self.store.save("t", "s4", "a")[0], "duplicate")
+        self.assertFalse(self.store._connection.in_transaction)
+        self.assertEqual(self.store.save("t", "s5", "a")[0], "saved")
+
+    def test_journal_mode_is_recorded_not_assumed(self) -> None:
+        self.assertIn(self.store.journal_mode, ("wal", "delete", "truncate", "persist", "memory"))
+
+    def test_a_store_can_be_used_from_another_thread(self) -> None:
+        import threading
+        outcome = []
+        thread = threading.Thread(target=lambda: outcome.append(self.store.save("t", "thread", "a")[0]))
+        thread.start()
+        thread.join(5)
+        self.assertEqual(outcome, ["saved"])
+
+    def test_a_locked_file_fails_fast_and_writes_nothing(self) -> None:
+        import time
+        holder = sqlite3.connect(self.path, isolation_level=None)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            store = StudyStore(self.path, busy_timeout=0.2)
+            started = time.monotonic()
+            with self.assertRaises(HostFailure) as caught:
+                store.save("t", "s", "a")
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertEqual((caught.exception.category, caught.exception.completion), ("outside_failure", "failed"))
+            store.close()
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+        self.assertEqual(self.store.count(), 0)
 
     def test_bound_operation_returns_save_outcome_constructors(self) -> None:
         registry = OperationRegistry()

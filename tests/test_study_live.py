@@ -28,7 +28,8 @@ class LiveStudyTest(unittest.TestCase):
         env = dict(os.environ, JACQUARD_PRELUDE=os.path.abspath(JACQUARD_PRELUDE))
         subprocess.run([JACQUARD_BIN, "run", str(DECLS), "--store", cls.store_dir], check=True, stdout=subprocess.DEVNULL, env=env)
         command, prelude = [JACQUARD_BIN], JACQUARD_PRELUDE
-        cls.names = hash_file(DECLS, command=command, prelude=prelude) | hash_file(os.path.join(prelude, "01-prim.jqd"), command=command, prelude=prelude)
+        # the study's own names take precedence over any prelude name
+        cls.names = hash_file(os.path.join(prelude, "01-prim.jqd"), command=command, prelude=prelude) | hash_file(DECLS, command=command, prelude=prelude)
         cls.interface = parse_signature(signatures(DECLS, command=command, prelude=prelude)["record-response"], cls.names)
         cls.identities = StudyIdentities.from_names(cls.names)
         cls.host = Host(cls.store_dir, command=[JACQUARD_BIN])

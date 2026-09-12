@@ -18,8 +18,18 @@ Contract of ``save-response(trial, session, answer)``:
   answer returns ``Duplicate(receipt)``; a repeat with a different answer
   returns ``Conflict`` and stores nothing;
 - every write is one ``BEGIN IMMEDIATE`` transaction; a failure before the
-  commit is ``outside_failure``/``failed``; a failure while committing is
-  ``completion_unknown``/``unknown`` and is never retried by the host.
+  commit is ``outside_failure``/``failed``. When ``COMMIT`` itself fails and
+  SQLite still holds the open transaction, the host rolls it back and reports
+  the definite ``outside_failure``/``failed``; when the transaction is already
+  gone the commit may or may not have become durable, which is
+  ``completion_unknown``/``unknown`` and is never retried by the host. The
+  connection is usable after every failure.
+
+The store is meant for one caller at a time (the host is serial); it is not
+thread-checked, so the thread that runs ``Host.invoke`` may use a store built
+elsewhere. A contended file blocks ``BEGIN IMMEDIATE`` for at most
+``busy_timeout`` seconds, and that wait is spent inside the adapter's read
+loop against the worker deadline.
 """
 
 from __future__ import annotations
@@ -37,7 +47,8 @@ from jacquard_host.registry import HostFailure, OperationRegistry
 SCHEMA = "jacquard-host-study-save-v1"
 MAX_TOKEN_CHARS = 128
 MAX_ANSWER_BYTES = 4096
-_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+DEFAULT_BUSY_TIMEOUT = 1.0
+_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,%d}" % (MAX_TOKEN_CHARS - 1))
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS responses (
@@ -86,7 +97,7 @@ def _validate(trial: str, session: str, answer: str) -> None:
         if not isinstance(value, str):
             raise HostFailure("refused_authority", "not_started", f"{label} must be Text")
     for label, value in (("trial", trial), ("session", session)):
-        if not _TOKEN.match(value):
+        if not _TOKEN.fullmatch(value):
             raise HostFailure(
                 "refused_authority", "not_started", f"{label} must be 1..{MAX_TOKEN_CHARS} characters of [A-Za-z0-9._-]"
             )
@@ -99,10 +110,11 @@ def _validate(trial: str, session: str, answer: str) -> None:
 class StudyStore:
     """Host-owned SQLite lifecycle for the study responses."""
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(self, path: str | os.PathLike[str], *, busy_timeout: float = DEFAULT_BUSY_TIMEOUT) -> None:
         self.path = os.fspath(path)
-        self._connection = sqlite3.connect(self.path, isolation_level=None)
-        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection = sqlite3.connect(self.path, isolation_level=None, timeout=busy_timeout, check_same_thread=False)
+        # WAL when the filesystem allows it; the effective mode is recorded, not assumed
+        self.journal_mode = str(self._connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
         self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute(_DDL)
 
@@ -139,28 +151,49 @@ class StudyStore:
             row = execute(
                 "SELECT answer, receipt FROM responses WHERE trial = ? AND session = ?", (trial, session)
             ).fetchone()
-            if row is not None:
-                execute("ROLLBACK")
-                if row[0] == answer:
-                    return ("duplicate", row[1])
-                return ("conflict", "")
+        except sqlite3.Error as error:
+            self._abandon()
+            raise HostFailure("outside_failure", "failed", f"statement failed: {type(error).__name__}") from None
+        if row is not None:
+            # nothing was written: end the read-only transaction and answer from the row
+            self._abandon()
+            if row[0] == answer:
+                return ("duplicate", row[1])
+            return ("conflict", "")
+        try:
             ordinal = int(execute("SELECT COUNT(*) FROM responses").fetchone()[0]) + 1
             execute(
                 "INSERT INTO responses (schema, trial, session, answer, receipt, ordinal) VALUES (?, ?, ?, ?, ?, ?)",
                 (SCHEMA, trial, session, answer, receipt, ordinal),
             )
         except sqlite3.Error as error:
-            try:
-                execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise HostFailure("outside_failure", "failed", f"write failed: {type(error).__name__}") from None
+            self._abandon()
+            raise HostFailure("outside_failure", "failed", f"statement failed: {type(error).__name__}") from None
         try:
             execute("COMMIT")
         except sqlite3.Error as error:
-            # the commit may or may not have become durable; report exactly that
+            if self._connection.in_transaction:
+                # nothing became durable: the transaction is still open, so end it definitely
+                self._abandon()
+                raise HostFailure("outside_failure", "failed", f"commit failed: {type(error).__name__}") from None
+            # the transaction is gone: the commit may or may not have become durable
             raise HostFailure("completion_unknown", "unknown", f"commit outcome unknown: {type(error).__name__}") from None
         return ("saved", receipt)
+
+    def _abandon(self) -> None:
+        """Leave no transaction open, whatever it takes; the connection stays usable."""
+        if not self._connection.in_transaction:
+            return
+        try:
+            self._execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        if self._connection.in_transaction:
+            # a rollback that fails leaves the lock held: reopen the connection instead
+            try:
+                self._connection.close()
+            finally:
+                self._connection = sqlite3.connect(self.path, isolation_level=None, timeout=DEFAULT_BUSY_TIMEOUT, check_same_thread=False)
 
 
 def bind_study(registry: OperationRegistry, identities: StudyIdentities, store: StudyStore) -> None:
