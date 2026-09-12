@@ -1,0 +1,130 @@
+{
+  "schema": "jacquard-host-serial-measurement-v0",
+  "python": "3.14.7",
+  "worker_spawn_negotiate_shutdown": {
+    "n": 5,
+    "min": 0.0163,
+    "median": 0.0182,
+    "p90": 0.0184,
+    "max": 0.0189,
+    "mean": 0.0179
+  },
+  "scenarios": [
+    {
+      "scenario": "serial GET, one client",
+      "requests": 12,
+      "client_concurrency": 1,
+      "wall_seconds": 0.556,
+      "throughput_per_second": 21.583,
+      "request_wall": {
+        "n": 12,
+        "min": 0.0432,
+        "median": 0.0456,
+        "p90": 0.0474,
+        "max": 0.0496,
+        "mean": 0.0459
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.0431,
+        "median": 0.0454,
+        "p90": 0.0472,
+        "max": 0.0473,
+        "mean": 0.0456
+      }
+    },
+    {
+      "scenario": "serial POST, one client",
+      "requests": 12,
+      "client_concurrency": 1,
+      "wall_seconds": 0.775,
+      "throughput_per_second": 15.475,
+      "request_wall": {
+        "n": 12,
+        "min": 0.0612,
+        "median": 0.0632,
+        "p90": 0.0662,
+        "max": 0.0701,
+        "mean": 0.0642
+      },
+      "statuses": [
+        "HTTP/1.1 201 Created"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.061,
+        "median": 0.063,
+        "p90": 0.0661,
+        "max": 0.07,
+        "mean": 0.064
+      }
+    },
+    {
+      "scenario": "burst GET, all clients at once",
+      "requests": 12,
+      "client_concurrency": 12,
+      "wall_seconds": 2.088,
+      "throughput_per_second": 5.746,
+      "request_wall": {
+        "n": 12,
+        "min": 0.0425,
+        "median": 1.2097,
+        "p90": 1.5141,
+        "max": 2.0872,
+        "mean": 1.0929
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.0408,
+        "median": 0.0452,
+        "p90": 0.0481,
+        "max": 0.0541,
+        "mean": 0.0452
+      }
+    },
+    {
+      "scenario": "burst POST, all clients at once",
+      "requests": 12,
+      "client_concurrency": 12,
+      "wall_seconds": 3.163,
+      "throughput_per_second": 3.794,
+      "request_wall": {
+        "n": 12,
+        "min": 0.0748,
+        "median": 1.2936,
+        "p90": 2.0134,
+        "max": 3.1623,
+        "mean": 1.3279
+      },
+      "statuses": [
+        "HTTP/1.1 201 Created"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.0709,
+        "median": 0.0731,
+        "p90": 0.0746,
+        "max": 0.0763,
+        "mean": 0.0735
+      }
+    }
+  ]
+}

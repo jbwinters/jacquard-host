@@ -229,7 +229,10 @@ pinned Core commit, the fixture identities, and the platform matrix;
 [docs/AUTHORITY.md](docs/AUTHORITY.md) inventories every outside action the
 host performs and which of them Jacquard can trigger (one);
 [docs/CORE-REQUIREMENTS.md](docs/CORE-REQUIREMENTS.md) is the versioned report
-of what Core could change to remove host workarounds.
+of what Core could change to remove host workarounds;
+[docs/C4-REQUIREMENTS.md](docs/C4-REQUIREMENTS.md) measures where serial
+execution costs (`scripts/measure_serial.py`) and lists what a host scheduler
+contract would need.
 
 ## Development
 
