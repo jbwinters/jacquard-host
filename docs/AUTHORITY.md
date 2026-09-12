@@ -20,10 +20,10 @@ by exact identity only.
 
 | Action | Where | Authority used |
 |---|---|---|
-| Spawn `jacquard host worker --store DIR` per invocation | `jacquard_host.worker` | process creation; three pipes; a temp file for bounded stderr |
+| Spawn `jacquard host worker --store DIR` per invocation | `jacquard_host.worker` | process creation; two pipes (stdin, stdout); a temp file for bounded stderr; the parent's whole environment is passed to the child |
 | Populate a Core store from the assembled first-party source | `jacquard_host.trial.TrialApp` (once per work directory) | `jacquard run FILE --store DIR`; filesystem write under the work directory |
-| Resolve identities | `jacquard_host.identities` | `jacquard hash` and `jacquard check --print-sigs` on first-party files |
-| Bind and accept | `jacquard_host.socket_host` | loopback TCP only (`127.0.0.1` or `::1`); non-loopback is refused at construction |
+| Resolve identities | `jacquard_host.identities` | `jacquard hash` and `jacquard check --print-sigs` on first-party files and on the Core prelude file `01-prim.jqd` |
+| Bind and accept | `jacquard_host.socket_host` | loopback TCP only (`127.0.0.1`, `::1`, or the name `localhost`); anything else is refused at construction |
 | Open the study database | `jacquard_host.study` | one SQLite file; WAL when the filesystem allows; no other filesystem access |
 | Kill a worker at the deadline | `jacquard_host.worker` | signal to the child it spawned |
 
@@ -31,9 +31,12 @@ by exact identity only.
 
 - No outbound network connection of any kind.
 - No secret, credential, token, or environment lookup beyond `JACQUARD_BIN`,
-  `JACQUARD_PRELUDE`, and `TMPDIR`.
+  `JACQUARD_PRELUDE`, and `TMPDIR`; child processes inherit the parent's
+  environment unchanged.
 - No filesystem access outside the work directory, the Core prelude and
-  store paths given at startup, and the temp directory for stderr capture.
+  store paths given at startup, the package's own `jacquard/` sources it
+  assembles, the temp directory for stderr capture, and a report path the
+  operator names on the kit replayer's command line.
 - No nested policy: the host has no handler chain of its own; every policy
   decision reachable from Jacquard is inside Jacquard code or Core's checker.
 - No `cancel` frame is sent by the adapter today; a deadline ends the worker
@@ -43,6 +46,7 @@ by exact identity only.
 ## Evidence separation
 
 Core evidence (target, interface, capabilities, request order, observations)
-is returned unchanged in `InvocationResult.evidence`. Host-owned evidence
-(`InvocationResult.host_evidence`, `Served` records of the socket host) is
-kept beside it under its own schema name and never merged into Core's.
+is returned unchanged in `InvocationResult.evidence`. Host-owned evidence is
+kept beside it and never merged into Core's: `InvocationResult.host_evidence`
+carries the schema name `jacquard-host-python-evidence-v0`, and the socket
+host's `Served` records are plain host records with no schema field.

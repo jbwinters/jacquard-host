@@ -104,6 +104,20 @@ class ReplayedAdapterTest(unittest.TestCase):
         self.assertEqual(len(message.encode("utf-8")), 4096)
         self.assertEqual(message, "é" * 2048)
 
+    def test_descriptors_are_released_across_invocations(self) -> None:
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("no /proc")
+        before = len(os.listdir("/proc/self/fd"))
+        for _ in range(3):
+            replay_host("pure-success").invoke(IDS["kit-ready"], Interface((), TupleType()))
+            Host("unused-store", command=[sys.executable, "-c", "pass"], deadline_seconds=5).invoke(IDS["kit-ready"], Interface((), TupleType()))
+            Host("unused-store", command=[sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\x00\\x00\\x00\\x02[]'); sys.stdout.flush(); sys.stdin.read()"], deadline_seconds=5).invoke(IDS["kit-ready"], Interface((), TupleType()))
+            Host("unused-store", command=[sys.executable, "-c", "import time; time.sleep(30)"], deadline_seconds=0.2).invoke(IDS["kit-ready"], Interface((), TupleType()))
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        import glob
+        import tempfile
+        self.assertEqual(glob.glob(os.path.join(tempfile.gettempdir(), "jacquard-host-worker-stderr-*")), [])
+
     def test_worker_that_exits_immediately_is_carrier_loss(self) -> None:
         host = Host("unused-store", command=[sys.executable, "-c", "pass"], deadline_seconds=5)
         result = host.invoke(IDS["kit-ready"], Interface((), TupleType()))

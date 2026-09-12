@@ -35,26 +35,35 @@ pinned commit; the worker, the prelude, and the kit identities are one unit.
 
 | Lane | Result |
 |---|---|
-| Offline `unittest` discover | 143 tests, all pass (29 live cases skip without Core) |
-| Live `unittest` discover | 143 tests, all pass, no skips |
+| Offline `unittest` discover | 145 tests, all pass (30 live cases skip without Core) |
+| Live `unittest` discover | 145 tests, all pass, no skips |
 | Conformance kit replay | 21 of 21 transcripts match their recordings; `noncanonical-target-hash` is recorded `diverges` by Core and reproduced as such; no prose drift |
 | Jacquard Warp suite (`jacquard/http-tests.jac`) | 47 passed, 0 failed, 0 skipped, 0 refused, seed 42 |
-| Maximal HTTP head (512-byte target, 32 lines of 1024 bytes, 65536-byte body) | parses under the 20 s test bound (about 6.5 s observed; the worker deadline is 30 s) |
-| Descriptor hygiene | the socket host, the worker wrapper, and the kit replayer leave the process's descriptor count unchanged across many connections and replays, including aborted, killed, and garbage-emitting workers (tests read `/proc/self/fd`) |
-| Cancellation and loss | a silent worker is killed at the host deadline and reported as host-owned `carrier_loss`; a worker that exits or emits garbage is reported without a fabricated Core verdict; a malformed Core frame is a local `protocol_error`; a host-built frame that does not fit the selected limits is a `host_error` after a clean shutdown |
+| Maximal HTTP head (512-byte target, 32 header lines of up to 1024 bytes, 65536-byte body) | `tests/test_http_jacquard_live.py::test_a_maximal_head_parses_within_the_worker_deadline` runs `jacquard run` on it and requires under 20 s (about 5 s observed on this machine; the adapter's default worker deadline is 30 s) |
+| Descriptor hygiene | descriptor counts read from `/proc/self/fd` are unchanged across many connections of the socket host with an in-process invoker (`test_socket_host.py::test_descriptors_are_released_across_many_connections`, `::test_ceilings_are_validated_and_bind_failure_leaks_nothing`), across kit replays including a worker that exits at once, one that emits garbage, and one killed at the deadline (`test_kit.py::test_descriptors_and_temp_files_are_released`, `::test_a_silent_worker_is_killed_at_the_deadline`), and across adapter invocations through a stand-in worker that answers, exits at once, emits garbage, or is killed at the deadline (`test_adapter.py::test_descriptors_are_released_across_invocations`); the end-to-end restart test finds no worker stderr temp files left behind |
+| Cancellation and loss | a silent worker is killed at the host deadline and reported as host-owned `carrier_loss` with the deadline reason; a worker that exits or emits garbage is reported as `carrier_loss` or `protocol_error` without a fabricated Core verdict; a malformed identity in a Core frame is a local `protocol_error` (E1601); a host-built frame that does not fit the selected limits is reported as `host_error` with reason `host_frame_refused` (`test_adapter.py`, stand-in worker; kind, reason, and code are what the tests assert) |
 | Failure mapping | all four `effect_failure` pairs, a handler exception, an unencodable handler result, an unbound operation, a wrong-typed result, and an interface mismatch map to the frozen terminals and codes (E1606, E1607, E1608, E1612, E1613, E1603) through the real worker |
 | Study persistence | saved, duplicate, and conflict outcomes; every invalid input refused with nothing written; fault-injected statement, commit, and rollback failures map to their frozen pairs and leave the store usable; a locked file fails fast |
-| End-to-end trial | byte-identical `GET /trial` across requests and a restart; `POST /response` gives 201 with a content-hash receipt, 200 on an identical repeat, 409 on a different answer; ten Jacquard-authored rejections reach no persistence operation; a restarted application still recognises the stored response; no worker temp files remain |
+| End-to-end trial | byte-identical `GET /trial` across requests and a restart; `POST /response` gives 201 with a content-hash receipt, 200 on an identical repeat, 409 on a different answer; fifteen Jacquard-authored rejections reach no persistence operation; a restarted application still recognises the stored response; a store built from a different source is refused; no worker temp files remain (`tests/test_trial_live.py`) |
 
 The test counts per file are the source of truth; a change to any number
-above is a change to this document.
+above is a change to this document. The timing figure is an observation on
+one machine, not a regenerated number; only its test bound is asserted.
 
 ## Fixture identities
 
 Identities are `HASH_V0` member hashes printed by `jacquard hash` at the
 pinned Core commit. The conformance kit's identities are in
-`conformance/host-protocol-v0/kit/kit.json`. The first-party study and trial
-declarations resolve to:
+`conformance/host-protocol-v0/kit/kit.json`. The first-party identities
+below are regenerated by
+
+```sh
+cat jacquard/http.jac jacquard/study.jac jacquard/trial.jac > .scratch/all.jac
+JACQUARD_PRELUDE=/path/to/prelude jacquard hash .scratch/all.jac
+```
+
+and `tests/test_evidence_live.py` fails when this table and that output
+disagree. The first-party study and trial declarations resolve to:
 
 | Declaration | Identity |
 |---|---|
@@ -68,7 +77,7 @@ declarations resolve to:
 | `http.parse` | `e94bf10264b8e2852109fa3cb2bb2dcf56d929e3d67e5bb9ef7b83a2c02ecea5` |
 | `http.route` | `bbb2492aa975c0ffd85a7ad14c8b96d72de647558addda58172577dbb9f8a98b` |
 | `http.render` | `e8aca049319d28754f0894da6a5c32551fc8b570bfb5fbc84f16035988f607e9` |
-| `trial.serve` | `762ffd850f95f0f1f991433cf49944ddbac9d64902820860cc3e337b4c262c4c` |
+| `trial.serve` | `c4624a5234998472dc417137360be6b43ec09cb39cd6c377bc1972ce82b5dffb` |
 
 The trial's capability envelope, pinned by `tests/test_trial_live.py`, is
 exactly one `once` operation entry: effect `Study`, operation
@@ -81,7 +90,7 @@ reaches persistence has request ordinal 1 and one accepted `ok` observation.
 |---|---|---|
 | Linux, Python 3.11, 3.12, 3.13 | supported | CI runs the offline suite on each (`.github/workflows/ci.yml`) |
 | Linux, Python 3.14 | exercised | the live suite, kit replay, and trial were run locally on 3.14.7 (Linux 7.0) |
-| macOS | development only | no CI; descriptor tests skip without `/proc`; SQLite WAL mode is recorded, not assumed |
+| macOS | development only | no CI; the descriptor-count assertions are skipped without `/proc` (the socket host tests skip, the kit and adapter tests skip only the count); SQLite WAL mode is recorded, not assumed |
 | Windows and others | no claim | see LIMITS.md |
 
 ## Non-claims
