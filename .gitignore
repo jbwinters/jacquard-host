@@ -12,3 +12,6 @@ dist/
 
 # Task Master is local planning state. The reviewable roadmap is docs/ROADMAP.md.
 .taskmaster/
+
+# Warp test cache written by `jacquard test` without --cache-dir
+test-cache/
