@@ -28,6 +28,22 @@ class HttpJacquardTest(unittest.TestCase):
         self.assertIn("http.render : (HttpResponse) ->{} Text", checked.stdout)
         self.assertIn("http.route : forall a. (HttpRequest, List (HttpRoute, a)) ->{} Option a", checked.stdout)
 
+    def test_a_maximal_head_parses_within_the_worker_deadline(self) -> None:
+        import time
+        head = "GET /" + "a" * 511 + " HTTP/1.1\r\nHost: h\r\n" + "".join(f"X{i}: " + "y" * 1015 + "\r\n" for i in range(30)) + "\r\n"
+        body = "b" * 65536
+        raw = head.replace("Host: h\r\n", "Host: h\r\nContent-Length: 65536\r\n", 1).replace("GET", "POST", 1) + body
+        with tempfile.TemporaryDirectory(prefix="jacquard-host-http-max-") as scratch:
+            probe = Path(scratch) / "max.jac"
+            escaped = raw.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+            probe.write_text((JACQUARD_DIR / "http.jac").read_text(encoding="utf-8") + f'\nprobe = http.parse("{escaped}")\nmatch probe {{ | HttpOk(HttpRequest(headers: hs, body: b)) -> (list.length(hs), text.length(b)) | HttpBad(HttpReject(status: s)) -> (s, 0) }}\n', encoding="utf-8")
+            started = time.monotonic()
+            result = core("run", str(probe))
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("(32, 65536)", result.stdout)
+        self.assertLess(elapsed, 20.0, f"maximal head took {elapsed:.1f}s")
+
     def test_warp_suite_passes_with_a_fixed_seed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="jacquard-host-http-") as scratch:
             combined = Path(scratch) / "http-all.jac"
@@ -41,7 +57,7 @@ class HttpJacquardTest(unittest.TestCase):
         self.assertIsNotNone(summary, result.stdout)
         passed, failed, skipped, refused = (int(n) for n in summary.groups())
         self.assertEqual((failed, skipped, refused), (0, 0, 0), result.stdout)
-        self.assertGreaterEqual(passed, 45)
+        self.assertEqual(passed, 47)
 
 
 if __name__ == "__main__":

@@ -63,6 +63,19 @@ http-tests.all =
       }),
       Case("Content-Length zero on POST", fn () ->
         check.eq(http-tests.status(http.parse("POST /r HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n")), 200, int.eq, int.show, "empty post")),
+      Case("inputs exactly at each ceiling are accepted", fn () -> {
+        let target = text.concat("/", http-tests.repeat("a", 511))
+        check.eq(http-tests.status(http.parse(text.join-list(["GET ", target, " HTTP/1.1\r\nHost: h\r\n\r\n"], ""))), 200, int.eq, int.show, "512-byte target")
+        check.eq(http-tests.status(http.parse(text.concat("GET / HTTP/1.1\r\nHost: h\r\n", text.concat(http-tests.repeat("X: y\r\n", 31), "\r\n")))), 200, int.eq, int.show, "32 header lines")
+        check.eq(http-tests.status(http.parse(text.concat("GET / HTTP/1.1\r\nHost: h\r\nX: ", text.concat(http-tests.repeat("y", 1021), "\r\n\r\n")))), 200, int.eq, int.show, "1024-byte line")
+        check.eq(text.length(http-tests.body(http.parse(text.concat("POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 65536\r\n\r\n", http-tests.repeat("b", 65536))))), 65536, int.eq, int.show, "65536-byte body")
+      }),
+      Case("obs-text in a header value is kept and NBSP is not trimmed", fn () -> {
+        match http.parse("GET / HTTP/1.1\r\nHost: h\r\nX: \xe9\xff\xa0\r\n\r\n") {
+          | HttpOk(request) -> check.eq(option.with-default(http.header(request, "x"), "?"), "\xe9\xff\xa0", text.eq, text.show, "value")
+          | HttpBad(_) -> check.true(False, "should parse")
+        }
+      }),
       Case("high bytes in a body are preserved", fn () -> {
         let body = "\xff\x00\x80\xfe"
         let parsed = http.parse(text.concat("POST /r HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n", body))
@@ -144,11 +157,13 @@ http-tests.all =
         let raw = text.join-list(["POST /r HTTP/1.1\r\nHost: h\r\nContent-Length: ", text.from-int(n), "\r\n\r\n", body], "")
         check.eq(http-tests.body(http.parse(raw)), body, text.eq, text.show, "body")
       }),
-      Prop("rendering never emits a bare LF and always ends with the body", fn () -> {
+      Prop("rendering never emits a bare LF in its head and always ends with the body", fn () -> {
         let n = sample(UniformInt(0, 40))
         let body = http-tests.repeat("q", n)
         let rendered = http.render(http.text-response(200, body))
-        check.true(bool.not(text.contains?(text.join-list(text.split(rendered, "\r\n"), ""), "\n")), "no bare LF")
+        let head = option.with-default(option.map(http.split-once(rendered, "\r\n\r\n"), fn (pair) -> { let (h, _) = pair
+                                                                                                         h }), "")
+        check.true(bool.not(text.contains?(text.join-list(text.split(head, "\r\n"), ""), "\n")), "no bare LF in the head")
         check.true(text.eq?(text.slice(rendered, sub(text.length(rendered), n), text.length(rendered)), body), "ends with body")
       }),
     ]),

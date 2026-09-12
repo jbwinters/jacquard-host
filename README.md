@@ -175,8 +175,17 @@ the wrong length, a GET with a body, Transfer-Encoding or Upgrade (501),
 Expect (417), and oversized input (400 or 413). `http.route` selects a
 handler by method and path and `http.path-known?` distinguishes 404 from
 405; `http.render` always emits Content-Length and Connection: close.
+Response bodies and header values must be codepoints 0..255, because the
+host writes each codepoint as one byte (a `charset=utf-8` body must already
+be UTF-8 bytes); the host refuses anything above. Response headers are
+rendered verbatim, so first-party code must not put CR or LF in them.
+`http.header` returns a value only when the header appears exactly once;
+`http.header-values` lists every occurrence. `Host:` with an empty value and
+obs-text bytes (0x80..0xff) in header values are accepted as RFC 9112 allows.
+The host's request ceiling (default 65536 bytes, head included) bounds the
+effective body size below the parser's own 65536-byte ceiling.
 
-`jacquard/http-tests.jac` is the Warp suite (45 cases and properties). Run
+`jacquard/http-tests.jac` is the Warp suite (47 cases and properties). Run
 it against the concatenation of the two files, because Jacquard has no
 import syntax:
 
