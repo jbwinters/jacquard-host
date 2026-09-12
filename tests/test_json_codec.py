@@ -53,7 +53,13 @@ class DecodeObjectTest(unittest.TestCase):
 
     def test_absurd_nesting_is_a_limit_not_a_crash(self) -> None:
         with self.assertRaises(LimitExceeded):
-            decode_object(b"[" * 100000 + b"]" * 100000 if False else b'{"a":' + b"[" * 100000 + b"]" * 100000 + b"}", max_depth=64)
+            decode_object(b'{"a":' + b"[" * 100000 + b"]" * 100000 + b"}", max_depth=64)
+
+    def test_numbers_follow_the_core_rule(self) -> None:
+        self.assertEqual(decode_object(b'{"a":4611686018427387903,"b":-4611686018427387904}', max_depth=64), {"a": 2**62 - 1, "b": -(2**62)})
+        for payload in (b'{"a":1.5}', b'{"a":1e5}', b'{"a":4611686018427387904}', b'{"a":-4611686018427387905}', b'{"a":' + b"9" * 4301 + b"}", b'{"a":[' + b"9" * 5000 + b"]}"):
+            with self.subTest(payload=payload[:40]), self.assertRaises(MalformedFrame):
+                decode_object(payload, max_depth=64)
 
 
 class EncodeObjectTest(unittest.TestCase):

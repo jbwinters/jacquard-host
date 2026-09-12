@@ -165,6 +165,26 @@ class ReplayWorkerTest(unittest.TestCase):
         self.assertEqual(observed.skipped_after_terminal, 0)
         self.assertEqual([frame["kind"] for frame in observed.core_frames], ["core_hello", "effect_request", "outcome"])
 
+    def test_descriptors_and_temp_files_are_released(self) -> None:
+        kit = load_kit()
+        transcript = kit.transcript("pure-success")
+        before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+        play([sys.executable, "-c", "pass"], "unused-store", transcript, deadline_seconds=5)
+        play([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'garbage'); sys.stdout.flush()"], "unused-store", transcript, deadline_seconds=5)
+        if before is not None:
+            self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        with self.assertRaises(OSError):
+            play(["/nonexistent/jacquard-worker"], "unused-store", transcript, deadline_seconds=5)
+        import glob
+        import tempfile
+        self.assertEqual(glob.glob(os.path.join(tempfile.gettempdir(), "jacquard-host-kit-stderr-*")), [])
+
+    def test_unknown_transcript_names_are_an_error_not_a_pass(self) -> None:
+        with self.assertRaises(KeyError):
+            replay_names = ["does-not-exist"]
+            from jacquard_host.kit import replay
+            replay([sys.executable, str(REPLAY_WORKER)], "unused-store", load_kit(), names=replay_names)
+
     def test_a_silent_worker_is_killed_at_the_deadline(self) -> None:
         kit = load_kit()
         transcript = kit.transcript("pure-success")

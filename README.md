@@ -38,8 +38,9 @@ boundary and the evidence required to widen it.
 
 ## Current compatibility
 
-The adapter is pinned to Jacquard Core 0.2.0 and to the exact conformance-kit
-files of Core's `jacquard-host-v0` protocol, vendored under
+The adapter is pinned to the exact conformance-kit files of Core's
+`jacquard-host-v0` protocol at a reviewed but not yet merged Core commit
+(the worker and kit postdate the `jacquard-core-0.2.0` tag), vendored under
 `conformance/host-protocol-v0/` and digest-checked by the test suite. The pin,
 its provisional status, and the refresh procedure are in
 [COMPATIBILITY.md](docs/COMPATIBILITY.md).

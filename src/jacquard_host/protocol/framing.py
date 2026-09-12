@@ -10,7 +10,7 @@ evidence rather than a Core result.
 from __future__ import annotations
 
 import os
-import select
+import selectors
 import time
 from typing import BinaryIO
 
@@ -56,9 +56,10 @@ class FrameReader:
                 remaining = self._deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("frame read deadline expired")
-                ready, _, _ = select.select([self._fd], [], [], remaining)
-                if not ready:
-                    raise TimeoutError("frame read deadline expired")
+                with selectors.DefaultSelector() as selector:
+                    selector.register(self._fd, selectors.EVENT_READ)
+                    if not selector.select(remaining):
+                        raise TimeoutError("frame read deadline expired")
             try:
                 chunk = os.read(self._fd, 65536)
             except OSError as error:
@@ -75,16 +76,6 @@ class FrameReader:
         data = bytes(self._buffer[:count])
         del self._buffer[:count]
         return data
-
-    def at_eof(self) -> bool:
-        """True when no byte is buffered and the descriptor has reported EOF."""
-        if self._buffer:
-            return False
-        try:
-            self._fill(1)
-        except TimeoutError:
-            return False
-        return self._eof and not self._buffer
 
     def read_frame(self, *, max_frame_bytes: int) -> bytes:
         """Read one payload, or raise :class:`CarrierLoss` / :class:`LimitExceeded`."""

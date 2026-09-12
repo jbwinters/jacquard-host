@@ -213,7 +213,9 @@ def host_message_suffix_honoured(transcript: dict[str, Any], observed: Observed)
     messages = [
         step["frame"]["message"]
         for step in transcript["host_input"]
-        if step["direction"] == "host_to_core" and step.get("frame", {}).get("kind") == "effect_failure"
+        if step["direction"] == "host_to_core"
+        and not step.get("after_terminal")
+        and step.get("frame", {}).get("kind") == "effect_failure"
     ]
     terminal = next((frame for frame in observed.core_frames if is_terminal(frame)), None)
     if not messages or terminal is None:
@@ -272,17 +274,24 @@ def play(
     ``["jacquard"]``; the ``host worker --store STORE`` arguments are appended.
     """
     deadline = time.monotonic() + deadline_seconds
-    stderr_path = Path(tempfile.mkstemp(prefix="jacquard-host-kit-stderr-")[1])
+    stderr_fd, stderr_name = tempfile.mkstemp(prefix="jacquard-host-kit-stderr-")
+    stderr_path = Path(stderr_name)
     frames: list[dict[str, Any]] = []
     state = {"terminal": False, "refusal": None, "skipped": 0, "write_failure": False, "input_open": True}
-    with stderr_path.open("wb") as stderr_stream:
+    try:
         process = subprocess.Popen(
             [*command, "host", "worker", "--store", os.fspath(store)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=stderr_stream,
+            stderr=stderr_fd,
             env=env,
         )
+    except OSError:
+        os.close(stderr_fd)
+        stderr_path.unlink(missing_ok=True)
+        raise
+    # the child holds its own copy of the descriptor; release the parent's
+    os.close(stderr_fd)
     assert process.stdin is not None and process.stdout is not None
     reader = FrameReader(process.stdout.fileno(), deadline=deadline)
 
@@ -431,6 +440,10 @@ def replay(
     env: dict[str, str] | None = None,
 ) -> list[Replay]:
     """Play every transcript (or the named ones) and compare each with its recording."""
+    if names is not None:
+        unknown = sorted(set(names) - {transcript["name"] for transcript in kit.transcripts})
+        if unknown:
+            raise KeyError(f"the kit has no transcript named {', '.join(unknown)}")
     results = []
     for transcript in kit.transcripts:
         if names is not None and transcript["name"] not in names:
@@ -506,14 +519,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     kit = load_kit(args.kit)
     verify_pins(kit)
     command = [args.jacquard]
-    with tempfile.TemporaryDirectory(prefix="jacquard-host-kit-store-") as scratch:
-        store = args.store
-        if store is None:
-            if not args.prelude:
-                parser.error("--prelude (or JACQUARD_PRELUDE) is required to build the kit store")
-            store = os.path.join(scratch, "store")
-            build_store(command, fixtures=kit.fixtures, prelude=args.prelude, store=store)
-        results = replay(command, store, kit, names=args.only, deadline_seconds=args.deadline)
+    try:
+        with tempfile.TemporaryDirectory(prefix="jacquard-host-kit-store-") as scratch:
+            store = args.store
+            if store is None:
+                if not args.prelude:
+                    parser.error("--prelude (or JACQUARD_PRELUDE) is required to build the kit store")
+                store = os.path.join(scratch, "store")
+                build_store(command, fixtures=kit.fixtures, prelude=args.prelude, store=store)
+            results = replay(command, store, kit, names=args.only, deadline_seconds=args.deadline)
+    except (OSError, RuntimeError, KeyError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if not results:
+        print("error: no transcript was replayed", file=sys.stderr)
+        return 2
     failures = 0
     for result in results:
         mark = "ok" if result.matches_recording else "MISMATCH"

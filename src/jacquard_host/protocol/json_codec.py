@@ -3,10 +3,14 @@
 A payload is accepted only when it is valid UTF-8 with no encoded surrogate,
 one JSON object, free of duplicate keys at every depth, free of ``NaN`` and
 ``Infinity`` literals, free of lone surrogate escapes, and no deeper than the
-active ``max_json_depth``. Anything else fails closed: shape problems are
-E1601 and the depth limit is E1602. Key order and insignificant whitespace
-carry no meaning, so encoding is canonical (sorted keys, no spaces) purely
-for determinism; nothing hashes these bytes as evidence.
+active ``max_json_depth``. JSON numbers follow Core's ``validate_json`` rule:
+only integers in the released 63-bit range are admitted anywhere in a frame,
+so fraction or exponent spellings and unbounded integers are E1601 here, not
+deferred to envelope validation. Anything else fails closed: shape problems
+are E1601 and the depth limit is E1602. Insignificant whitespace around the
+value is accepted, as Core's reader accepts it; key order carries no meaning,
+so encoding is canonical (sorted keys, no spaces) purely for determinism.
+Nothing hashes these bytes as evidence.
 """
 
 from __future__ import annotations
@@ -15,6 +19,9 @@ import json
 from typing import Any
 
 from jacquard_host.protocol.errors import LimitExceeded, MalformedFrame
+
+INT_MIN = -(1 << 62)
+INT_MAX = (1 << 62) - 1
 
 
 def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -45,10 +52,10 @@ def _check(value: Any, depth: int, max_depth: int) -> None:
     elif isinstance(value, str):
         _check_text(value)
     elif isinstance(value, float):
-        # json.loads only produces floats for fraction/exponent spellings; the
-        # protocol has no such field, but the value is at least finite here.
-        if value != value or value in (float("inf"), float("-inf")):
-            raise MalformedFrame("a JSON number is not finite")
+        raise MalformedFrame("a JSON number uses a fraction or exponent spelling")
+    elif isinstance(value, int) and not isinstance(value, bool):
+        if value < INT_MIN or value > INT_MAX:
+            raise MalformedFrame("a JSON integer is outside the released 63-bit range")
 
 
 def _check_text(text: str) -> None:
@@ -68,6 +75,10 @@ def decode_object(payload: bytes, *, max_depth: int) -> dict[str, Any]:
         value = json.loads(text, object_pairs_hook=_reject_duplicates, parse_constant=_reject_constant)
     except json.JSONDecodeError:
         raise MalformedFrame("the payload is not one JSON value") from None
+    except ValueError:
+        # CPython refuses integer literals beyond its digit limit with a bare
+        # ValueError; Core classifies the same literal as E1601.
+        raise MalformedFrame("a JSON integer literal is unbounded") from None
     except RecursionError:
         raise LimitExceeded("JSON nesting exceeds max_json_depth") from None
     if not isinstance(value, dict):
