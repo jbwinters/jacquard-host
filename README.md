@@ -222,6 +222,15 @@ store is built once from the assembled source and its digest is recorded;
 a later start with a different source is refused rather than repopulated in
 place. This is synthetic data on loopback, not the readability study.
 
+## Evidence, authority, and requirements
+
+[docs/EVIDENCE.md](docs/EVIDENCE.md) records the reproducible results at the
+pinned Core commit, the fixture identities, and the platform matrix;
+[docs/AUTHORITY.md](docs/AUTHORITY.md) inventories every outside action the
+host performs and which of them Jacquard can trigger (one);
+[docs/CORE-REQUIREMENTS.md](docs/CORE-REQUIREMENTS.md) is the versioned report
+of what Core could change to remove host workarounds.
+
 ## Development
 
 There are no third-party runtime dependencies. The offline suite needs only

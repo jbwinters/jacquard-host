@@ -7,6 +7,7 @@ language implementation. Before changing it, read:
 2. `docs/ROADMAP.md`
 3. `docs/LIMITS.md`
 4. `docs/COMPATIBILITY.md`
+5. `docs/EVIDENCE.md`, `docs/AUTHORITY.md`, and `docs/CORE-REQUIREMENTS.md`
 
 Read the pinned Jacquard host-boundary specification and conformance fixtures
 before implementing any protocol behavior. If the pin still says that no
