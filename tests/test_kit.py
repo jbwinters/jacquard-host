@@ -188,11 +188,14 @@ class ReplayWorkerTest(unittest.TestCase):
     def test_a_silent_worker_is_killed_at_the_deadline(self) -> None:
         kit = load_kit()
         transcript = kit.transcript("pure-success")
+        before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
         observed = play([sys.executable, "-c", "import time; time.sleep(30)"], "unused-store", transcript, deadline_seconds=0.5)
         self.assertEqual(observed.core_frames, [{"kind": "fake-host-timeout"}])
         self.assertIsNone(observed.exit_code)
         self.assertIsNotNone(observed.signal)
         self.assertFalse(conforms(transcript, observed))
+        if before is not None:
+            self.assertEqual(len(os.listdir("/proc/self/fd")), before, "the killed worker's descriptors were not released")
 
 
 if __name__ == "__main__":
