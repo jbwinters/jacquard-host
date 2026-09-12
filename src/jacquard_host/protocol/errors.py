@@ -49,3 +49,15 @@ class OrderViolation(ProtocolError):
     """A message would violate the protocol state machine (E1608)."""
 
     code = "E1608"
+
+
+class UnsupportedBoundary(ProtocolError):
+    """A type or value has no ``jacquard-host-v0`` encoding (E1604)."""
+
+    code = "E1604"
+
+
+class UnsupportedOperation(ProtocolError):
+    """A requested operation is not in the configured registry (E1606)."""
+
+    code = "E1606"
