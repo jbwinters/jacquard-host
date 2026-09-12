@@ -160,6 +160,31 @@ print(server.address)          # ("127.0.0.1", <port>)
 server.serve_forever()         # strictly one request at a time; server.stop() closes the listener and ends it
 ```
 
+## The HTTP/1.1 subset in Jacquard
+
+`jacquard/http.jac` is the parser, validator, router, and response renderer
+(roadmap H1.1), written entirely in Jacquard so that every HTTP meaning
+stays in application code. It accepts GET and POST, an origin-form target,
+HTTP/1.1, CRLF line endings, exactly one Host header, and an optional
+explicit Content-Length body within fixed ceilings (32 header lines, 1024
+bytes per line, 512-byte target, 65536-byte body). It rejects everything
+else with a status the application renders: other methods (501), other
+versions (505), bare LF or CR, obsolete line folding, repeated or missing
+Host, repeated or malformed Content-Length, a body without a length or of
+the wrong length, a GET with a body, Transfer-Encoding or Upgrade (501),
+Expect (417), and oversized input (400 or 413). `http.route` selects a
+handler by method and path and `http.path-known?` distinguishes 404 from
+405; `http.render` always emits Content-Length and Connection: close.
+
+`jacquard/http-tests.jac` is the Warp suite (45 cases and properties). Run
+it against the concatenation of the two files, because Jacquard has no
+import syntax:
+
+```sh
+cat jacquard/http.jac jacquard/http-tests.jac > .scratch/http-all.jac
+jacquard test .scratch/http-all.jac --seed 42
+```
+
 ## Development
 
 There are no third-party runtime dependencies. The offline suite needs only
