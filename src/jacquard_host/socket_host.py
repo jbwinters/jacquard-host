@@ -16,10 +16,15 @@ be below 256) becomes byte ``c``. This is lossless, keeps every byte
 inspectable from Jacquard, and needs no new boundary value.
 
 Request framing is the one piece of HTTP the host must look at to know when
-a request ends: it reads the head up to the first blank line, then exactly
-``Content-Length`` more bytes when that header is present. A request that
-carries ``Transfer-Encoding`` is not framed here; the head alone is passed
-through and the connection is closed after the response.
+a request ends: it reads the head up to the first CRLFCRLF, then exactly
+``Content-Length`` more bytes when that header is present. The host frames
+leniently and the Jacquard parser judges: the first ``Content-Length`` wins
+when the header repeats, leading zeros are read as their value, and a head
+that carries ``Transfer-Encoding`` is not framed at all (the head alone is
+passed through). ``jacquard/http.jac`` rejects every one of those shapes, so
+a request the host framed leniently never reaches an application handler.
+There is no keep-alive: bytes left unread when the connection closes are
+dropped and never parsed as a second request.
 """
 
 from __future__ import annotations
@@ -29,8 +34,8 @@ import selectors
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from jacquard_host.adapter import Host, InvocationResult
 from jacquard_host.protocol.envelopes import Interface
@@ -38,20 +43,37 @@ from jacquard_host.protocol.values import Hash
 from jacquard_host.registry import OperationRegistry
 
 HEAD_END = b"\r\n\r\n"
-_CONTENT_LENGTH = re.compile(rb"^content-length:[ \t]*([0-9]+)[ \t]*\r?$", re.IGNORECASE | re.MULTILINE)
+# at most 18 digits: anything longer cannot fit any ceiling and is refused before conversion
+_CONTENT_LENGTH = re.compile(rb"^content-length:[ \t]*([0-9]{1,18})[ \t]*\r?$", re.IGNORECASE | re.MULTILINE)
+_CONTENT_LENGTH_ANY = re.compile(rb"^content-length:", re.IGNORECASE | re.MULTILINE)
 _TRANSFER_ENCODING = re.compile(rb"^transfer-encoding:", re.IGNORECASE | re.MULTILINE)
+# Core's Text boundary: every request byte may become two UTF-8 bytes
+MAX_REQUEST_BYTES_CEILING = 131072
 
 
 @dataclass(frozen=True)
 class Ceilings:
-    """Resource ceilings the host enforces without interpreting the request."""
+    """Resource ceilings the host enforces without interpreting the request.
+
+    The worker's own deadline belongs to :class:`~jacquard_host.adapter.Host`
+    (``deadline_seconds``), not here.
+    """
 
     max_request_bytes: int = 65536
     max_head_bytes: int = 16384
     head_timeout: float = 5.0
     request_timeout: float = 10.0
     response_timeout: float = 10.0
-    worker_deadline: float = 30.0
+    max_served_records: int = 256
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_request_bytes <= MAX_REQUEST_BYTES_CEILING:
+            raise ValueError(f"max_request_bytes must be 1..{MAX_REQUEST_BYTES_CEILING} so the request fits Core's Text boundary")
+        if self.max_head_bytes < 1 or self.max_served_records < 1:
+            raise ValueError("ceilings must be positive")
+        for name in ("head_timeout", "request_timeout", "response_timeout"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
 
 
 @dataclass
@@ -59,7 +81,7 @@ class Served:
     """Host-owned evidence for one accepted connection."""
 
     peer: tuple[str, int]
-    outcome: str  # served | truncated | oversized | timeout | invocation_failed | disconnected | response_unencodable
+    outcome: str  # served | truncated | oversized | timeout | invocation_failed | disconnected | response_unencodable | host_error
     request_bytes: int = 0
     response_bytes: int = 0
     invocation: InvocationResult | None = None
@@ -117,6 +139,9 @@ def read_request(conn: socket.socket, ceilings: Ceilings) -> bytes:
         match = _CONTENT_LENGTH.search(head)
         if match:
             body_length = int(match.group(1))
+        elif _CONTENT_LENGTH_ANY.search(head):
+            # a Content-Length the host cannot frame (too many digits, not digits) cannot be read safely
+            raise RequestError("oversized", "unframeable Content-Length")
     total = head_end + body_length
     if total > ceilings.max_request_bytes:
         raise RequestError("oversized", "body")
@@ -145,11 +170,16 @@ class SerialSocketHost:
         self._invoker = invoker
         self._ceilings = ceilings
         self._listener = socket.socket(socket.AF_INET6 if bind[0] == "::1" else socket.AF_INET, socket.SOCK_STREAM)
-        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._listener.bind(bind)
-        self._listener.listen(backlog)
-        self._listener.setblocking(False)
+        try:
+            self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._listener.bind(bind)
+            self._listener.listen(backlog)
+            self._listener.setblocking(False)
+        except OSError:
+            self._listener.close()
+            raise
         self._stop = threading.Event()
+        self._serving = threading.Lock()  # one connection at a time, whoever calls
         self.served: list[Served] = []
 
     @classmethod
@@ -174,7 +204,8 @@ class SerialSocketHost:
         return self._listener.getsockname()[:2]
 
     def stop(self) -> None:
-        self._stop.set()
+        """Stop accepting and close the listener; a queued connection is reset, not served."""
+        self.close()
 
     def close(self) -> None:
         self._stop.set()
@@ -192,20 +223,31 @@ class SerialSocketHost:
     # --- serving -------------------------------------------------------
 
     def serve_one(self, *, accept_timeout: float | None = None) -> Served | None:
-        """Accept and serve one connection; None if stopped or nothing arrived in time."""
+        """Accept and serve one connection; None if stopped or nothing arrived in time.
+
+        Calls from several threads are serialised: the listener serves one
+        connection at a time whoever is calling.
+        """
         deadline = None if accept_timeout is None else time.monotonic() + accept_timeout
-        with selectors.DefaultSelector() as selector:
-            selector.register(self._listener, selectors.EVENT_READ)
-            while not self._stop.is_set():
-                wait = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
-                if selector.select(wait):
-                    try:
-                        conn, peer = self._listener.accept()
-                    except OSError:
-                        continue
-                    return self._serve(conn, peer[:2])
-                if deadline is not None and time.monotonic() >= deadline:
-                    return None
+        with self._serving:
+            if self._stop.is_set():
+                return None
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(self._listener, selectors.EVENT_READ)
+                    while not self._stop.is_set():
+                        wait = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
+                        if selector.select(wait):
+                            try:
+                                conn, peer = self._listener.accept()
+                            except OSError:
+                                continue
+                            return self._serve(conn, peer[:2])
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return None
+            except (OSError, ValueError):
+                # the listener was closed underneath a blocked accept
+                return None
         return None
 
     def serve_forever(self) -> None:
@@ -230,14 +272,23 @@ class SerialSocketHost:
                     conn.settimeout(self._ceilings.response_timeout)
                     try:
                         conn.sendall(response)
-                        served.response_bytes = len(response)
-                        conn.shutdown(socket.SHUT_RDWR)
-                    except (socket.timeout, OSError) as error:
+                    except socket.timeout:
+                        raise RequestError("timeout", "response") from None
+                    except OSError as error:
                         raise RequestError("disconnected", f"response: {error.__class__.__name__}") from None
+                    served.response_bytes = len(response)
+                    try:
+                        conn.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass  # the peer already went away after the full response was written
                 except RequestError as error:
                     served.outcome = error.outcome
                     served.detail = error.detail
+                except Exception as error:  # noqa: BLE001 - a client must never take the host down
+                    served.outcome = "host_error"
+                    served.detail = f"{type(error).__name__}"
         finally:
             served.elapsed_seconds = time.monotonic() - started
             self.served.append(served)
+            del self.served[: -self._ceilings.max_served_records]
         return served

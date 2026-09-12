@@ -141,9 +141,10 @@ with StudyStore("study.sqlite") as study:
 ## The serial socket host
 
 `jacquard_host.socket_host.SerialSocketHost` owns one loopback listener and
-serves one connection at a time. For each connection it reads one bounded
-request (the head up to the first blank line, then exactly `Content-Length`
-more bytes when that header is present), hands the raw bytes to one worker as
+serves one connection at a time, whichever thread calls it. For each
+connection it reads one bounded request (the head up to the first CRLFCRLF,
+then exactly `Content-Length` more bytes when that header is present), hands
+the raw bytes to one worker as
 Latin-1 `Text` through `Host.invoke`, writes back the bytes the term returned,
 and closes. It enforces byte and time ceilings for its own resource safety and
 does nothing else: on a ceiling violation, an early disconnect, or a failed
@@ -156,7 +157,7 @@ from jacquard_host.socket_host import Ceilings, SerialSocketHost
 
 server = SerialSocketHost.for_term(host, names["serve"], interface, ceilings=Ceilings(max_request_bytes=65536))
 print(server.address)          # ("127.0.0.1", <port>)
-server.serve_forever()         # strictly one request at a time; server.stop() ends it
+server.serve_forever()         # strictly one request at a time; server.stop() closes the listener and ends it
 ```
 
 ## Development

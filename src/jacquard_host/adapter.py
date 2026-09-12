@@ -173,10 +173,12 @@ class Host:
                 result.host_evidence = {
                     "schema": "jacquard-host-python-evidence-v0",
                     "code": refused.error.code,
-                    "reason": "invoke_refused_locally",
+                    "reason": "invoke_refused_locally" if session.state is State.CLOSED else "host_frame_refused",
                     "detail": refused.error.message,
                     "state": session.state.value,
                 }
+                if session.state is not State.CLOSED:
+                    worker.kill()
             except ProtocolError as error:
                 result.kind = "protocol_error"
                 result.host_evidence = {
@@ -198,7 +200,14 @@ class Host:
 
     def _send(self, session_frame: dict[str, Any], worker: WorkerProcess, result: InvocationResult, limits: Mapping[str, int]) -> None:
         result.host_frames.append(session_frame)
-        worker.write_frame(session_frame, limits)
+        try:
+            worker.write_frame(session_frame, limits)
+        except CarrierLoss:
+            raise
+        except ProtocolError as error:
+            # the host's own frame does not fit the selected limits; Core did nothing wrong
+            result.host_frames.pop()
+            raise _HostRefused(error) from None
 
     def _exchange(self, session: HostSession, worker: WorkerProcess, registry: OperationRegistry, result: InvocationResult, first_action) -> None:
         hello = worker.read_frame(HARD_LIMITS)
