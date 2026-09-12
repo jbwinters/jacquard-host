@@ -124,6 +124,49 @@ class CoreFrameTest(unittest.TestCase):
             parse_core_frame({**fatal, "diagnostics": [bad_diag]}, limits=HARD_LIMITS)
         with self.assertRaises(MalformedFrame):
             parse_core_frame({**fatal, "diagnostics": []}, limits=HARD_LIMITS)
+        # identities in Core frames fail closed as E1601, never as a Python ValueError
+        with self.assertRaises(MalformedFrame):
+            parse_core_frame({**request, "effect": request["effect"].upper()}, limits=HARD_LIMITS)
+        with self.assertRaises(MalformedFrame):
+            parse_core_frame({**request, "operation": 7}, limits=HARD_LIMITS)
+        with self.assertRaises(MalformedFrame):
+            parse_core_frame({**outcome, "invocation_id": 0}, limits=HARD_LIMITS)
+
+    def test_evidence_and_diagnostic_limits_fail_closed(self) -> None:
+        import copy
+        base = KIT.transcript("one-once-effect-success")["core_output"][2]
+        def mutated(path, value):
+            frame = copy.deepcopy(base)
+            node = frame
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = value
+            return frame
+        for path, value in (
+            (("evidence", "core", "target"), "not-an-object"),
+            (("evidence", "core", "target", "kind"), "module-v0"),
+            (("evidence", "core", "interface"), "x"),
+            (("evidence", "core", "capabilities", "operations", 0, "mode"), "multi"),
+            (("evidence", "core", "effect_requests", 0, "effect"), "Z" * 64),
+            (("evidence", "core", "effect_requests", 0, "ordinal"), 2),
+            (("evidence", "host_observations", "responses", 0, "ordinal"), 2),
+            (("evidence", "host_observations", "responses", 0, "category"), "maybe"),
+            (("evidence", "host_observations", "responses", 0, "completion"), "done"),
+            (("evidence", "core", "terminal"), "finished"),
+        ):
+            with self.subTest(path=path), self.assertRaises(MalformedFrame):
+                parse_core_frame(mutated(path, value), limits=HARD_LIMITS)
+        refused = KIT.transcript("refused-authority")["core_output"][2]
+        big = copy.deepcopy(refused)
+        big["result"]["diagnostics"][0]["cause"] = "x" * 70000
+        with self.assertRaises(LimitExceeded):
+            parse_core_frame(big, limits=HARD_LIMITS)
+        parse_core_frame(big, limits={**HARD_LIMITS, "max_diagnostic_bytes": 80000})
+        with_contrast = copy.deepcopy(refused)
+        with_contrast["result"]["diagnostics"][0]["contrast"] = {"mistaken": "a", "intended": "b"}
+        parsed = parse_core_frame(with_contrast, limits=HARD_LIMITS)
+        assert isinstance(parsed, Outcome)
+        self.assertEqual(parsed.diagnostics[0].contrast, {"mistaken": "a", "intended": "b"})
 
 
 if __name__ == "__main__":

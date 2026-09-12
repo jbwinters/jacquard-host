@@ -33,6 +33,8 @@ class HostFailure(Exception):
     def __init__(self, category: str, completion: str, message: str = "") -> None:
         if (category, completion) not in FAILURE_PAIRS:
             raise ValueError(f"({category}, {completion}) is not an allowed effect_failure pair")
+        if not isinstance(message, str):
+            raise ValueError("a host failure message must be a str (already redacted)")
         super().__init__(f"{category}/{completion}: {message}")
         self.category = category
         self.completion = completion

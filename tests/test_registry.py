@@ -51,6 +51,13 @@ class RegistryTest(unittest.TestCase):
     def test_invalid_pairs_and_duplicate_bindings_are_refused(self) -> None:
         with self.assertRaises(ValueError):
             HostFailure("refused_authority", "unknown")
+        with self.assertRaises(ValueError):
+            HostFailure("outside_failure", "failed", None)  # type: ignore[arg-type]
+        registry = OperationRegistry()
+        registry.bind(IDS["kit-world"], IDS["send"], lambda body: (_ for _ in ()).throw(HostFailure("outside_failure", "failed", None)))
+        failure = registry.dispatch(REQUEST).failure
+        assert failure is not None
+        self.assertEqual((failure.category, failure.completion), ("completion_unknown", "unknown"))
         registry = OperationRegistry()
         registry.bind(IDS["kit-world"], IDS["send"], lambda body: body)
         with self.assertRaises(ValueError):

@@ -114,12 +114,16 @@ def _kind(value: Any, what: str) -> str:
     return kind
 
 
-def _hash(value: Any, context: str) -> Hash:
+def parse_hash(value: Any, context: str) -> Hash:
+    """Decode one canonical identity from a frame, failing closed with E1601."""
     if not isinstance(value, str):
         raise MalformedFrame(f"the {context} must be one HASH_V0 string")
     if not _is_hex64(value):
         raise MalformedFrame(f"the {context} must be exactly 64 lowercase hexadecimal digits")
     return Hash(value)
+
+
+_hash = parse_hash
 
 
 def _list(value: Any, budget: Budget, *, arguments: bool, context: str) -> list[Any]:

@@ -36,6 +36,7 @@ class State(Enum):
     SHUTTING_DOWN = "shutting_down"  # shutdown sent, expecting shutdown_ack
     RUNNING = "running"  # invoke sent, Core computing
     WAITING = "waiting"  # effect_request received, host owes one response
+    FINISHING = "finishing"  # failure or cancel sent; only a terminal frame may follow
     CLOSED = "closed"  # a terminal frame was observed
 
 
@@ -73,16 +74,18 @@ class HostSession:
             self._close(parsed)
             return parsed
         if isinstance(parsed, Fatal):
-            if self.state not in (State.NEGOTIATING, State.SELECTED, State.SHUTTING_DOWN, State.RUNNING):
+            if self.state not in (State.NEGOTIATING, State.SELECTED, State.SHUTTING_DOWN, State.RUNNING, State.FINISHING):
                 raise OrderViolation("fatal arrived while a response was outstanding")
             self._close(parsed)
             return parsed
         if isinstance(parsed, Outcome):
-            if self.state not in (State.RUNNING, State.WAITING):
+            if self.state not in (State.RUNNING, State.WAITING, State.FINISHING):
                 raise OrderViolation("outcome arrived without a live invocation")
             self._close(parsed)
             return parsed
         if isinstance(parsed, EffectRequest):
+            if self.state is State.FINISHING:
+                raise OrderViolation("effect_request arrived after the host closed the invocation with a failure or cancel")
             if self.state is not State.RUNNING:
                 raise OrderViolation("effect_request arrived while another request was outstanding or no invocation was live")
             expected = len(self.requests) + 1
@@ -134,25 +137,27 @@ class HostSession:
         self.state = State.RUNNING
         return frame
 
-    def _respond(self, frame: dict[str, Any]) -> dict[str, Any]:
+    def _respond(self, frame: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
         self.responses.append(frame)
         self._pending = None
-        self.state = State.RUNNING
+        # a failure or cancel closes the slot for good: Core answers with one outcome
+        self.state = State.FINISHING if terminal else State.RUNNING
         return frame
 
     def respond_ok(self, value: Any) -> dict[str, Any]:
         self._require(State.WAITING, action="effect_ok")
         assert self._pending is not None
-        return self._respond(envelopes.effect_ok(self._pending.ordinal, value, limits=self.limits))
+        return self._respond(envelopes.effect_ok(self._pending.ordinal, value, limits=self.limits), terminal=False)
 
     def respond_failure(self, category: str, completion: str, message: str) -> dict[str, Any]:
         self._require(State.WAITING, action="effect_failure")
         assert self._pending is not None
         return self._respond(
-            envelopes.effect_failure(self._pending.ordinal, category, completion, message, limits=self.limits)
+            envelopes.effect_failure(self._pending.ordinal, category, completion, message, limits=self.limits),
+            terminal=True,
         )
 
     def cancel(self, reason: str, completion: str) -> dict[str, Any]:
         self._require(State.WAITING, action="cancel")
         assert self._pending is not None
-        return self._respond(envelopes.cancel(self._pending.ordinal, reason, completion))
+        return self._respond(envelopes.cancel(self._pending.ordinal, reason, completion), terminal=True)

@@ -44,13 +44,31 @@ def _run(command: Sequence[str], args: Sequence[str], *, prelude: str | os.PathL
     return completed.stdout
 
 
-def hash_file(path: str | os.PathLike[str], *, command: Sequence[str] = DEFAULT_COMMAND, prelude: str | os.PathLike[str] | None = None) -> dict[str, Hash]:
-    """Member identities of every top-level form in ``path``, keyed by store name."""
-    names: dict[str, Hash] = {}
+def hash_members(path: str | os.PathLike[str], *, command: Sequence[str] = DEFAULT_COMMAND, prelude: str | os.PathLike[str] | None = None) -> list[tuple[int, str, Hash]]:
+    """Every ``(form index, store name, identity)`` line ``jacquard hash`` prints, in order.
+
+    A type and a constructor may share a name (``type Wrapper = | Wrapper Text``);
+    Core prints the type member first. Use this list when a constructor's
+    identity is needed as a value.
+    """
+    members: list[tuple[int, str, Hash]] = []
     for line in _run(command, ["hash", os.fspath(path)], prelude=prelude).splitlines():
         match = _HASH_LINE.match(line.strip())
         if match:
-            names[match.group(2)] = Hash(match.group(3))
+            members.append((int(match.group(1)), match.group(2), Hash(match.group(3))))
+    return members
+
+
+def hash_file(path: str | os.PathLike[str], *, command: Sequence[str] = DEFAULT_COMMAND, prelude: str | os.PathLike[str] | None = None) -> dict[str, Hash]:
+    """Member identities of every top-level form in ``path``, keyed by store name.
+
+    When a name is printed more than once the first identity is kept, which
+    is the type for a type/constructor pair; signatures only ever name types
+    and effects, so that is the identity :func:`parse_signature` needs.
+    """
+    names: dict[str, Hash] = {}
+    for _, name, identity in hash_members(path, command=command, prelude=prelude):
+        names.setdefault(name, identity)
     return names
 
 
@@ -173,6 +191,8 @@ def parse_signature(text: str, names: Mapping[str, Hash]) -> Interface:
     Only the v0 subset is accepted: positional first-order parameters, a
     closed effect row, nominal types with type arguments, tuples, and unit.
     Type variables, arrows inside data, and open rows raise
-    :class:`SignatureError`.
+    :class:`SignatureError`. A one-item tuple type cannot be expressed: the
+    checker prints it as ``(Int)``, which this grammar reads as plain ``Int``;
+    build such an interface by hand with :class:`TupleType`.
     """
     return _Parser(_tokens(text), names).interface()

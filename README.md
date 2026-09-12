@@ -79,7 +79,8 @@ from jacquard_host.adapter import Host
 from jacquard_host.identities import hash_file, parse_signature, signatures
 from jacquard_host.registry import HostFailure, OperationRegistry
 
-names = hash_file("decls.jac") | hash_file(f"{prelude}/01-prim.jqd")
+prelude = "/path/to/jacquard-lang/prelude"      # the prelude of the pinned Core build
+names = hash_file("decls.jac", prelude=prelude) | hash_file(f"{prelude}/01-prim.jqd")
 registry = OperationRegistry()
 
 @registry.operation(names["documents"], names["read-pdf"])
@@ -96,6 +97,10 @@ if result.ok:
 else:
     print(result.terminal, result.primary_code, result.diagnostics[0].summary)
 ```
+
+`01-prim.jqd` declares `Int`, `Real`, and `Text`; a signature that mentions
+another prelude type needs that type's file hashed too (`Hash` lives in
+`19-audit.jqd`, `Option` and `Bool` in `02-data.jqd`).
 
 When the running term reaches `read-pdf(path)`, the worker pauses and sends
 an `effect_request`; the adapter dispatches it to `read_pdf` by the exact

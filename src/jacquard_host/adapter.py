@@ -29,6 +29,14 @@ from jacquard_host.protocol.envelopes import (
     ShutdownAck,
 )
 from jacquard_host.protocol.errors import CarrierLoss, ProtocolError
+
+
+class _HostRefused(Exception):
+    """The host refused its own first action; carries the underlying error."""
+
+    def __init__(self, error: ProtocolError) -> None:
+        super().__init__(str(error))
+        self.error = error
 from jacquard_host.protocol.limits import HARD_LIMITS
 from jacquard_host.protocol.values import Hash
 from jacquard_host.registry import OperationRegistry
@@ -50,7 +58,13 @@ class InvocationResult:
     - ``shutdown``: a pre-invocation shutdown was acknowledged;
     - ``carrier_loss``: no trustworthy terminal frame arrived (host-owned
       evidence in ``host_evidence``; never a Core verdict);
-    - ``protocol_error``: Core sent something the host refused locally.
+    - ``protocol_error``: Core sent something the host refused locally;
+    - ``host_error``: the host could not build its own invoke (an argument
+      with no v0 encoding, a registry entry outside the interface row); the
+      worker was shut down cleanly before any invocation began.
+
+    A worker that cannot be spawned at all raises ``OSError`` from the
+    calling method; no result is fabricated for it.
     """
 
     kind: str
@@ -73,6 +87,19 @@ class InvocationResult:
     @property
     def primary_code(self) -> str | None:
         return self.diagnostics[0].code if self.diagnostics else None
+
+
+def _bounded_message(message: str, max_bytes: int) -> str:
+    """Cut a host-authored message at a scalar boundary so it fits the selected limit.
+
+    The message is the host's own redacted detail, so truncating it is the
+    host's business; a report that Core would refuse for length is worse than
+    a shorter one.
+    """
+    encoded = message.encode("utf-8", "replace")
+    if len(encoded) <= max_bytes:
+        return encoded.decode("utf-8")
+    return encoded[:max_bytes].decode("utf-8", "ignore")
 
 
 class Host:
@@ -141,6 +168,15 @@ class Host:
                     "state": session.state.value,
                     "outstanding_request": session.pending.ordinal if session.pending else None,
                 }
+            except _HostRefused as refused:
+                result.kind = "host_error"
+                result.host_evidence = {
+                    "schema": "jacquard-host-python-evidence-v0",
+                    "code": refused.error.code,
+                    "reason": "invoke_refused_locally",
+                    "detail": refused.error.message,
+                    "state": session.state.value,
+                }
             except ProtocolError as error:
                 result.kind = "protocol_error"
                 result.host_evidence = {
@@ -170,7 +206,18 @@ class Host:
         parsed = session.receive(hello)
         assert isinstance(parsed, CoreHello)
         self._send(session.select(self.limits), worker, result, HARD_LIMITS)
-        self._send(first_action(session), worker, result, session.limits)
+        try:
+            first = first_action(session)
+        except ProtocolError as error:
+            # the host's own frame was unbuildable; Core did nothing wrong, so
+            # leave the worker with a clean pre-invocation shutdown
+            self._send(session.shutdown(), worker, result, session.limits)
+            frame = worker.read_frame(session.limits)
+            result.core_frames.append(frame)
+            session.receive(frame)
+            worker.close_input()
+            raise _HostRefused(error) from None
+        self._send(first, worker, result, session.limits)
         while session.state is not State.CLOSED:
             frame = worker.read_frame(session.limits)
             result.core_frames.append(frame)
@@ -186,7 +233,8 @@ class Host:
                 else:
                     failure = response.failure
                     assert failure is not None
-                    reply = session.respond_failure(failure.category, failure.completion, failure.message)
+                    message = _bounded_message(failure.message, session.limits["max_host_message_bytes"])
+                    reply = session.respond_failure(failure.category, failure.completion, message)
                 self._send(reply, worker, result, session.limits)
             elif isinstance(parsed, Outcome):
                 result.kind = "ok" if parsed.ok else "error"

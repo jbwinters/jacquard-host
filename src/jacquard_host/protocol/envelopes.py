@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 from jacquard_host.compat import CARRIER, PROTOCOL
 from jacquard_host.protocol.errors import LimitExceeded, MalformedFrame, OrderViolation
 from jacquard_host.protocol.limits import HARD_LIMITS, validate_limits
-from jacquard_host.protocol.values import Budget, Hash, Type, decode_value, encode_type, encode_value
+from jacquard_host.protocol.values import Budget, Hash, Type, decode_value, encode_type, encode_value, parse_hash
 
 INVOCATION_ID = "0000000000000000"
 TARGET_KIND = "store-term-v0"
@@ -32,6 +32,8 @@ FAILURE_PAIRS: frozenset[tuple[str, str]] = frozenset(
 )
 CANCEL_REASONS = frozenset({"cancelled", "timeout", "host_shutdown"})
 COMPLETIONS = frozenset({"not_started", "failed", "unknown"})
+OBSERVATION_CATEGORIES = frozenset({"ok"} | {category for category, _ in FAILURE_PAIRS} | CANCEL_REASONS)
+OBSERVATION_COMPLETIONS = frozenset({"completed"} | COMPLETIONS)
 TERMINALS = frozenset({"ok", "diagnostic", "cancelled", "host_failure", "completion_unknown"})
 
 
@@ -124,6 +126,8 @@ def effect_ok(ordinal: int, value: Any, *, limits: Mapping[str, int]) -> dict[st
 def effect_failure(ordinal: int, category: str, completion: str, message: str, *, limits: Mapping[str, int]) -> dict[str, Any]:
     if (category, completion) not in FAILURE_PAIRS:
         raise MalformedFrame(f"({category}, {completion}) is not an allowed effect_failure pair")
+    if not isinstance(message, str):
+        raise MalformedFrame("a host message must be one string")
     try:
         encoded = message.encode("utf-8")
     except UnicodeEncodeError:
@@ -231,7 +235,10 @@ def _protocol(frame: dict[str, Any]) -> None:
 
 
 def _invocation(frame: dict[str, Any]) -> None:
-    if frame.get("invocation_id") != INVOCATION_ID:
+    identity = frame.get("invocation_id")
+    if not isinstance(identity, str):
+        raise MalformedFrame("invocation_id must be one string")
+    if identity != INVOCATION_ID:
         raise OrderViolation("the frame names an invocation other than the one live invocation")
 
 
@@ -284,11 +291,24 @@ def parse_diagnostic(value: Any) -> Diagnostic:
     )
 
 
+def _string_bytes(value: Any) -> int:
+    """Decoded UTF-8 bytes of every string value in a JSON tree (keys excluded)."""
+    if isinstance(value, str):
+        return len(value.encode("utf-8", "surrogatepass"))
+    if isinstance(value, dict):
+        return sum(_string_bytes(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_string_bytes(item) for item in value)
+    return 0
+
+
 def _diagnostics(value: Any, limits: Mapping[str, int]) -> tuple[Diagnostic, ...]:
     if not isinstance(value, list) or not value:
         raise MalformedFrame("diagnostics must be a nonempty array")
     if len(value) > limits["max_diagnostics"]:
         raise LimitExceeded("diagnostics exceed max_diagnostics")
+    if _string_bytes(value) > limits["max_diagnostic_bytes"]:
+        raise LimitExceeded("diagnostics exceed max_diagnostic_bytes")
     return tuple(parse_diagnostic(item) for item in value)
 
 
@@ -305,6 +325,28 @@ def _evidence(value: Any) -> dict[str, Any]:
         raise OrderViolation("core evidence names the wrong invocation")
     if core["terminal"] not in TERMINALS:
         raise MalformedFrame("core evidence terminal is not a known classification")
+    target = _exact(core["target"], ("callable", "kind"), "evidence target")
+    if target["kind"] != TARGET_KIND:
+        raise MalformedFrame("evidence target kind must be store-term-v0")
+    parse_hash(target["callable"], "evidence target callable")
+    interface = _exact(core["interface"], ("effects", "parameters", "result"), "evidence interface")
+    capabilities = _exact(core["capabilities"], ("effects", "operations"), "evidence capabilities")
+    for name, items in (("interface effects", interface["effects"]), ("capability effects", capabilities["effects"])):
+        if not isinstance(items, list):
+            raise MalformedFrame(f"evidence {name} must be an array")
+        hashes = [parse_hash(item, name) for item in items]
+        if hashes != sorted(set(hashes)):
+            raise MalformedFrame(f"evidence {name} must be a strictly sorted set")
+    if not isinstance(interface["parameters"], list) or not isinstance(interface["result"], dict):
+        raise MalformedFrame("evidence interface parameters and result are malformed")
+    if not isinstance(capabilities["operations"], list):
+        raise MalformedFrame("evidence capability operations must be an array")
+    for item in capabilities["operations"]:
+        entry = _exact(item, ("effect", "mode", "operation"), "an evidence operation entry")
+        if entry["mode"] != "once":
+            raise MalformedFrame("an evidence operation entry must use mode once")
+        parse_hash(entry["effect"], "evidence operation effect")
+        parse_hash(entry["operation"], "evidence operation")
     requests = core["effect_requests"]
     if not isinstance(requests, list):
         raise MalformedFrame("core evidence effect_requests must be an array")
@@ -312,8 +354,8 @@ def _evidence(value: Any) -> dict[str, Any]:
         entry = _exact(item, ("effect", "operation", "ordinal"), "an effect_requests entry")
         if entry["ordinal"] != index or isinstance(entry["ordinal"], bool):
             raise MalformedFrame("core evidence effect_requests ordinals must be 1-based and consecutive")
-        Hash(_string(entry["effect"], "evidence effect"))
-        Hash(_string(entry["operation"], "evidence operation"))
+        parse_hash(entry["effect"], "evidence effect")
+        parse_hash(entry["operation"], "evidence operation")
     observations = _exact(fields["host_observations"], ("responses", "schema"), "host observations")
     if observations["schema"] != HOST_OBSERVATIONS_SCHEMA:
         raise MalformedFrame("host observations must use schema jacquard-host-observations-v0")
@@ -322,10 +364,13 @@ def _evidence(value: Any) -> dict[str, Any]:
         raise MalformedFrame("host observations responses must be an array")
     for item in responses:
         entry = _exact(item, ("category", "completion", "ordinal"), "a host observation")
-        _string(entry["category"], "observation category")
-        _string(entry["completion"], "observation completion")
-        if isinstance(entry["ordinal"], bool) or not isinstance(entry["ordinal"], int):
-            raise MalformedFrame("an observation ordinal must be an integer")
+        if entry["category"] not in OBSERVATION_CATEGORIES:
+            raise MalformedFrame("an observation category is not a known claim")
+        if entry["completion"] not in OBSERVATION_COMPLETIONS:
+            raise MalformedFrame("an observation completion is not a known claim")
+        ordinal = entry["ordinal"]
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 1 or ordinal > len(requests):
+            raise MalformedFrame("an observation ordinal must name a recorded request")
     return fields
 
 
@@ -357,8 +402,8 @@ def parse_core_frame(frame: Any, *, limits: Mapping[str, int]) -> CoreFrame:
         budget.check_count(len(arguments), arguments=True, context="request arguments")
         return EffectRequest(
             ordinal=ordinal,
-            effect=Hash(_string(fields["effect"], "effect")),
-            operation=Hash(_string(fields["operation"], "operation")),
+            effect=parse_hash(fields["effect"], "request effect"),
+            operation=parse_hash(fields["operation"], "request operation"),
             arguments=tuple(decode_value(item, budget) for item in arguments),
             raw=fields,
         )

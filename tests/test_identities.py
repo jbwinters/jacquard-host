@@ -47,6 +47,30 @@ class LiveIdentityTest(unittest.TestCase):
         for member in ("kit-ready", "kit-echo", "kit-twice", "kit-double", "kit-fail", "kit-world", "send"):
             self.assertEqual(names[member], IDS[member], member)
 
+    def test_a_type_and_constructor_sharing_a_name_resolve_to_the_type(self) -> None:
+        import subprocess
+        import tempfile
+        from jacquard_host.identities import hash_members
+        with tempfile.TemporaryDirectory(prefix="jacquard-host-dup-") as scratch:
+            path = os.path.join(scratch, "dup.jac")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("type Wrapper = | Wrapper Text\n\nunwrap : (Wrapper) ->{} Text\nunwrap(w) = match w { | Wrapper(t) -> t }\n")
+            members = hash_members(path, command=[JACQUARD_BIN], prelude=JACQUARD_PRELUDE)
+            wrappers = [identity for _, name, identity in members if name == "wrapper"]
+            self.assertEqual(len(wrappers), 2)
+            names = hash_file(path, command=[JACQUARD_BIN], prelude=JACQUARD_PRELUDE)
+            self.assertEqual(names["wrapper"], wrappers[0])
+            # the checked interface built from the signature is accepted by Core
+            store = os.path.join(scratch, "store")
+            env = dict(os.environ, JACQUARD_PRELUDE=os.path.abspath(JACQUARD_PRELUDE))
+            subprocess.run([JACQUARD_BIN, "run", path, "--store", store], check=True, stdout=subprocess.DEVNULL, env=env)
+            from jacquard_host.adapter import Host
+            from jacquard_host.protocol.values import Constructor
+            all_names = {**hash_file(os.path.join(JACQUARD_PRELUDE, "01-prim.jqd"), command=[JACQUARD_BIN], prelude=JACQUARD_PRELUDE), **names}
+            interface = parse_signature(signatures(path, command=[JACQUARD_BIN], prelude=JACQUARD_PRELUDE)["unwrap"], all_names)
+            result = Host(store, command=[JACQUARD_BIN]).invoke(names["unwrap"], interface, [Constructor(wrappers[1], ("inside",))])
+            self.assertEqual((result.kind, result.value), ("ok", "inside"))
+
     def test_prelude_types_and_signatures_resolve(self) -> None:
         prim = hash_file(os.path.join(JACQUARD_PRELUDE, "01-prim.jqd"), command=[JACQUARD_BIN], prelude=JACQUARD_PRELUDE)
         self.assertEqual((prim["int"], prim["text"]), (IDS["int"], IDS["text"]))

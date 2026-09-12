@@ -155,6 +155,23 @@ class StateMachineTest(unittest.TestCase):
         with self.assertRaises(LimitExceeded):
             session.receive(dict(core("one-once-effect-success", 1), request_id="0000000000000002"))
 
+    def test_failure_or_cancel_closes_the_slot_for_good(self) -> None:
+        for close in (lambda s: s.respond_failure("outside_failure", "failed", "boom"), lambda s: s.cancel("timeout", "unknown")):
+            session = self.running_session()
+            session.receive(core("one-once-effect-success", 1))
+            close(session)
+            self.assertIs(session.state, State.FINISHING)
+            with self.assertRaises(OrderViolation):
+                session.receive(dict(core("one-once-effect-success", 1), request_id="0000000000000002"))
+            with self.assertRaises(OrderViolation):
+                session.respond_ok("late")
+        session = self.running_session()
+        session.receive(core("refused-authority", 1))
+        session.respond_failure("refused_authority", "not_started", "policy denied")
+        outcome = session.receive(core("refused-authority", 2))
+        assert isinstance(outcome, Outcome)
+        self.assertIs(session.state, State.CLOSED)
+
     def test_hello_without_v0_is_refused(self) -> None:
         session = HostSession()
         with self.assertRaises(OrderViolation) as caught:

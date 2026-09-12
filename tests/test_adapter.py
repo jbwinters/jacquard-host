@@ -63,6 +63,42 @@ class ReplayedAdapterTest(unittest.TestCase):
         self.assertEqual((result.kind, result.primary_code, result.exit_status), ("fatal", "E1603", 0))
         self.assertEqual(result.host_evidence, {})
 
+    def test_malformed_identity_from_core_is_a_local_protocol_error(self) -> None:
+        program = (
+            "import json,sys\n"
+            "t=json.load(open(sys.argv[1]))\n"
+            "c=[e for e in t if e['name']=='one-once-effect-success'][0]['core_output']\n"
+            "def w(f):\n"
+            "  p=json.dumps(f).encode(); sys.stdout.buffer.write(len(p).to_bytes(4,'big')+p); sys.stdout.buffer.flush()\n"
+            "def r():\n"
+            "  n=int.from_bytes(sys.stdin.buffer.read(4),'big'); sys.stdin.buffer.read(n)\n"
+            "w(c[0]); r(); r(); req=dict(c[1]); req['effect']=req['effect'].upper(); w(req); sys.stdin.buffer.read()\n"
+        )
+        host = Host("unused-store", command=[sys.executable, "-c", program, str(KIT.directory / "kit" / "transcripts.json")], deadline_seconds=10)
+        result = host.invoke(IDS["kit-echo"], ECHO, ("ping",), OperationRegistry())
+        self.assertEqual((result.kind, result.host_evidence["code"], result.host_evidence["reason"]), ("protocol_error", "E1601", "core_frame_refused"))
+
+    def test_host_side_invoke_refusal_shuts_the_worker_down_cleanly(self) -> None:
+        from jacquard_host.protocol.values import Nominal as _N  # noqa: F401 - keep import local
+        registry = OperationRegistry()
+        registry.bind(IDS["kit-world"], IDS["send"], lambda body: body)
+        # a registry effect outside the interface row: the host refuses its own invoke
+        result = replay_host("selected-shutdown").invoke(IDS["kit-ready"], Interface((), TupleType()), (), registry)
+        self.assertEqual((result.kind, result.host_evidence["reason"], result.host_evidence["code"]), ("host_error", "invoke_refused_locally", "E1601"))
+        self.assertEqual([f["kind"] for f in result.host_frames], ["host_select", "shutdown"])
+        self.assertEqual([f["kind"] for f in result.core_frames], ["core_hello", "shutdown_ack"])
+        self.assertEqual((result.exit_status, result.signal), (0, None))
+        result = replay_host("selected-shutdown").invoke(IDS["kit-double"], Interface((Nominal(IDS["int"]),), Nominal(IDS["int"])), (True,))
+        self.assertEqual((result.kind, result.host_evidence["code"]), ("host_error", "E1604"))
+
+    def test_long_failure_messages_are_cut_to_the_selected_limit(self) -> None:
+        registry = OperationRegistry()
+        registry.bind(IDS["kit-world"], IDS["send"], lambda body: (_ for _ in ()).throw(HostFailure("refused_authority", "not_started", "é" * 3000)))
+        result = replay_host("refused-authority").invoke(IDS["kit-echo"], ECHO, ("ping",), registry)
+        message = result.host_frames[2]["message"]
+        self.assertEqual(len(message.encode("utf-8")), 4096)
+        self.assertEqual(message, "é" * 2048)
+
     def test_worker_that_exits_immediately_is_carrier_loss(self) -> None:
         host = Host("unused-store", command=[sys.executable, "-c", "pass"], deadline_seconds=5)
         result = host.invoke(IDS["kit-ready"], Interface((), TupleType()))
