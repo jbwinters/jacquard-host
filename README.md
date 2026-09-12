@@ -6,8 +6,11 @@ It is deliberately separate from
 [`jacquard-lang`](https://github.com/jbwinters/jacquard-lang), which remains the
 language implementation and semantic source of truth.
 
-Status: repository bootstrap. No host protocol, adapter, HTTP server, or
-deployment surface is implemented yet.
+Status: the strict `stdio-u32-json-v0` carrier codecs and a replayer for
+Core's pinned `jacquard-host-v0` conformance kit are implemented in Python.
+The embedding adapter (spawn a worker, invoke one checked term, serve its
+configured effect operations) is the next slice. No HTTP server or deployment
+surface exists yet.
 
 ## Repository boundary
 
@@ -35,9 +38,12 @@ boundary and the evidence required to widen it.
 
 ## Current compatibility
 
-The planning baseline is Jacquard Core 0.2.0. There is no supported host
-protocol yet, so adapters must not invent one. Exact pins and the rule for
-adopting the future protocol are in [COMPATIBILITY.md](docs/COMPATIBILITY.md).
+The adapter is pinned to the exact conformance-kit files of Core's
+`jacquard-host-v0` protocol at a reviewed but not yet merged Core commit
+(the worker and kit postdate the `jacquard-core-0.2.0` tag), vendored under
+`conformance/host-protocol-v0/` and digest-checked by the test suite. The pin,
+its provisional status, and the refresh procedure are in
+[COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## Roadmap
 
@@ -47,12 +53,28 @@ state; the Markdown document is the reviewable source of intent.
 
 ## Development
 
-The bootstrap has no third-party runtime dependencies. Its smoke checks are:
+There are no third-party runtime dependencies. The offline suite needs only
+Python 3.11 or later:
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m compileall -q src tests
 ```
+
+To replay the pinned kit against a real worker, point the suite (or the
+replayer's command line) at a Core build of the pinned commit:
+
+```sh
+PYTHONPATH=src JACQUARD_BIN=/path/to/jacquard JACQUARD_PRELUDE=/path/to/prelude \
+  python3 -m unittest tests.test_kit_live -v
+PYTHONPATH=src python3 -m jacquard_host.kit --jacquard /path/to/jacquard \
+  --prelude /path/to/prelude --report .scratch/kit-replay.json
+```
+
+The replayer builds the kit store with the published recipe, plays every
+recorded transcript in lockstep against a fresh worker, and reports any
+transcript whose Core frames, exit status, or observed summary differ from the
+recording. Diagnostic prose is reported as drift, never normalised.
 
 Subsequent adapters must pin the exact Jacquard protocol fixtures they consume
 and fail closed on unknown versions, values, operations, or fields.
