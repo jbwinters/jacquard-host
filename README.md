@@ -194,6 +194,29 @@ cat jacquard/http.jac jacquard/http-tests.jac > .scratch/http-all.jac
 jacquard test .scratch/http-all.jac --seed 42
 ```
 
+## The synthetic trial slice
+
+`jacquard/trial.jac` is the end-to-end proof (roadmap H1.3): `GET /trial`
+returns one deterministic synthetic trial, `POST /response` validates a
+`trial=…&session=…&answer=a|b` body, calls `save-response`, and answers
+`201 receipt=…`, `200` for an identical repeat, `409` for a different answer
+under the same session, and Jacquard-authored `400`/`404`/`405`/`501`/`505`
+for everything else. `jacquard_host.trial.TrialApp` assembles the three
+Jacquard files, populates a store, binds the persistence operation, and
+serves the term behind the socket host:
+
+```sh
+PYTHONPATH=src JACQUARD_BIN=/path/to/jacquard JACQUARD_PRELUDE=/path/to/prelude \
+  python3 -m jacquard_host.trial --workdir .scratch/trial --port 8080
+curl -s http://127.0.0.1:8080/trial
+curl -s -d 'trial=trial-synthetic-1&session=sess-1&answer=b' http://127.0.0.1:8080/response
+```
+
+Every request runs in a fresh worker; every response, including every
+error, is rendered by Jacquard; the only outside action is the one named
+persistence operation. This is synthetic data on loopback, not the
+readability study.
+
 ## Development
 
 There are no third-party runtime dependencies. The offline suite needs only
