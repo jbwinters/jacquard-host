@@ -20,20 +20,36 @@ trial.body =
 
 trial.get(request) = http.text-response(200, trial.body)
 
--- form bodies: key=value pairs joined by "&"; values use the same token
--- alphabet the persistence operation accepts, so nothing needs decoding
+-- form bodies: key=value pairs joined by "&", no URL encoding. Values are
+-- validated here to exactly the rule the persistence operation enforces
+-- (first character alphanumeric, then [A-Za-z0-9._-], 1..128 characters),
+-- so an input the store would refuse never leaves Jacquard without a
+-- rendered 400.
 trial.token-chars = http.chars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
+trial.alnum-chars = http.chars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+trial.max-token-length = 128
+
 trial.token?(s) =
-  bool.and(
-    bool.not(text.empty?(s)),
-    http.all?(http.chars(s), fn (c) -> list.contains?(trial.token-chars, c, text.eq)))
+  match http.chars(s) {
+    | Nil -> False
+    | Cons(first, rest) ->
+      bool.and(
+        list.contains?(trial.alnum-chars, first, text.eq),
+        bool.and(
+          int.lte?(text.length(s), trial.max-token-length),
+          http.all?(rest, fn (c) -> list.contains?(trial.token-chars, c, text.eq))))
+  }
+
+trial.known-key?(key) =
+  bool.or(text.eq?(key, "trial"), bool.or(text.eq?(key, "session"), text.eq?(key, "answer")))
 
 trial.parse-pair(piece) =
   match http.split-once(piece, "=") {
     | None -> None
     | Some((key, value)) ->
-      if bool.and(trial.token?(key), trial.token?(value)) then Some((key, value)) else None
+      if bool.and(trial.known-key?(key), trial.token?(value)) then Some((key, value)) else None
   }
 
 trial.parse-form(body) =
@@ -62,7 +78,7 @@ trial.post(request) =
   match request {
     | HttpRequest(body: body) ->
       match trial.parse-form(body) {
-        | None -> http.text-response(400, "body must be key=value pairs joined by &")
+        | None -> http.text-response(400, "body must be trial, session, and answer as key=value pairs joined by &; values are 1..128 characters, alphanumeric first, then letters, digits, . _ -")
         | Some(pairs) ->
           match (trial.field(pairs, "trial"), trial.field(pairs, "session"), trial.field(pairs, "answer")) {
             | (Some(trial-id), Some(session), Some(answer)) ->

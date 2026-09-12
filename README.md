@@ -198,7 +198,9 @@ jacquard test .scratch/http-all.jac --seed 42
 
 `jacquard/trial.jac` is the end-to-end proof (roadmap H1.3): `GET /trial`
 returns one deterministic synthetic trial, `POST /response` validates a
-`trial=…&session=…&answer=a|b` body, calls `save-response`, and answers
+`trial=…&session=…&answer=a|b` body (exactly those three keys, raw token
+values with no URL encoding, each 1..128 characters starting alphanumeric,
+the same rule the persistence operation enforces), calls `save-response`, and answers
 `201 receipt=…`, `200` for an identical repeat, `409` for a different answer
 under the same session, and Jacquard-authored `400`/`404`/`405`/`501`/`505`
 for everything else. `jacquard_host.trial.TrialApp` assembles the three
@@ -213,9 +215,12 @@ curl -s -d 'trial=trial-synthetic-1&session=sess-1&answer=b' http://127.0.0.1:80
 ```
 
 Every request runs in a fresh worker; every response, including every
-error, is rendered by Jacquard; the only outside action is the one named
-persistence operation. This is synthetic data on loopback, not the
-readability study.
+error, is rendered by Jacquard (the host itself only ever closes a
+connection, on its own ceilings or on an invocation failure); the only
+outside action is the one named persistence operation. The work directory's
+store is built once from the assembled source and its digest is recorded;
+a later start with a different source is refused rather than repopulated in
+place. This is synthetic data on loopback, not the readability study.
 
 ## Development
 

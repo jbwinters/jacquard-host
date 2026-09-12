@@ -103,6 +103,11 @@ class TrialSliceTest(unittest.TestCase):
             post(b"trial=trial-synthetic-1&session=s"): b"HTTP/1.1 400 Bad Request",
             post(b"trial=trial-synthetic-1&session=bad token&answer=a"): b"HTTP/1.1 400 Bad Request",
             post(b"trial=trial-synthetic-1&session=s&answer=a&answer=b"): b"HTTP/1.1 400 Bad Request",
+            post(b"trial=trial-synthetic-1&session=.dot&answer=a"): b"HTTP/1.1 400 Bad Request",
+            post(b"trial=trial-synthetic-1&session=-dash&answer=a"): b"HTTP/1.1 400 Bad Request",
+            post(b"trial=trial-synthetic-1&session=" + b"y" * 129 + b"&answer=a"): b"HTTP/1.1 400 Bad Request",
+            post(b"trial=trial-synthetic-1&session=s&answer=a&extra=1"): b"HTTP/1.1 400 Bad Request",
+            post(b"trial=trial-synthetic-1&session=s%20x&answer=a"): b"HTTP/1.1 400 Bad Request",
         }
         server, thread = self.serve(len(cases))
         replies = {request: talk(server.address, request) for request in cases}
@@ -115,13 +120,39 @@ class TrialSliceTest(unittest.TestCase):
         self.assertTrue(all(s.invocation.requests == [] for s in server.served), "no rejection reaches the persistence operation")
 
     def test_restart_keeps_the_record_and_leaves_nothing_behind(self) -> None:
+        def leftovers() -> set:
+            return {name for name in os.listdir(tempfile.gettempdir()) if name.startswith("jacquard-host-worker-stderr-")}
+
+        before_files = leftovers()
+        first = self.app.serve_text(post(b"trial=trial-synthetic-1&session=sess-restart&answer=a").decode("latin-1"))
+        self.assertTrue(first.value.startswith("HTTP/1.1 201 Created\r\n"), first.value)
+        trial_before = self.app.serve_text("GET /trial HTTP/1.1\r\nHost: h\r\n\r\n").value
+        count_before = self.app.study.count()
         with TrialApp(self.scratch, prelude=JACQUARD_PRELUDE, command=[JACQUARD_BIN]) as restarted:
-            result = restarted.serve_text(post(b"trial=trial-synthetic-1&session=sess-42&answer=b").decode("latin-1"))
+            result = restarted.serve_text(post(b"trial=trial-synthetic-1&session=sess-restart&answer=a").decode("latin-1"))
             self.assertTrue(result.ok, result)
             self.assertTrue(result.value.startswith("HTTP/1.1 200 OK\r\n"), result.value)
-            self.assertEqual(restarted.study.count(), self.app.study.count())
-        leftovers = [name for name in os.listdir(tempfile.gettempdir()) if name.startswith("jacquard-host-worker-stderr-")]
-        self.assertEqual(leftovers, [])
+            self.assertEqual(restarted.study.count(), count_before)
+            self.assertEqual(restarted.serve_text("GET /trial HTTP/1.1\r\nHost: h\r\n\r\n").value, trial_before)
+        self.assertEqual(leftovers() - before_files, set())
+        # SQLite's -wal/-shm companions exist while a store is open; nothing else may appear
+        present = sorted(name for name in os.listdir(self.scratch) if not name.startswith("study.sqlite-"))
+        self.assertEqual(present, ["store", "store.source.sha256", "study.sqlite", "trial-all.jac"])
+
+    def test_a_store_built_from_a_different_source_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jacquard-host-trial-stale-") as other:
+            sources = os.path.join(other, "src")
+            shutil.copytree(os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/jacquard", sources)
+            workdir = os.path.join(other, "work")
+            TrialApp(workdir, prelude=JACQUARD_PRELUDE, command=[JACQUARD_BIN], sources=sources).close()
+            path = os.path.join(sources, "trial.jac")
+            with open(path, encoding="utf-8") as stream:
+                text = stream.read()
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(text.replace("trial-synthetic-1", "trial-synthetic-2"))
+            with self.assertRaises(RuntimeError) as caught:
+                TrialApp(workdir, prelude=JACQUARD_PRELUDE, command=[JACQUARD_BIN], sources=sources)
+            self.assertIn("different source", str(caught.exception))
 
 
 if __name__ == "__main__":

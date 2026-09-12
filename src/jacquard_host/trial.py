@@ -10,6 +10,7 @@ participant collection, not a public service.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -51,8 +52,20 @@ class TrialApp:
         self.command = tuple(command)
         self.prelude = os.path.abspath(os.fspath(prelude))
         self.source_path = self.workdir / "trial-all.jac"
-        self.source_path.write_text(assemble(sources), encoding="utf-8")
+        source = assemble(sources)
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
         self.store_dir = self.workdir / "store"
+        marker = self.workdir / "store.source.sha256"
+        if self.store_dir.exists():
+            # the store is Core-owned state built from one exact source; a different
+            # source means a different store, never a repopulation in place
+            recorded = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+            if recorded != digest:
+                raise RuntimeError(
+                    f"{self.store_dir} was populated from a different source (recorded {recorded[:12] or 'nothing'}, "
+                    f"assembled {digest[:12]}); use a fresh work directory"
+                )
+        self.source_path.write_text(source, encoding="utf-8")
         if not self.store_dir.exists():
             env = dict(os.environ, JACQUARD_PRELUDE=self.prelude, TMPDIR=tempfile.gettempdir())
             completed = subprocess.run(
@@ -64,6 +77,7 @@ class TrialApp:
             )
             if completed.returncode != 0:
                 raise RuntimeError(f"populating the trial store exited {completed.returncode}")
+            marker.write_text(digest + "\n", encoding="utf-8")
         prim = hash_file(os.path.join(self.prelude, "01-prim.jqd"), command=self.command, prelude=self.prelude)
         self.names: dict[str, Hash] = prim | hash_file(self.source_path, command=self.command, prelude=self.prelude)
         self.interface: Interface = parse_signature(
