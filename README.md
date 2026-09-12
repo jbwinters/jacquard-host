@@ -6,11 +6,12 @@ It is deliberately separate from
 [`jacquard-lang`](https://github.com/jbwinters/jacquard-lang), which remains the
 language implementation and semantic source of truth.
 
-Status: the strict `stdio-u32-json-v0` carrier codecs and a replayer for
-Core's pinned `jacquard-host-v0` conformance kit are implemented in Python.
-The embedding adapter (spawn a worker, invoke one checked term, serve its
-configured effect operations) is the next slice. No HTTP server or deployment
-surface exists yet.
+Status: a Python adapter for Core's pinned `jacquard-host-v0` protocol. It
+spawns one `jacquard host worker` per invocation, runs one checked Jacquard
+term with typed arguments, and serves the term's declared `once` effect
+operations from Python functions bound by exact identity. The strict
+`stdio-u32-json-v0` codecs and a replayer for Core's conformance kit back it.
+No socket host, HTTP server, or deployment surface exists yet.
 
 ## Repository boundary
 
@@ -50,6 +51,67 @@ its provisional status, and the refresh procedure are in
 [ROADMAP.md](docs/ROADMAP.md) separates the reusable host foundation from the
 future readability product. Task Master mirrors this roadmap as local planning
 state; the Markdown document is the reviewable source of intent.
+
+## Calling Jacquard from Python, and Python from Jacquard
+
+The adapter binds everything by content hash, never by display name (Core
+decision D80). A host learns the hashes of its own declarations with the
+public `jacquard hash` command; `jacquard_host.identities` wraps it and turns
+a checked signature into the positional interface the protocol requires.
+
+Suppose a first-party Jacquard file declares an effect whose operation the
+host will implement, and a term that uses it:
+
+```jacquard
+once effect Documents where {
+  read-pdf : (Text) -> Text
+}
+
+summarize : (Text) ->{Documents} Text
+summarize(path) = text.slice(read-pdf(path), 0, 80)
+```
+
+After `jacquard run decls.jac --store STORE` has populated a store, Python
+exposes `read_pdf` and runs `summarize`:
+
+```python
+from jacquard_host.adapter import Host
+from jacquard_host.identities import hash_file, parse_signature, signatures
+from jacquard_host.registry import HostFailure, OperationRegistry
+
+prelude = "/path/to/jacquard-lang/prelude"      # the prelude of the pinned Core build
+names = hash_file("decls.jac", prelude=prelude) | hash_file(f"{prelude}/01-prim.jqd")
+registry = OperationRegistry()
+
+@registry.operation(names["documents"], names["read-pdf"])
+def read_pdf(path: str) -> str:
+    if not path.startswith("/srv/docs/"):
+        raise HostFailure("refused_authority", "not_started", "outside the document root")
+    return extract_text(path)          # the host's own PDF code
+
+host = Host("STORE")
+interface = parse_signature(signatures("decls.jac")["summarize"], names)
+result = host.invoke(names["summarize"], interface, ["/srv/docs/report.pdf"], registry)
+if result.ok:
+    print(result.value)                # the first 80 codepoints of the text
+else:
+    print(result.terminal, result.primary_code, result.diagnostics[0].summary)
+```
+
+`01-prim.jqd` declares `Int`, `Real`, and `Text`; a signature that mentions
+another prelude type needs that type's file hashed too (`Hash` lives in
+`19-audit.jqd`, `Option` and `Bool` in `02-data.jqd`).
+
+When the running term reaches `read-pdf(path)`, the worker pauses and sends
+an `effect_request`; the adapter dispatches it to `read_pdf` by the exact
+`(Documents, read-pdf)` identity, and the returned text resumes the term. A
+handler that raises `HostFailure` reports one of the four frozen failure
+pairs; any other exception is reported as an unknown completion, which Core
+never retries. Values crossing the boundary are `Int`, `Real`, `Text`,
+`Hash`, tuples, and saturated constructors; operations are `once` and serial.
+The result carries every Core frame, every host frame, the exit status, the
+bounded operator text, and any host-owned evidence such as a deadline kill,
+so a run can be audited without trusting the adapter's summary.
 
 ## Development
 
