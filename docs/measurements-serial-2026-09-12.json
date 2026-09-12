@@ -1,0 +1,553 @@
+{
+  "schema": "jacquard-host-serial-measurement-v0",
+  "python": "3.14.7",
+  "worker_spawn_negotiate_shutdown": {
+    "n": 5,
+    "min": 0.0165,
+    "median": 0.0177,
+    "p90": 0.0181,
+    "max": 0.0233,
+    "mean": 0.0187
+  },
+  "scenarios": [
+    {
+      "scenario": "serial GET, one client",
+      "requests": 12,
+      "client_concurrency": 1,
+      "accept_backlog": 1,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 0.551,
+      "served": 12,
+      "clients_gave_up": 0,
+      "throughput_per_second": 21.783,
+      "connect_wait": {
+        "n": 12,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0001,
+        "max": 0.0018,
+        "mean": 0.0002
+      },
+      "request_wall": {
+        "n": 12,
+        "min": 0.0422,
+        "median": 0.0456,
+        "p90": 0.0473,
+        "max": 0.0479,
+        "mean": 0.0455
+      },
+      "queue_wait_after_connect": {
+        "n": 12,
+        "min": 0.0421,
+        "median": 0.0456,
+        "p90": 0.0471,
+        "max": 0.0478,
+        "mean": 0.0452
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.042,
+        "median": 0.0455,
+        "p90": 0.0471,
+        "max": 0.0477,
+        "mean": 0.0452
+      }
+    },
+    {
+      "scenario": "serial POST, one client",
+      "requests": 12,
+      "client_concurrency": 1,
+      "accept_backlog": 1,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 0.828,
+      "served": 12,
+      "clients_gave_up": 0,
+      "throughput_per_second": 14.501,
+      "connect_wait": {
+        "n": 12,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0001,
+        "max": 0.0001,
+        "mean": 0.0001
+      },
+      "request_wall": {
+        "n": 12,
+        "min": 0.0638,
+        "median": 0.0685,
+        "p90": 0.071,
+        "max": 0.0749,
+        "mean": 0.0686
+      },
+      "queue_wait_after_connect": {
+        "n": 12,
+        "min": 0.0637,
+        "median": 0.0683,
+        "p90": 0.0709,
+        "max": 0.0748,
+        "mean": 0.0685
+      },
+      "statuses": [
+        "HTTP/1.1 201 Created"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.0636,
+        "median": 0.0682,
+        "p90": 0.0708,
+        "max": 0.0747,
+        "mean": 0.0685
+      }
+    },
+    {
+      "scenario": "burst GET x4, backlog 1",
+      "requests": 4,
+      "client_concurrency": 4,
+      "accept_backlog": 1,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 1.092,
+      "served": 4,
+      "clients_gave_up": 0,
+      "throughput_per_second": 3.661,
+      "connect_wait": {
+        "n": 4,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0001,
+        "max": 1.0416,
+        "mean": 0.2605
+      },
+      "request_wall": {
+        "n": 4,
+        "min": 0.0462,
+        "median": 0.1119,
+        "p90": 0.1344,
+        "max": 1.0914,
+        "mean": 0.3403
+      },
+      "queue_wait_after_connect": {
+        "n": 4,
+        "min": 0.0461,
+        "median": 0.0696,
+        "p90": 0.0893,
+        "max": 0.1343,
+        "mean": 0.0799
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 4,
+        "min": 0.0433,
+        "median": 0.0456,
+        "p90": 0.046,
+        "max": 0.0497,
+        "mean": 0.0461
+      }
+    },
+    {
+      "scenario": "burst GET x4, backlog 4",
+      "requests": 4,
+      "client_concurrency": 4,
+      "accept_backlog": 4,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 0.182,
+      "served": 4,
+      "clients_gave_up": 0,
+      "throughput_per_second": 21.937,
+      "connect_wait": {
+        "n": 4,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0001,
+        "max": 0.0001,
+        "mean": 0.0001
+      },
+      "request_wall": {
+        "n": 4,
+        "min": 0.0466,
+        "median": 0.1159,
+        "p90": 0.1385,
+        "max": 0.1817,
+        "mean": 0.115
+      },
+      "queue_wait_after_connect": {
+        "n": 4,
+        "min": 0.0465,
+        "median": 0.1157,
+        "p90": 0.1383,
+        "max": 0.1815,
+        "mean": 0.1149
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 4,
+        "min": 0.0433,
+        "median": 0.0458,
+        "p90": 0.0464,
+        "max": 0.0466,
+        "mean": 0.0454
+      }
+    },
+    {
+      "scenario": "burst GET x8, backlog 1",
+      "requests": 8,
+      "client_concurrency": 8,
+      "accept_backlog": 1,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 1.347,
+      "served": 8,
+      "clients_gave_up": 0,
+      "throughput_per_second": 5.938,
+      "connect_wait": {
+        "n": 8,
+        "min": 0.0001,
+        "median": 1.0458,
+        "p90": 1.0464,
+        "max": 1.0465,
+        "mean": 0.6539
+      },
+      "request_wall": {
+        "n": 8,
+        "min": 0.0493,
+        "median": 1.1134,
+        "p90": 1.3002,
+        "max": 1.3455,
+        "mean": 0.7923
+      },
+      "queue_wait_after_connect": {
+        "n": 8,
+        "min": 0.0437,
+        "median": 0.115,
+        "p90": 0.2537,
+        "max": 0.2998,
+        "mean": 0.1384
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 8,
+        "min": 0.0435,
+        "median": 0.0458,
+        "p90": 0.0491,
+        "max": 0.0493,
+        "mean": 0.046
+      }
+    },
+    {
+      "scenario": "burst GET x8, backlog 8",
+      "requests": 8,
+      "client_concurrency": 8,
+      "accept_backlog": 8,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 0.364,
+      "served": 8,
+      "clients_gave_up": 0,
+      "throughput_per_second": 21.978,
+      "connect_wait": {
+        "n": 8,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0001,
+        "max": 0.0001,
+        "mean": 0.0001
+      },
+      "request_wall": {
+        "n": 8,
+        "min": 0.0462,
+        "median": 0.2059,
+        "p90": 0.3178,
+        "max": 0.3629,
+        "mean": 0.2054
+      },
+      "queue_wait_after_connect": {
+        "n": 8,
+        "min": 0.0461,
+        "median": 0.2058,
+        "p90": 0.3177,
+        "max": 0.3628,
+        "mean": 0.2053
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 8,
+        "min": 0.0441,
+        "median": 0.0455,
+        "p90": 0.0461,
+        "max": 0.0462,
+        "mean": 0.0454
+      }
+    },
+    {
+      "scenario": "burst GET x12, backlog 1",
+      "requests": 12,
+      "client_concurrency": 12,
+      "accept_backlog": 1,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 2.176,
+      "served": 12,
+      "clients_gave_up": 0,
+      "throughput_per_second": 5.516,
+      "connect_wait": {
+        "n": 12,
+        "min": 0.0001,
+        "median": 1.0618,
+        "p90": 1.0623,
+        "max": 2.0865,
+        "mean": 0.9672
+      },
+      "request_wall": {
+        "n": 12,
+        "min": 0.0448,
+        "median": 1.2594,
+        "p90": 1.5195,
+        "max": 2.1747,
+        "mean": 1.1384
+      },
+      "queue_wait_after_connect": {
+        "n": 12,
+        "min": 0.0447,
+        "median": 0.114,
+        "p90": 0.3028,
+        "max": 0.4576,
+        "mean": 0.1712
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.0412,
+        "median": 0.0431,
+        "p90": 0.0483,
+        "max": 0.0521,
+        "mean": 0.0447
+      }
+    },
+    {
+      "scenario": "burst GET x12, backlog 12",
+      "requests": 12,
+      "client_concurrency": 12,
+      "accept_backlog": 12,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 0.544,
+      "served": 12,
+      "clients_gave_up": 0,
+      "throughput_per_second": 22.051,
+      "connect_wait": {
+        "n": 12,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0001,
+        "max": 0.0002,
+        "mean": 0.0001
+      },
+      "request_wall": {
+        "n": 12,
+        "min": 0.0475,
+        "median": 0.3002,
+        "p90": 0.4588,
+        "max": 0.5426,
+        "mean": 0.2981
+      },
+      "queue_wait_after_connect": {
+        "n": 12,
+        "min": 0.0473,
+        "median": 0.3001,
+        "p90": 0.4587,
+        "max": 0.5425,
+        "mean": 0.298
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.0413,
+        "median": 0.0448,
+        "p90": 0.0473,
+        "max": 0.0518,
+        "mean": 0.0452
+      }
+    },
+    {
+      "scenario": "burst POST x12, backlog 12",
+      "requests": 12,
+      "client_concurrency": 12,
+      "accept_backlog": 12,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 0.817,
+      "served": 12,
+      "clients_gave_up": 0,
+      "throughput_per_second": 14.684,
+      "connect_wait": {
+        "n": 12,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0001,
+        "max": 0.0001,
+        "mean": 0.0001
+      },
+      "request_wall": {
+        "n": 12,
+        "min": 0.0668,
+        "median": 0.4393,
+        "p90": 0.6787,
+        "max": 0.8159,
+        "mean": 0.4405
+      },
+      "queue_wait_after_connect": {
+        "n": 12,
+        "min": 0.0667,
+        "median": 0.4392,
+        "p90": 0.6786,
+        "max": 0.8158,
+        "mean": 0.4404
+      },
+      "statuses": [
+        "HTTP/1.1 201 Created"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 12,
+        "min": 0.0632,
+        "median": 0.0677,
+        "p90": 0.0697,
+        "max": 0.0746,
+        "mean": 0.068
+      }
+    },
+    {
+      "scenario": "burst GET x40, backlog 1, clients give up after 10 s",
+      "requests": 40,
+      "client_concurrency": 40,
+      "accept_backlog": 1,
+      "client_timeout_seconds": 10.0,
+      "wall_seconds": 13.104,
+      "served": 35,
+      "clients_gave_up": 5,
+      "throughput_per_second": 2.671,
+      "connect_wait": {
+        "n": 40,
+        "min": 0.0001,
+        "median": 2.0678,
+        "p90": 13.1009,
+        "max": 13.1029,
+        "mean": 3.4695
+      },
+      "request_wall": {
+        "n": 35,
+        "min": 0.0496,
+        "median": 2.9322,
+        "p90": 5.0568,
+        "max": 8.4991,
+        "mean": 3.0552
+      },
+      "queue_wait_after_connect": {
+        "n": 35,
+        "min": 0.0478,
+        "median": 0.3006,
+        "p90": 1.9675,
+        "max": 5.4072,
+        "mean": 0.9618
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 35,
+        "min": 0.0425,
+        "median": 0.0475,
+        "p90": 0.0482,
+        "max": 0.0496,
+        "mean": 0.0468
+      }
+    },
+    {
+      "scenario": "burst GET x40, backlog 40",
+      "requests": 40,
+      "client_concurrency": 40,
+      "accept_backlog": 40,
+      "client_timeout_seconds": 30.0,
+      "wall_seconds": 1.843,
+      "served": 40,
+      "clients_gave_up": 0,
+      "throughput_per_second": 21.705,
+      "connect_wait": {
+        "n": 40,
+        "min": 0.0001,
+        "median": 0.0001,
+        "p90": 0.0002,
+        "max": 0.0002,
+        "mean": 0.0001
+      },
+      "request_wall": {
+        "n": 40,
+        "min": 0.049,
+        "median": 0.9606,
+        "p90": 1.6553,
+        "max": 1.8384,
+        "mean": 0.9552
+      },
+      "queue_wait_after_connect": {
+        "n": 40,
+        "min": 0.0488,
+        "median": 0.9605,
+        "p90": 1.6552,
+        "max": 1.8383,
+        "mean": 0.9551
+      },
+      "statuses": [
+        "HTTP/1.1 200 OK"
+      ],
+      "served_outcomes": [
+        "served"
+      ],
+      "invocation_elapsed": {
+        "n": 40,
+        "min": 0.0416,
+        "median": 0.0459,
+        "p90": 0.0491,
+        "max": 0.0498,
+        "mean": 0.046
+      }
+    }
+  ]
+}
