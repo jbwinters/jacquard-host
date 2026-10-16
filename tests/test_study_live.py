@@ -16,7 +16,7 @@ from jacquard_host.study import StudyIdentities, StudyStore, bind_study, receipt
 
 JACQUARD_BIN = os.environ.get("JACQUARD_BIN")
 JACQUARD_PRELUDE = os.environ.get("JACQUARD_PRELUDE")
-DECLS = Path(__file__).resolve().parents[1] / "jacquard" / "study.jac"
+DECLS = Path(__file__).resolve().parents[1] / "src" / "jacquard_host" / "data" / "jacquard" / "study.jac"
 
 
 @unittest.skipUnless(JACQUARD_BIN and JACQUARD_PRELUDE and os.path.isdir(JACQUARD_PRELUDE), "set JACQUARD_BIN and JACQUARD_PRELUDE to run the study operation against Core")

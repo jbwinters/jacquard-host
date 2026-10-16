@@ -8,10 +8,11 @@ import socket
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from jacquard_host.socket_host import Ceilings
 from jacquard_host.study import receipt_of
-from jacquard_host.trial import TrialApp
+from jacquard_host.trial import JACQUARD_DIR, TrialApp
 
 JACQUARD_BIN = os.environ.get("JACQUARD_BIN")
 JACQUARD_PRELUDE = os.environ.get("JACQUARD_PRELUDE")
@@ -65,6 +66,14 @@ class TrialSliceTest(unittest.TestCase):
         self.assertTrue(body.endswith(b"answer-choices=a,b\n"))
         self.assertEqual([s.outcome for s in server.served], ["served", "served"])
         self.assertEqual(server.served[0].invocation.evidence["core"]["effect_requests"], [])
+
+    def test_explicit_prelude_reaches_the_invocation_worker(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jacquard-host-explicit-prelude-") as scratch:
+            with patch.dict(os.environ, {"JACQUARD_PRELUDE": "/nonexistent/prelude"}):
+                with TrialApp(scratch, prelude=JACQUARD_PRELUDE, command=[JACQUARD_BIN]) as app:
+                    result = app.serve_text("GET /trial HTTP/1.1\r\nHost: h\r\n\r\n")
+        self.assertTrue(result.ok, result)
+        self.assertTrue(result.value.startswith("HTTP/1.1 200 OK\r\n"), result.value)
 
     def test_post_response_saves_once_and_returns_a_receipt(self) -> None:
         server, thread = self.serve(4)
@@ -142,7 +151,7 @@ class TrialSliceTest(unittest.TestCase):
     def test_a_store_built_from_a_different_source_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="jacquard-host-trial-stale-") as other:
             sources = os.path.join(other, "src")
-            shutil.copytree(os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/jacquard", sources)
+            shutil.copytree(JACQUARD_DIR, sources)
             workdir = os.path.join(other, "work")
             TrialApp(workdir, prelude=JACQUARD_PRELUDE, command=[JACQUARD_BIN], sources=sources).close()
             path = os.path.join(sources, "trial.jac")

@@ -11,7 +11,7 @@ from pathlib import Path
 
 JACQUARD_BIN = os.environ.get("JACQUARD_BIN")
 JACQUARD_PRELUDE = os.environ.get("JACQUARD_PRELUDE")
-JACQUARD_DIR = Path(__file__).resolve().parents[1] / "jacquard"
+JACQUARD_DIR = Path(__file__).resolve().parents[1] / "src" / "jacquard_host" / "data" / "jacquard"
 
 
 def core(*args: str) -> subprocess.CompletedProcess:

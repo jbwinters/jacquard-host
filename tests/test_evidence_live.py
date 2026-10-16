@@ -35,7 +35,7 @@ class EvidenceIdentitiesTest(unittest.TestCase):
         self.assertEqual(set(published), set(ROWS), "the identity table rows changed; update the test's row map")
         with tempfile.TemporaryDirectory(prefix="jacquard-host-evidence-") as scratch:
             combined = Path(scratch) / "all.jac"
-            combined.write_text("\n".join((REPO / "jacquard" / name).read_text(encoding="utf-8") for name in ("http.jac", "study.jac", "trial.jac")) + "\n", encoding="utf-8")
+            combined.write_text("\n".join((REPO / "src" / "jacquard_host" / "data" / "jacquard" / name).read_text(encoding="utf-8") for name in ("http.jac", "study.jac", "trial.jac")) + "\n", encoding="utf-8")
             env = dict(os.environ, JACQUARD_PRELUDE=os.path.abspath(JACQUARD_PRELUDE))
             output = subprocess.run([JACQUARD_BIN, "hash", str(combined)], capture_output=True, text=True, env=env, check=True).stdout
         first: dict[str, str] = {}

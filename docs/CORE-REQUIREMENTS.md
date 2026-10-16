@@ -17,7 +17,7 @@ demands; the host keeps working without them.
 | 7 | Pending decision `noncanonical-target-hash` (vector E1603, shipped E1601) | the adapter reproduces the recorded divergence | a reviewed resolution |
 | 8 | No frozen `effect_failure` pair describes "the outside action completed but its result cannot be represented" | reported as `outside_failure`/`failed`, documented | a category for completed-but-unrepresentable, or guidance |
 | 9 | The protocol has no host-side handler deadline; a slow handler holds the worker | documented as a host limit; deadline kill is host-owned evidence | none required; confirms HP0.8 |
-| 10 | Core's Task 206 evidence pack (its second pull request) is not yet published | the pin says "replays the pinned kit" | publish the pack; the host then updates COMPATIBILITY.md |
+| 10 | Resolved: Core's Task 206 evidence pack is published at `49ed2d0` | COMPATIBILITY.md pins both the kit and the pack | none; the provisional v0 and second-adapter limits remain |
 
 ## Authority requirements (for Core task 207)
 

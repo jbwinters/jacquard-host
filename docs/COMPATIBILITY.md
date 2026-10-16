@@ -4,7 +4,7 @@
 
 The adapter is pinned to these Jacquard Core artifacts. The same values live
 in `src/jacquard_host/compat.py`, and the test suite fails if the vendored kit
-under `conformance/host-protocol-v0/`, this document, and that module disagree.
+under `src/jacquard_host/data/conformance/host-protocol-v0/`, this document, and that module disagree.
 
 - Jacquard release baseline: `jacquard-core-0.2.0`
   (release commit `aceca65e364db6dcf91cbdd54586c136646dfa37`)
@@ -22,7 +22,7 @@ under `conformance/host-protocol-v0/`, this document, and that module disagree.
   decisions (`noncanonical-target-hash`, diagnostic prose)
 
 Kit file digests (SHA-256, paths relative to `spec/host-protocol-v0/` in
-Core and to `conformance/host-protocol-v0/` here):
+Core and to `src/jacquard_host/data/conformance/host-protocol-v0/` here):
 
 | File | SHA-256 |
 |---|---|
@@ -73,7 +73,7 @@ invocation, effect, diagnostic, cancellation, and evidence contract.
 ## Refreshing the pin
 
 1. Copy the four kit files from the Core commit into
-   `conformance/host-protocol-v0/`.
+   `src/jacquard_host/data/conformance/host-protocol-v0/`.
 2. Update the digests and commit in `src/jacquard_host/compat.py` and in this
    document.
 3. Run the offline suite, then replay the kit against the matching Core build:

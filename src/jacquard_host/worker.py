@@ -10,17 +10,51 @@ worker, and never fabricates a Core frame.
 from __future__ import annotations
 
 import os
+import selectors
 import subprocess
-import tempfile
+import threading
 import time
-from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, BinaryIO, Mapping, Sequence
 
 from jacquard_host.protocol.errors import CarrierLoss
-from jacquard_host.protocol.framing import FrameReader, frame_bytes
+from jacquard_host.protocol.framing import FrameReader, frame_bytes, validate_deadline_seconds, write_bytes
 from jacquard_host.protocol.json_codec import decode_object, encode_object
 
 DEFAULT_COMMAND: tuple[str, ...] = ("jacquard",)
+MAX_STDERR_BYTES = 65536
+
+
+class _StderrCapture:
+    """Drain operator text without blocking Core or growing memory/disk use."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self.stream = stream
+        self.data = bytearray()
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._drain, name="jacquard-host-stderr", daemon=True)
+        self.thread.start()
+
+    def _drain(self) -> None:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(self.stream, selectors.EVENT_READ)
+                while True:
+                    stopping = self.stop.is_set()
+                    ready = selector.select(0 if stopping else 0.05)
+                    if ready:
+                        chunk = os.read(self.stream.fileno(), 65536)
+                        if not chunk:
+                            break
+                        self.data.extend(chunk[:max(0, MAX_STDERR_BYTES - len(self.data))])
+                    if stopping:
+                        break
+        finally:
+            self.stream.close()
+
+    def close(self) -> bytes:
+        self.stop.set()
+        self.thread.join()
+        return bytes(self.data)
 
 
 class WorkerProcess:
@@ -32,25 +66,28 @@ class WorkerProcess:
         deadline_seconds: float | None = 30.0,
         env: Mapping[str, str] | None = None,
     ) -> None:
+        validate_deadline_seconds(deadline_seconds)
         self.argv = [*command, "host", "worker", "--store", os.fspath(store)]
         self.deadline = None if deadline_seconds is None else time.monotonic() + deadline_seconds
-        stderr_fd, stderr_name = tempfile.mkstemp(prefix="jacquard-host-worker-stderr-")
-        self._stderr_path = Path(stderr_name)
-        try:
-            self.process = subprocess.Popen(
-                self.argv,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=stderr_fd,
-                env=None if env is None else dict(env),
-            )
-        except OSError:
-            os.close(stderr_fd)
-            self._stderr_path.unlink(missing_ok=True)
-            raise
-        # the child holds its own copy of the descriptor; release the parent's
-        os.close(stderr_fd)
+        self.process = subprocess.Popen(
+            self.argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            env=None if env is None else dict(env),
+        )
         assert self.process.stdin is not None and self.process.stdout is not None
+        assert self.process.stderr is not None
+        try:
+            self._capture = _StderrCapture(self.process.stderr)
+        except BaseException:
+            self.process.kill()
+            self.process.wait()
+            self.process.stdin.close()
+            self.process.stdout.close()
+            self.process.stderr.close()
+            raise
         self._reader = FrameReader(self.process.stdout.fileno(), deadline=self.deadline)
         self._input_open = True
         self.returncode: int | None = None
@@ -64,15 +101,18 @@ class WorkerProcess:
         return decode_object(payload, max_depth=limits["max_json_depth"])
 
     def write_frame(self, frame: dict[str, Any], limits: Mapping[str, int]) -> None:
+        data = frame_bytes(encode_object(frame), max_frame_bytes=limits["max_frame_bytes"])
+        self.write_bytes(data)
+
+    def write_bytes(self, data: bytes) -> None:
+        """Write carrier bytes within the lifetime budget (also used by the kit)."""
         if not self._input_open:
             raise CarrierLoss("the worker's input is already closed")
-        data = frame_bytes(encode_object(frame), max_frame_bytes=limits["max_frame_bytes"])
         try:
-            self.process.stdin.write(data)
-            self.process.stdin.flush()
-        except (BrokenPipeError, OSError):
+            write_bytes(self.process.stdin.fileno(), data, deadline=self.deadline)
+        except CarrierLoss:
             self.close_input()
-            raise CarrierLoss("the worker's input pipe was lost during a write") from None
+            raise
 
     def close_input(self) -> None:
         if self._input_open:
@@ -88,6 +128,9 @@ class WorkerProcess:
         """Reap the worker, killing it if it outlives ``timeout`` seconds."""
         self.close_input()
         if self.returncode is None:
+            if self.deadline is not None:
+                remaining = max(0.0, self.deadline - time.monotonic())
+                timeout = remaining if timeout is None else min(timeout, remaining)
             try:
                 self.returncode = self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -121,12 +164,7 @@ class WorkerProcess:
             self.process.stdout.close()
         except OSError:
             pass
-        if self._stderr_path.exists():
-            self.stderr = self._stderr_path.read_bytes()
-            try:
-                self._stderr_path.unlink()
-            except OSError:
-                pass
+        self.stderr = self._capture.close()
 
     def __enter__(self) -> "WorkerProcess":
         return self

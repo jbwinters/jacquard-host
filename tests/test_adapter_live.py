@@ -11,6 +11,7 @@ import unittest
 from jacquard_host.adapter import Host
 from jacquard_host.kit import build_store, load_kit
 from jacquard_host.protocol.envelopes import Interface
+from jacquard_host.protocol.limits import HARD_LIMITS
 from jacquard_host.protocol.values import Hash, Nominal, TupleType
 from jacquard_host.registry import HostFailure, OperationRegistry
 
@@ -90,6 +91,14 @@ class LiveAdapterTest(unittest.TestCase):
         registry.bind(IDS["kit-world"], IDS["send"], lambda body: object())
         result = self.host.invoke(IDS["kit-echo"], ECHO, ("ping",), registry)
         self.assertEqual((result.kind, result.terminal, result.primary_code), ("error", "host_failure", "E1613"))
+
+    def test_unencodable_handler_result_respects_a_small_message_limit(self) -> None:
+        host = Host(self.store, command=[JACQUARD_BIN], limits={**HARD_LIMITS, "max_host_message_bytes": 1})
+        registry = OperationRegistry()
+        registry.bind(IDS["kit-world"], IDS["send"], lambda body: object())
+        result = host.invoke(IDS["kit-echo"], ECHO, ("ping",), registry)
+        self.assertEqual((result.kind, result.primary_code), ("error", "E1613"))
+        self.assertEqual(result.host_frames[-1]["message"], "h")
 
     def test_wrong_typed_handler_result_is_refused_by_core(self) -> None:
         registry = OperationRegistry()

@@ -4,12 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jacquard-host"
-version = "0.0.0"
+dynamic = ["version"]
 description = "Language-neutral host integrations and adapters for Jacquard"
+readme = "README.md"
 requires-python = ">=3.11"
+
+[project.scripts]
+jacquard-host-kit = "jacquard_host.kit:main"
+jacquard-host-trial = "jacquard_host.trial:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.dynamic]
+version = {attr = "jacquard_host.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
+namespaces = false
+
+[tool.setuptools.package-data]
+jacquard_host = ["py.typed", "data/jacquard/*.jac", "data/conformance/host-protocol-v0/*.json", "data/conformance/host-protocol-v0/kit/*"]

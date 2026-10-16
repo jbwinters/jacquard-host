@@ -1,7 +1,7 @@
 """The exact Jacquard Core artifacts this adapter is pinned to.
 
 `docs/COMPATIBILITY.md` is the reviewable record; the test suite checks that
-the vendored kit under `conformance/` and that document agree with these
+the packaged kit under `data/conformance/` and that document agree with these
 constants, so the pin cannot drift silently in either direction.
 """
 
@@ -25,7 +25,7 @@ CORE_EVIDENCE_COMMIT = "49ed2d0590682d5f0be2eb2693b3781035039187"
 
 # SHA-256 of the kit files as published under spec/host-protocol-v0/ in Core,
 # keyed by their path relative to that directory. The vendored copies under
-# conformance/host-protocol-v0/ must match byte for byte.
+# data/conformance/host-protocol-v0/ must match byte for byte.
 KIT_DIGESTS = {
     "kit/kit.json": "a286328c457696a898aaa6731f0044fb90c78d8657d57270384a76976b070b53",
     "kit/transcripts.json": "ebaf590e3d1b7e8399f56de5ad85043ac3658416dd7f0af7b55b9f9f3ce93240",

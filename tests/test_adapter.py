@@ -2,14 +2,17 @@
 
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
 from jacquard_host.adapter import Host
 from jacquard_host.kit import load_kit
 from jacquard_host.protocol.envelopes import Interface
+from jacquard_host.protocol.errors import ProtocolError
 from jacquard_host.protocol.values import Hash, Nominal, TupleType
 from jacquard_host.registry import HostFailure, OperationRegistry
+from jacquard_host.worker import MAX_STDERR_BYTES
 
 KIT = load_kit()
 IDS = {name: Hash(value) for name, value in KIT.manifest["identities"].items()}
@@ -131,6 +134,37 @@ class ReplayedAdapterTest(unittest.TestCase):
         self.assertEqual((result.kind, result.host_evidence["reason"]), ("carrier_loss", "deadline"))
         self.assertIsNone(result.exit_status)
         self.assertIsNotNone(result.signal)
+
+    def test_worker_that_never_reads_cannot_block_a_large_invoke(self) -> None:
+        program = (
+            "import json,sys,time\n"
+            "t=json.load(open(sys.argv[1]))\n"
+            "f=t[0]['core_output'][0]\n"
+            "p=json.dumps(f).encode();sys.stdout.buffer.write(len(p).to_bytes(4,'big')+p);sys.stdout.buffer.flush()\n"
+            "time.sleep(30)\n"
+        )
+        host = Host("unused-store", command=[sys.executable, "-c", program, str(KIT.directory / "kit" / "transcripts.json")], deadline_seconds=0.5)
+        started = time.monotonic()
+        result = host.invoke(IDS["kit-echo"], ECHO, ("x" * 200000,))
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual((result.kind, result.host_evidence["reason"]), ("carrier_loss", "deadline"))
+        self.assertIsNotNone(result.signal)
+
+    def test_stderr_is_drained_and_retained_with_a_fixed_bound(self) -> None:
+        program = "import os;os.write(2,b'x'*2000000)"
+        host = Host("unused-store", command=[sys.executable, "-c", program], deadline_seconds=5)
+        result = host.invoke(IDS["kit-ready"], Interface((), TupleType()))
+        self.assertEqual((result.kind, result.exit_status), ("carrier_loss", 0))
+        self.assertEqual(result.stderr, b"x" * MAX_STDERR_BYTES)
+
+    def test_invalid_deadlines_are_refused_before_spawning(self) -> None:
+        for deadline in (0, -1, float("nan"), float("inf"), True):
+            with self.subTest(deadline=deadline), self.assertRaises(ValueError):
+                Host("unused-store", command=["/nonexistent/worker"], deadline_seconds=deadline)
+
+    def test_invalid_limits_are_refused_before_spawning(self) -> None:
+        with self.assertRaises(ProtocolError):
+            Host("unused-store", command=["/nonexistent/worker"], limits={})
 
     def test_garbage_from_the_worker_is_a_local_protocol_error(self) -> None:
         program = "import sys; sys.stdout.buffer.write(b'\\x00\\x00\\x00\\x02[]'); sys.stdout.flush(); sys.stdin.read()"

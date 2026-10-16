@@ -23,18 +23,18 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 from jacquard_host import compat
 from jacquard_host.protocol.errors import ProtocolError
-from jacquard_host.protocol.framing import FrameReader, frame_bytes
-from jacquard_host.protocol.json_codec import canonical_text, decode_object, encode_object
+from jacquard_host.protocol.framing import frame_bytes
+from jacquard_host.protocol.json_codec import canonical_text, encode_object
 from jacquard_host.protocol.limits import HARD_LIMITS
+from jacquard_host.worker import WorkerProcess
 
-DEFAULT_KIT_DIR = Path(__file__).resolve().parents[2] / "conformance" / "host-protocol-v0"
+DEFAULT_KIT_DIR = Path(__file__).resolve().parent / "data" / "conformance" / "host-protocol-v0"
 KIT_SCHEMA = "jacquard-host-kit-v0"
 PROSE_FIELDS = ("summary", "cause", "next_step", "contrast")
 TERMINAL_KINDS = frozenset({"outcome", "fatal", "shutdown_ack"})
@@ -273,68 +273,35 @@ def play(
     ``command`` is the argv prefix of the worker executable, normally
     ``["jacquard"]``; the ``host worker --store STORE`` arguments are appended.
     """
-    deadline = time.monotonic() + deadline_seconds
-    stderr_fd, stderr_name = tempfile.mkstemp(prefix="jacquard-host-kit-stderr-")
-    stderr_path = Path(stderr_name)
     frames: list[dict[str, Any]] = []
-    state = {"terminal": False, "refusal": None, "skipped": 0, "write_failure": False, "input_open": True}
-    try:
-        process = subprocess.Popen(
-            [*command, "host", "worker", "--store", os.fspath(store)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=stderr_fd,
-            env=env,
-        )
-    except OSError:
-        os.close(stderr_fd)
-        stderr_path.unlink(missing_ok=True)
-        raise
-    # the child holds its own copy of the descriptor; release the parent's
-    os.close(stderr_fd)
-    assert process.stdin is not None and process.stdout is not None
-    reader = FrameReader(process.stdout.fileno(), deadline=deadline)
-
-    def read_frame() -> bool:
-        try:
-            payload = reader.read_frame(max_frame_bytes=HARD_LIMITS["max_frame_bytes"])
-            frame = decode_object(payload, max_depth=HARD_LIMITS["max_json_depth"])
-        except ProtocolError:
-            return False
-        frames.append(frame)
-        if is_terminal(frame):
-            state["terminal"] = True
-        return True
-
-    def close_input() -> None:
-        if state["input_open"]:
-            state["input_open"] = False
+    state = {"terminal": False, "refusal": None, "skipped": 0, "write_failure": False}
+    with WorkerProcess(store, command=command, deadline_seconds=deadline_seconds, env=env) as worker:
+        def read_frame() -> bool:
             try:
-                process.stdin.close()
-            except OSError:
-                pass
+                frame = worker.read_frame(HARD_LIMITS)
+            except ProtocolError:
+                return False
+            frames.append(frame)
+            if is_terminal(frame):
+                state["terminal"] = True
+            return True
 
-    def write(data: bytes) -> None:
-        if not state["input_open"]:
-            return
-        try:
-            process.stdin.write(data)
-            process.stdin.flush()
-        except (BrokenPipeError, OSError):
-            state["write_failure"] = True
-            close_input()
+        def write(data: bytes) -> None:
+            try:
+                worker.write_bytes(data)
+            except ProtocolError:
+                state["write_failure"] = True
 
-    def encode(frame: dict[str, Any]) -> bytes:
-        return frame_bytes(encode_object(frame), max_frame_bytes=HARD_LIMITS["max_frame_bytes"])
+        def encode(frame: dict[str, Any]) -> bytes:
+            return frame_bytes(encode_object(frame), max_frame_bytes=HARD_LIMITS["max_frame_bytes"])
 
-    try:
         try:
             for step in transcript["host_input"]:
                 if step["direction"] == "core_to_host":
                     read_frame()
                 elif "raw_hex" in step:
                     write(bytes.fromhex(step["raw_hex"]))
-                    close_input()
+                    worker.close_input()
                 elif step.get("after_terminal"):
                     if state["terminal"]:
                         state["refusal"] = "E1608"
@@ -344,37 +311,18 @@ def play(
                     state["skipped"] += 1
                 else:
                     write(encode(step["frame"]))
-            close_input()
+            worker.close_input()
             while read_frame():
                 pass
         except TimeoutError:
-            process.kill()
+            worker.kill()
             frames.append(dict(FAKE_HOST_TIMEOUT))
-        close_input()
-        try:
-            returncode = process.wait(timeout=max(1.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            process.kill()
-            returncode = process.wait()
-    finally:
-        close_input()
-        try:
-            process.stdout.close()
-        except OSError:
-            pass
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        stderr = stderr_path.read_bytes() if stderr_path.exists() else b""
-        try:
-            stderr_path.unlink()
-        except OSError:
-            pass
+        returncode = worker.wait(timeout=1.0)
     return Observed(
         core_frames=frames,
         exit_code=returncode if returncode >= 0 else None,
         signal=-returncode if returncode < 0 else None,
-        stderr=stderr,
+        stderr=worker.stderr,
         host_refusal=state["refusal"],
         skipped_after_terminal=state["skipped"],
         write_failure=state["write_failure"],
@@ -516,10 +464,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--report", default=None, help="write a JSON report to this path")
     args = parser.parse_args(argv)
 
-    kit = load_kit(args.kit)
-    verify_pins(kit)
     command = [args.jacquard]
+    env = dict(os.environ)
+    if args.prelude:
+        env["JACQUARD_PRELUDE"] = os.path.abspath(args.prelude)
     try:
+        kit = load_kit(args.kit)
+        verify_pins(kit)
         with tempfile.TemporaryDirectory(prefix="jacquard-host-kit-store-") as scratch:
             store = args.store
             if store is None:
@@ -527,8 +478,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     parser.error("--prelude (or JACQUARD_PRELUDE) is required to build the kit store")
                 store = os.path.join(scratch, "store")
                 build_store(command, fixtures=kit.fixtures, prelude=args.prelude, store=store)
-            results = replay(command, store, kit, names=args.only, deadline_seconds=args.deadline)
-    except (OSError, RuntimeError, KeyError) as error:
+            results = replay(command, store, kit, names=args.only, deadline_seconds=args.deadline, env=env)
+    except (OSError, RuntimeError, KeyError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     if not results:

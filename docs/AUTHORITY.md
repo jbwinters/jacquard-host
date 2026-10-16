@@ -20,7 +20,7 @@ by exact identity only.
 
 | Action | Where | Authority used |
 |---|---|---|
-| Spawn `jacquard host worker --store DIR` per invocation | `jacquard_host.worker` | process creation; two pipes (stdin, stdout); a temp file for bounded stderr; the parent's environment is passed to the child with `JACQUARD_PRELUDE` and `TMPDIR` overridden where the host sets them |
+| Spawn `jacquard host worker --store DIR` per invocation | `jacquard_host.worker` | process creation; three pipes; a reader thread drains stderr and retains at most 65536 bytes in memory; the parent's environment is passed to the child with `JACQUARD_PRELUDE` and `TMPDIR` overridden where the host sets them |
 | Populate a Core store from the assembled first-party source | `jacquard_host.trial.TrialApp` (once per work directory) | `jacquard run FILE --store DIR`; filesystem write under the work directory |
 | Resolve identities | `jacquard_host.identities` | `jacquard hash` and `jacquard check --print-sigs` on first-party files and on the Core prelude file `01-prim.jqd` |
 | Bind and accept | `jacquard_host.socket_host` | loopback TCP only (`127.0.0.1`, `::1`, or the name `localhost`); anything else is refused at construction |
@@ -34,8 +34,8 @@ by exact identity only.
   `JACQUARD_PRELUDE`, and `TMPDIR`; child processes inherit the parent's
   environment plus overrides of `JACQUARD_PRELUDE` and `TMPDIR`.
 - No filesystem access outside the work directory, the Core prelude and
-  store paths given at startup, the package's own `jacquard/` sources it
-  assembles, the temp directory for stderr capture, and a report path the
+  store paths given at startup, the package's own `src/jacquard_host/data/jacquard/` sources it
+  assembles, temporary directories for kit-store construction, and a report path the
   operator names on the kit replayer's command line.
 - No nested policy: the host has no handler chain of its own; every policy
   decision reachable from Jacquard is inside Jacquard code or Core's checker.

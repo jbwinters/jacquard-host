@@ -2,8 +2,8 @@
 
 The package speaks the frozen ``jacquard-host-v0`` protocol over the
 ``stdio-u32-json-v0`` carrier, pinned in :mod:`jacquard_host.compat` and
-``docs/COMPATIBILITY.md``. The first slice ships the strict carrier codecs and
-the conformance-kit replayer; the embedding adapter follows on the same pin.
+``docs/COMPATIBILITY.md``. It includes the embedding adapter, strict carrier
+codecs, conformance-kit replayer, and synthetic serial integration.
 """
 
 from jacquard_host.compat import CARRIER, CORE_VERSION, PROTOCOL
