@@ -44,7 +44,7 @@ boundary and the evidence required to widen it.
 The adapter is pinned to the exact conformance-kit files of Core's
 `jacquard-host-v0` protocol and to the kit's published evidence pack, both on
 Core `main` (the worker and kit postdate the `jacquard-core-0.2.0` tag), vendored under
-`conformance/host-protocol-v0/` and digest-checked by the test suite. The pin,
+`src/jacquard_host/data/conformance/host-protocol-v0/` and digest-checked by the test suite. The pin,
 its provisional status, and the refresh procedure are in
 [COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -55,6 +55,15 @@ future readability product. Task Master mirrors this roadmap as local planning
 state; the Markdown document is the reviewable source of intent.
 
 ## Calling Jacquard from Python, and Python from Jacquard
+
+Install the Python 3.11+ library with `python3 -m pip install .`. It has no
+third-party runtime dependencies. The wheel and source distribution include
+the pinned conformance kit and the synthetic application's Jacquard sources;
+installed code does not need a repository checkout. Core is installed
+separately and must match [the compatibility pin](docs/COMPATIBILITY.md).
+The installed commands `jacquard-host-kit` and `jacquard-host-trial` expose the
+same options as their `python3 -m jacquard_host.kit` and
+`python3 -m jacquard_host.trial` counterparts.
 
 The adapter binds everything by content hash, never by display name (Core
 decision D80). A host learns the hashes of its own declarations with the
@@ -117,7 +126,7 @@ so a run can be audited without trusting the adapter's summary.
 
 ## The study persistence operation
 
-`jacquard/study.jac` declares `once effect Study where { save-response :
+`src/jacquard_host/data/jacquard/study.jac` declares `once effect Study where { save-response :
 (Text, Text, Text) -> SaveOutcome }` and `jacquard_host.study` implements it
 behind that one identity: host-owned SQLite, one `BEGIN IMMEDIATE`
 transaction per save, a deterministic SHA-256 receipt, idempotent repeats
@@ -162,7 +171,7 @@ server.serve_forever()         # strictly one request at a time; server.stop() c
 
 ## The HTTP/1.1 subset in Jacquard
 
-`jacquard/http.jac` is the parser, validator, router, and response renderer
+`src/jacquard_host/data/jacquard/http.jac` is the parser, validator, router, and response renderer
 (roadmap H1.1), written entirely in Jacquard so that every HTTP meaning
 stays in application code. It accepts GET and POST, an origin-form target,
 HTTP/1.1, CRLF line endings, exactly one Host header, and an optional
@@ -185,18 +194,19 @@ obs-text bytes (0x80..0xff) in header values are accepted as RFC 9112 allows.
 The host's request ceiling (default 65536 bytes, head included) bounds the
 effective body size below the parser's own 65536-byte ceiling.
 
-`jacquard/http-tests.jac` is the Warp suite (47 cases and properties). Run
+`src/jacquard_host/data/jacquard/http-tests.jac` is the Warp suite (47 cases and properties). Run
 it against the concatenation of the two files, because Jacquard has no
 import syntax:
 
 ```sh
-cat jacquard/http.jac jacquard/http-tests.jac > .scratch/http-all.jac
+mkdir -p .scratch
+cat src/jacquard_host/data/jacquard/http.jac src/jacquard_host/data/jacquard/http-tests.jac > .scratch/http-all.jac
 jacquard test .scratch/http-all.jac --seed 42
 ```
 
 ## The synthetic trial slice
 
-`jacquard/trial.jac` is the end-to-end proof (roadmap H1.3): `GET /trial`
+`src/jacquard_host/data/jacquard/trial.jac` is the end-to-end proof (roadmap H1.3): `GET /trial`
 returns one deterministic synthetic trial, `POST /response` validates a
 `trial=…&session=…&answer=a|b` body (exactly those three keys, raw token
 values with no URL encoding, each 1..128 characters starting alphanumeric,
@@ -242,6 +252,15 @@ Python 3.11 or later:
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m compileall -q src tests
+```
+
+CI also builds a source archive, rebuilds its wheel, installs it outside the
+checkout, and checks the packaged assets, version, command entry points,
+invocation, and all 21 recorded transcripts using the stand-in worker:
+
+```sh
+python3 -m pip install 'setuptools>=68' wheel
+python3 scripts/check_distribution.py
 ```
 
 To replay the pinned kit against a real worker, point the suite (or the

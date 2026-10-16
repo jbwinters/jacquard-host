@@ -197,6 +197,12 @@ class ReplayWorkerTest(unittest.TestCase):
         if before is not None:
             self.assertEqual(len(os.listdir("/proc/self/fd")), before, "the killed worker's descriptors were not released")
 
+    def test_a_worker_that_stops_reading_hits_the_write_deadline(self) -> None:
+        transcript = {"host_input": [{"direction": "host_to_core", "raw_hex": (b"x" * 200000).hex()}]}
+        observed = play([sys.executable, "-c", "import time;time.sleep(30)"], "unused-store", transcript, deadline_seconds=0.3)
+        self.assertEqual(observed.core_frames, [{"kind": "fake-host-timeout"}])
+        self.assertIsNotNone(observed.signal)
+
 
 if __name__ == "__main__":
     unittest.main()

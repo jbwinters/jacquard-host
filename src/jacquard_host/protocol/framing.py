@@ -9,6 +9,7 @@ evidence rather than a Core result.
 
 from __future__ import annotations
 
+import math
 import os
 import selectors
 import time
@@ -17,6 +18,43 @@ from typing import BinaryIO
 from jacquard_host.protocol.errors import CarrierLoss, LimitExceeded
 
 PREFIX_BYTES = 4
+
+
+def validate_deadline_seconds(value: float | None) -> None:
+    """Reject invalid host budgets before opening any process resources."""
+    if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
+        raise ValueError("deadline_seconds must be finite and positive, or None")
+
+
+def write_bytes(fd: int, data: bytes, *, deadline: float | None = None) -> None:
+    """Write all bytes to a pipe, including partial writes, within one deadline.
+
+    The descriptor must have a single writer. Nonblocking writes ensure that
+    even a worker that stops consuming input cannot defeat the host budget.
+    """
+    blocking = os.get_blocking(fd)
+    os.set_blocking(fd, False)
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_WRITE)
+            remaining_data = memoryview(data)
+            while remaining_data:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("frame write deadline expired")
+                if not selector.select(remaining):
+                    raise TimeoutError("frame write deadline expired")
+                try:
+                    count = os.write(fd, remaining_data)
+                except BlockingIOError:
+                    continue
+                except OSError as error:
+                    raise CarrierLoss(f"the carrier refused a write: {error.__class__.__name__}") from None
+                if count == 0:
+                    raise CarrierLoss("the carrier made no progress during a write")
+                remaining_data = remaining_data[count:]
+    finally:
+        os.set_blocking(fd, blocking)
 
 
 def frame_bytes(payload: bytes, *, max_frame_bytes: int) -> bytes:

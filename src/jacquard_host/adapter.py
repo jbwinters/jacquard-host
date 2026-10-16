@@ -29,6 +29,12 @@ from jacquard_host.protocol.envelopes import (
     ShutdownAck,
 )
 from jacquard_host.protocol.errors import CarrierLoss, ProtocolError
+from jacquard_host.protocol.framing import validate_deadline_seconds
+from jacquard_host.protocol.limits import HARD_LIMITS, validate_limits
+from jacquard_host.protocol.values import Hash
+from jacquard_host.registry import OperationRegistry
+from jacquard_host.session import HostSession, State
+from jacquard_host.worker import DEFAULT_COMMAND, WorkerProcess
 
 
 class _HostRefused(Exception):
@@ -37,11 +43,6 @@ class _HostRefused(Exception):
     def __init__(self, error: ProtocolError) -> None:
         super().__init__(str(error))
         self.error = error
-from jacquard_host.protocol.limits import HARD_LIMITS
-from jacquard_host.protocol.values import Hash
-from jacquard_host.registry import OperationRegistry
-from jacquard_host.session import HostSession, State
-from jacquard_host.worker import DEFAULT_COMMAND, WorkerProcess
 
 
 @dataclass
@@ -114,9 +115,10 @@ class Host:
         deadline_seconds: float | None = 30.0,
         env: Mapping[str, str] | None = None,
     ) -> None:
+        validate_deadline_seconds(deadline_seconds)
         self.store = os.fspath(store)
         self.command = tuple(command)
-        self.limits = dict(limits) if limits is not None else dict(HARD_LIMITS)
+        self.limits = validate_limits(dict(limits) if limits is not None else dict(HARD_LIMITS))
         self.deadline_seconds = deadline_seconds
         self.env = None if env is None else dict(env)
 
@@ -238,7 +240,8 @@ class Host:
                         reply = session.respond_ok(response.value)
                     except ProtocolError as error:
                         # the handler returned something with no v0 encoding; report it, never crash
-                        reply = session.respond_failure("outside_failure", "failed", f"host result has no v0 encoding ({error.code})")
+                        message = _bounded_message(f"host result has no v0 encoding ({error.code})", session.limits["max_host_message_bytes"])
+                        reply = session.respond_failure("outside_failure", "failed", message)
                 else:
                     failure = response.failure
                     assert failure is not None

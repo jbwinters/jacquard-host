@@ -26,7 +26,7 @@ from jacquard_host.socket_host import Ceilings, SerialSocketHost
 from jacquard_host.study import StudyIdentities, StudyStore, bind_study
 from jacquard_host.worker import DEFAULT_COMMAND
 
-JACQUARD_DIR = Path(__file__).resolve().parents[2] / "jacquard"
+JACQUARD_DIR = Path(__file__).resolve().parent / "data" / "jacquard"
 SOURCES: tuple[str, ...] = ("http.jac", "study.jac", "trial.jac")
 
 
@@ -87,7 +87,10 @@ class TrialApp:
         self.study = StudyStore(self.workdir / "study.sqlite")
         self.registry = OperationRegistry()
         bind_study(self.registry, self.identities, self.study)
-        self.host = Host(self.store_dir, command=self.command, deadline_seconds=deadline_seconds)
+        self.host = Host(
+            self.store_dir, command=self.command, deadline_seconds=deadline_seconds,
+            env=dict(os.environ, JACQUARD_PRELUDE=self.prelude),
+        )
 
     @property
     def target(self) -> Hash:
