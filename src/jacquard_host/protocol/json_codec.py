@@ -96,6 +96,13 @@ def encode_object(value: dict[str, Any]) -> bytes:
     )
 
 
+def validate_object(value: dict[str, Any], *, max_depth: int) -> None:
+    """Validate a host-built object before sending it to Core."""
+    if not isinstance(value, dict):
+        raise MalformedFrame("the payload is not a JSON object")
+    _check(value, 1, max_depth)
+
+
 def canonical_text(value: Any) -> str:
     """Canonical JSON text used only for semantic comparison of frames."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False)

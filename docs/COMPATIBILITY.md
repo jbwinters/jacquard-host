@@ -40,6 +40,10 @@ normative and is reported, never normalised.
 
 ## Status of the pin
 
+See [SETUP.md](SETUP.md) for a reproducible build of the pinned worker and its
+matching prelude. The tagged 0.2.0 binary release predates host-worker support;
+use the commit pin above rather than relying on the version string alone.
+
 The kit and its evidence pack are both on Core `main`, so all five items of
 the adoption rule below are met. The file digests are the durable part of
 the pin; the commit hashes record where the kit and the pack live. The

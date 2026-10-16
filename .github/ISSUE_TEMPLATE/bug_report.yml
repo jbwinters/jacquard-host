@@ -1,0 +1,22 @@
+name: Bug report
+description: Report a reproducible SDK, adapter, or example problem.
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include a minimal synthetic program, Python call or command, and expected versus actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Environment
+      description: Include the host SDK version, Core commit and version, Python version, and operating system. Confirm the worker and prelude come from the same build.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Diagnostics or evidence
+      description: Include error codes and relevant output. Inspection files contain application values; remove secrets and use synthetic data before sharing.

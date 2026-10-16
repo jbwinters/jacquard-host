@@ -1,0 +1,2533 @@
+{
+  "schema": "jacquard-host-python-project-experiments-v1",
+  "date": "2026-10-16",
+  "python": "3.14.7",
+  "platform": "Linux-7.0.0-34-generic-x86_64-with-glibc2.43",
+  "library_version": "0.1.0",
+  "library_path": "<installed-wheel>/jacquard_host/__init__.py",
+  "library_adapter_sha256": "3a875c72126c59e421dd72d8f2c85d37b9b5de5a4ec3ea595f8c2469c869f8b2",
+  "core_binary": "<pinned-core>/_build/default/bin/main.exe",
+  "core_binary_sha256": "65073e7169deeb8026deb392952f2bb9cb551b6830e1477020bd4613dcd03bdd",
+  "source_sha256": {
+    "fulfillment.jac": "2bb7fa97eeb26c517a35d5a0e7d85b69321e1fc163491174a2cd2439ab782580",
+    "planner.jac": "b4c0ae5b5b14d6cb5037f59473238ead81499a5263a5db2acfe64860c8e98537",
+    "triage.jac": "df4c87bcdb676655e4daa4c12b3f426f21b9eb4e9e935112f1ba9d416ffac101"
+  },
+  "python_source_sha256": {
+    "app.py": "53a474b4c72177957f4e18f2323ceb764f1e9753a1df8e719dce5fa968bca524",
+    "inventory.py": "a8f29c2b263f20af64c230840fd2027626e08df94e0e39143aa121d081db4b8d",
+    "run.py": "a02e4aa12da15ea5234b7e2f0d92791ca8dde98d66fd8c82671893f4c06c82af",
+    "support.py": "6cb02f5aaa2c1c674b540fb29d7f1118bc573247ef087240bf5dfc5e1c09798f"
+  },
+  "setup_ms": {
+    "fulfillment": 2741.902,
+    "planner": 2795.046,
+    "triage": 2531.355
+  },
+  "checks": [
+    {
+      "case": "multi-line order",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "fulfilled",
+        "fields": [
+          "906688f55ef2940c16b7b12bd81a91991dca8dc9300ee590e08ede134b525141"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status",
+        "lookup-stock",
+        "lookup-stock",
+        "reserve-order",
+        "publish-booking"
+      ],
+      "elapsed_ms": 57.169
+    },
+    {
+      "case": "idempotent repeat",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "duplicate-order",
+        "fields": [
+          "906688f55ef2940c16b7b12bd81a91991dca8dc9300ee590e08ede134b525141"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status"
+      ],
+      "elapsed_ms": 27.614
+    },
+    {
+      "case": "idempotency conflict",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "order-rejected",
+        "fields": [
+          "idempotency conflict"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status"
+      ],
+      "elapsed_ms": 60.334
+    },
+    {
+      "case": "unknown SKU",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "order-rejected",
+        "fields": [
+          "unknown SKU: no-such-sku"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status",
+        "lookup-stock"
+      ],
+      "elapsed_ms": 28.189
+    },
+    {
+      "case": "short stock",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "order-rejected",
+        "fields": [
+          "short stock: sensor"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status",
+        "lookup-stock"
+      ],
+      "elapsed_ms": 27.215
+    },
+    {
+      "case": "empty order",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "order-rejected",
+        "fields": [
+          "invalid order"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 26.757
+    },
+    {
+      "case": "zero units",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "order-rejected",
+        "fields": [
+          "invalid order"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 25.289
+    },
+    {
+      "case": "duplicate SKU",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "order-rejected",
+        "fields": [
+          "invalid order"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 26.464
+    },
+    {
+      "case": "refuse",
+      "kind": "error",
+      "terminal": "host_failure",
+      "primary_code": "E1607",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1607",
+          "summary": "The host refused authority before starting the outside action.",
+          "cause": "The host reported an outside failure. Host detail: synthetic warehouse is closed",
+          "next_step": "Review the host's authority policy before starting a new invocation."
+        }
+      ],
+      "requests": [
+        "booking-status",
+        "lookup-stock"
+      ],
+      "elapsed_ms": 28.0
+    },
+    {
+      "case": "wrong-type",
+      "kind": "error",
+      "terminal": "diagnostic",
+      "primary_code": "E1608",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1608",
+          "summary": "The host protocol message is invalid in the current state.",
+          "cause": "The host response is malformed or disagrees with its checked result type.",
+          "next_step": "Send only the next message permitted by the serial jacquard-host-v0 state machine."
+        }
+      ],
+      "requests": [
+        "booking-status",
+        "lookup-stock"
+      ],
+      "elapsed_ms": 27.619
+    },
+    {
+      "case": "stock changes after lookup",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "order-rejected",
+        "fields": [
+          "stock changed before commit"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status",
+        "lookup-stock",
+        "lookup-stock",
+        "reserve-order"
+      ],
+      "elapsed_ms": 57.046
+    },
+    {
+      "case": "unbound dispatch operation",
+      "kind": "error",
+      "terminal": "diagnostic",
+      "primary_code": "E1606",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1606",
+          "summary": "The root operation has no configured host implementation.",
+          "cause": "The root operation is absent from the configured registry.",
+          "next_step": "Configure the exact operation before starting a new invocation."
+        }
+      ],
+      "requests": [
+        "booking-status",
+        "lookup-stock",
+        "reserve-order"
+      ],
+      "elapsed_ms": 32.843
+    },
+    {
+      "case": "dispatch fails after durable reservation",
+      "kind": "error",
+      "terminal": "host_failure",
+      "primary_code": "E1613",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1613",
+          "summary": "The host reported that the outside action failed.",
+          "cause": "The host reported an outside failure. Host detail: synthetic dispatch unavailable",
+          "next_step": "Inspect the host's failure evidence before deciding on any later invocation."
+        }
+      ],
+      "requests": [
+        "booking-status",
+        "lookup-stock",
+        "reserve-order",
+        "publish-booking"
+      ],
+      "elapsed_ms": 30.782
+    },
+    {
+      "case": "explicit repeat after partial completion",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "duplicate-order",
+        "fields": [
+          "83bab5159661b24ec5f2eb0e64de390a890b1fe05806a32ef2e49ee4e6cd5247"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status"
+      ],
+      "elapsed_ms": 27.64
+    },
+    {
+      "case": "exception after commit",
+      "kind": "error",
+      "terminal": "completion_unknown",
+      "primary_code": "E1612",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1612",
+          "summary": "The outside action's completion is unknown.",
+          "cause": "The host reported an outside failure. Host detail: handler raised RuntimeError",
+          "next_step": "Reconcile host-owned evidence; do not automatically retry the action or invocation."
+        }
+      ],
+      "requests": [
+        "booking-status",
+        "lookup-stock",
+        "reserve-order"
+      ],
+      "elapsed_ms": 31.763
+    },
+    {
+      "case": "explicit reconciliation after unknown completion",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "duplicate-order",
+        "fields": [
+          "249e29a61fea5609f32a8900fa4e0b3ee51d681a9041160e27930433ff40617d"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status"
+      ],
+      "elapsed_ms": 26.504
+    },
+    {
+      "case": "consume remaining stock",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "fulfilled",
+        "fields": [
+          "b30205278b95fd9639c5a7906c989dc01b5f96e9efa2480fcbb52205ce2c548a"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status",
+        "lookup-stock",
+        "reserve-order",
+        "publish-booking"
+      ],
+      "elapsed_ms": 34.667
+    },
+    {
+      "case": "repeat with exhausted stock",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "duplicate-order",
+        "fields": [
+          "b30205278b95fd9639c5a7906c989dc01b5f96e9efa2480fcbb52205ce2c548a"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status"
+      ],
+      "elapsed_ms": 27.155
+    },
+    {
+      "case": "slow Python handler exceeds carrier deadline",
+      "kind": "carrier_loss",
+      "terminal": null,
+      "primary_code": null,
+      "host_evidence": {
+        "schema": "jacquard-host-python-evidence-v0",
+        "code": "E1611",
+        "reason": "deadline",
+        "state": "running",
+        "outstanding_request": null,
+        "elapsed_seconds": 0.3261991220060736
+      },
+      "value": null,
+      "diagnostics": [],
+      "requests": [
+        "booking-status",
+        "lookup-stock"
+      ],
+      "elapsed_ms": 328.943
+    },
+    {
+      "case": "restart recovers duplicate receipt",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "duplicate-order",
+        "fields": [
+          "906688f55ef2940c16b7b12bd81a91991dca8dc9300ee590e08ede134b525141"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [
+        "booking-status"
+      ],
+      "elapsed_ms": 27.661
+    },
+    {
+      "case": "planner independent oracle 0",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              12,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "small-a",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "small-b",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 101.077
+    },
+    {
+      "case": "planner independent oracle 1",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 24.735
+    },
+    {
+      "case": "planner independent oracle 2",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 26.606
+    },
+    {
+      "case": "planner independent oracle 3",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 27.278
+    },
+    {
+      "case": "planner independent oracle 4",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 25.713
+    },
+    {
+      "case": "planner independent oracle 5",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              17,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-2",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-4",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 30.514
+    },
+    {
+      "case": "planner independent oracle 6",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              28,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-1",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-2",
+                    3
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 32.09
+    },
+    {
+      "case": "planner independent oracle 7",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              12,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    2
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 27.861
+    },
+    {
+      "case": "planner independent oracle 8",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              8,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 28.166
+    },
+    {
+      "case": "planner independent oracle 9",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              33,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-1",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-3",
+                    2
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-4",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 32.287
+    },
+    {
+      "case": "planner independent oracle 10",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              17,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 26.256
+    },
+    {
+      "case": "planner independent oracle 11",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              4,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-1",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 27.478
+    },
+    {
+      "case": "planner independent oracle 12",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              37,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-2",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-4",
+                    3
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 30.986
+    },
+    {
+      "case": "planner independent oracle 13",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              31,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    2
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-1",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-3",
+                    2
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-4",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 32.419
+    },
+    {
+      "case": "planner independent oracle 14",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              15,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 26.086
+    },
+    {
+      "case": "planner independent oracle 15",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              17,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-2",
+                    3
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 34.426
+    },
+    {
+      "case": "planner independent oracle 16",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              40,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-1",
+                    2
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-2",
+                    3
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-3",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-4",
+                    3
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 44.212
+    },
+    {
+      "case": "planner independent oracle 17",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 25.953
+    },
+    {
+      "case": "planner independent oracle 18",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              15,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-2",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 27.764
+    },
+    {
+      "case": "planner independent oracle 19",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              10,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 27.486
+    },
+    {
+      "case": "planner independent oracle 20",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 25.272
+    },
+    {
+      "case": "planner independent oracle 21",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 26.257
+    },
+    {
+      "case": "planner independent oracle 22",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              12,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    2
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 28.582
+    },
+    {
+      "case": "planner independent oracle 23",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              29,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-1",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-3",
+                    1
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-5",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 30.101
+    },
+    {
+      "case": "planner independent oracle 24",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              0,
+              []
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 25.417
+    },
+    {
+      "case": "planner independent oracle 25",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              17,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    3
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-1",
+                    2
+                  ]
+                },
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-2",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 30.664
+    },
+    {
+      "case": "planner independent oracle 26",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              14,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "job-0",
+                    3
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 25.377
+    },
+    {
+      "case": "duplicate IDs",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "invalid-plan",
+        "fields": [
+          "invalid job or capacity"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 24.875
+    },
+    {
+      "case": "negative capacity",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "invalid-plan",
+        "fields": [
+          "invalid job or capacity"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 24.659
+    },
+    {
+      "case": "bounded search",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "invalid-plan",
+        "fields": [
+          "at most six jobs and one to three slots"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 28.649
+    },
+    {
+      "case": "empty capacity",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "invalid-plan",
+        "fields": [
+          "at most six jobs and one to three slots"
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 24.674
+    },
+    {
+      "case": "planner equal-score choice",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              5,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "b",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 25.077
+    },
+    {
+      "case": "planner deterministic repeat",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": {
+        "tag": "planned",
+        "fields": [
+          {
+            "tag": "plan",
+            "fields": [
+              5,
+              [
+                {
+                  "tag": "assignment",
+                  "fields": [
+                    "b",
+                    1
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 29.779
+    },
+    {
+      "case": "triage matrix 0:10",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": [
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-0",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-1",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-2",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-3",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-4",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-5",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-6",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-7",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-8",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-9",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        }
+      ],
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 34.984
+    },
+    {
+      "case": "triage matrix 10:20",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": [
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-10",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-11",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-12",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-13",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-14",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-15",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-16",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-17",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-18",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-19",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        }
+      ],
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 32.34
+    },
+    {
+      "case": "triage matrix 20:30",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": [
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-20",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-21",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-22",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-23",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-24",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-25",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-26",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-27",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-28",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-29",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        }
+      ],
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 33.988
+    },
+    {
+      "case": "triage matrix 30:40",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": [
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-30",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-31",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-32",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-33",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-34",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-35",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-36",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-37",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-38",
+            "api-oncall",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "unowned",
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-39",
+            "ops",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "customer-impact"
+            ]
+          ]
+        }
+      ],
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 34.509
+    },
+    {
+      "case": "triage matrix 40:50",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": [
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-40",
+            "api-oncall",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-41",
+            "ops",
+            {
+              "tag": "watch-only",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-42",
+            "api-oncall",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "unowned",
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-43",
+            "ops",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-44",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-45",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-46",
+            "api-oncall",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing",
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-47",
+            "ops",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "ageing",
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-48",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-49",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            []
+          ]
+        }
+      ],
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 34.564
+    },
+    {
+      "case": "triage matrix 50:60",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": [
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-50",
+            "api-oncall",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "unowned",
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-51",
+            "ops",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-52",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-53",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            []
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-54",
+            "api-oncall",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "unowned",
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-55",
+            "ops",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-56",
+            "api-oncall",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-57",
+            "ops",
+            {
+              "tag": "work-today",
+              "fields": []
+            },
+            [
+              "ageing"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-58",
+            "api-oncall",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "unowned",
+              "ageing",
+              "customer-impact"
+            ]
+          ]
+        },
+        {
+          "tag": "routed",
+          "fields": [
+            "inc-59",
+            "ops",
+            {
+              "tag": "page-now",
+              "fields": []
+            },
+            [
+              "ageing",
+              "customer-impact"
+            ]
+          ]
+        }
+      ],
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 37.476
+    },
+    {
+      "case": "triage matrix 60:63",
+      "kind": "ok",
+      "terminal": "ok",
+      "primary_code": null,
+      "host_evidence": {},
+      "value": [
+        {
+          "tag": "invalid-incident",
+          "fields": [
+            "bad-severity"
+          ]
+        },
+        {
+          "tag": "invalid-incident",
+          "fields": [
+            "bad-age"
+          ]
+        },
+        {
+          "tag": "invalid-incident",
+          "fields": [
+            ""
+          ]
+        }
+      ],
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 45.183
+    },
+    {
+      "case": "native Python list is refused",
+      "kind": "host_error",
+      "terminal": null,
+      "primary_code": null,
+      "host_evidence": {
+        "schema": "jacquard-host-python-evidence-v0",
+        "code": "E1604",
+        "reason": "invoke_refused_locally",
+        "detail": "list values have no jacquard-host-v0 encoding",
+        "state": "closed"
+      },
+      "value": null,
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 18.353
+    },
+    {
+      "case": "native Python bool is refused",
+      "kind": "host_error",
+      "terminal": null,
+      "primary_code": null,
+      "host_evidence": {
+        "schema": "jacquard-host-python-evidence-v0",
+        "code": "E1604",
+        "reason": "invoke_refused_locally",
+        "detail": "Python bool has no v0 encoding; use the prelude's true/false constructors",
+        "state": "closed"
+      },
+      "value": null,
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 17.935
+    },
+    {
+      "case": "unknown constructor identity",
+      "kind": "fatal",
+      "terminal": "fatal",
+      "primary_code": "E1603",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1603",
+          "summary": "The selected Jacquard target or pinned interface is invalid.",
+          "cause": "A boundary value names an absent or non-constructor store identity.",
+          "next_step": "Select one complete checked store-term closure and use its exact first-order interface."
+        }
+      ],
+      "requests": [],
+      "elapsed_ms": 21.229
+    },
+    {
+      "case": "list depth boundary",
+      "kind": "fatal",
+      "terminal": "fatal",
+      "primary_code": "E1602",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1602",
+          "summary": "The host protocol limit was exceeded or cannot represent a mandatory result.",
+          "cause": "The JSON object nesting exceeds max_json_depth.",
+          "next_step": "Choose positive advertised limits and keep the frame within the selected ceilings."
+        }
+      ],
+      "requests": [],
+      "elapsed_ms": 19.301
+    },
+    {
+      "case": "rich batch output depth boundary",
+      "kind": "error",
+      "terminal": "diagnostic",
+      "primary_code": "E1602",
+      "host_evidence": {},
+      "value": null,
+      "diagnostics": [
+        {
+          "code": "E1602",
+          "summary": "The host protocol limit was exceeded or cannot represent a mandatory result.",
+          "cause": "The JSON object nesting exceeds max_json_depth.",
+          "next_step": "Choose positive advertised limits and keep the frame within the selected ceilings."
+        }
+      ],
+      "requests": [],
+      "elapsed_ms": 41.08
+    },
+    {
+      "case": "registry from another term",
+      "kind": "host_error",
+      "terminal": null,
+      "primary_code": null,
+      "host_evidence": {
+        "schema": "jacquard-host-python-evidence-v0",
+        "code": "E1601",
+        "reason": "invoke_refused_locally",
+        "detail": "an operation entry names an effect outside the interface row",
+        "state": "closed"
+      },
+      "value": null,
+      "diagnostics": [],
+      "requests": [],
+      "elapsed_ms": 16.938
+    }
+  ],
+  "measurements": {
+    "unbound_dispatch": {
+      "bookings_before": 1,
+      "bookings_after": 2,
+      "requests": [
+        "booking-status",
+        "lookup-stock",
+        "reserve-order"
+      ]
+    },
+    "partial_completion": {
+      "durable_booking": true,
+      "receipt_in_error_value": false,
+      "receipt_in_host_frames": true,
+      "repeat_repairs_dispatch": false
+    },
+    "slow_handler": {
+      "configured_deadline_ms": 150,
+      "observed_ms": 328.943
+    },
+    "planner_problems_checked_against_exhaustive_oracle": 27,
+    "triage_rows_checked_against_python_oracle": 63,
+    "readme_error_renderer": "diagnostics[0] raises IndexError for a host_error",
+    "spawn_failure": "FileNotFoundError is raised instead of returning InvocationResult",
+    "list_depth_probe": {
+      "largest_successful_items": 30,
+      "first_failure": {
+        "items": 31,
+        "kind": "fatal",
+        "terminal": "fatal",
+        "primary_code": "E1602",
+        "host_evidence": {},
+        "value": null,
+        "diagnostics": [
+          {
+            "code": "E1602",
+            "summary": "The host protocol limit was exceeded or cannot represent a mandatory result.",
+            "cause": "The JSON object nesting exceeds max_json_depth.",
+            "next_step": "Choose positive advertised limits and keep the frame within the selected ceilings."
+          }
+        ],
+        "requests": [],
+        "elapsed_ms": 19.301
+      }
+    },
+    "rich_list_depth_probe": {
+      "largest_successful_items": 28,
+      "first_failure": {
+        "items": 29,
+        "kind": "error",
+        "terminal": "diagnostic",
+        "primary_code": "E1602",
+        "host_evidence": {},
+        "value": null,
+        "diagnostics": [
+          {
+            "code": "E1602",
+            "summary": "The host protocol limit was exceeded or cannot represent a mandatory result.",
+            "cause": "The JSON object nesting exceeds max_json_depth.",
+            "next_step": "Choose positive advertised limits and keep the frame within the selected ceilings."
+          }
+        ],
+        "requests": [],
+        "elapsed_ms": 41.08
+      }
+    },
+    "batch_benchmark": {
+      "one_item_per_worker": {
+        "runs_ms": [
+          554.879,
+          551.7,
+          547.279
+        ],
+        "median_ms": 551.7
+      },
+      "batches_of_eight": {
+        "runs_ms": [
+          94.928,
+          91.169,
+          91.128
+        ],
+        "median_ms": 91.169
+      }
+    },
+    "empty_worker_median_ms": 18.222,
+    "signature_parser": {
+      "(Int,) ->{} Int": {
+        "error": "unexpected ')' in a type"
+      },
+      "((Int,)) ->{} Int": {
+        "error": "unexpected ')' in a type"
+      }
+    }
+  }
+}

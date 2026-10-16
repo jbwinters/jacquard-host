@@ -39,6 +39,10 @@ class SignatureTest(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(SignatureError):
                 parse_signature(text, IDS)
 
+    def test_explicit_singleton_tuple_spelling_is_preserved(self) -> None:
+        integer = Nominal(IDS["int"])
+        self.assertEqual(parse_signature("((Int,)) ->{} (Int,)", IDS), Interface((TupleType((integer,)),), TupleType((integer,))))
+
 
 @unittest.skipUnless(JACQUARD_BIN and JACQUARD_PRELUDE, "set JACQUARD_BIN and JACQUARD_PRELUDE to resolve identities with Core")
 class LiveIdentityTest(unittest.TestCase):

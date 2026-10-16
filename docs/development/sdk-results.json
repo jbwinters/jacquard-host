@@ -1,0 +1,95 @@
+{
+  "schema": "jacquard-python-sdk-exercise-v1",
+  "sdk_version": "0.2.0",
+  "library_path": "<installed-wheel>/jacquard_host/__init__.py",
+  "sdk_sha256": "72527214748a453b56e82e3d83b0216ee596a6246978d7fa991dcc6716f53abe",
+  "data_sha256": "0f458ebe6035903f105a5755f85772612c2450d45c021d438d38ff714b0a770d",
+  "cold_prepare_ms": {
+    "fulfillment": 3145.0,
+    "planner": 1514.518,
+    "triage": 1471.082
+  },
+  "warm_prepare_median_ms": {
+    "fulfillment": 22.45,
+    "planner": 22.891,
+    "triage": 23.614
+  },
+  "individual_24_median_ms": 493.344,
+  "batched_24_median_ms": 82.32,
+  "native_triage_rows": 64,
+  "outcomes": {
+    "missing_service": "fulfillment.place: missing handlers: dispatch.publish_booking. Bind every operation in each declared effect before calling",
+    "invalid_field": "fulfillment.place.argument[0].lines[0].units: expected int, received bool",
+    "success": {
+      "type": "Fulfilled",
+      "receipt": "6491c2fde87f5c4136df80db02ea46403d36631de0ab56200fc0e14ff46a11cf"
+    },
+    "inspection": "fulfillment.place: ok\n  1. booking-status\n  2. lookup-stock\n  3. lookup-stock\n  4. reserve-order\n  5. publish-booking",
+    "after-commit": {
+      "code": "E1612",
+      "before": {
+        "bookings": 2,
+        "pending_deliveries": 1,
+        "deliveries": 1
+      },
+      "explicit_deliveries": 1,
+      "after": {
+        "bookings": 2,
+        "pending_deliveries": 0,
+        "deliveries": 2
+      }
+    },
+    "publish-failed": {
+      "code": "E1613",
+      "before": {
+        "bookings": 3,
+        "pending_deliveries": 1,
+        "deliveries": 2
+      },
+      "explicit_deliveries": 1,
+      "after": {
+        "bookings": 3,
+        "pending_deliveries": 0,
+        "deliveries": 3
+      }
+    },
+    "after-delivery": {
+      "code": "E1612",
+      "before": {
+        "bookings": 4,
+        "pending_deliveries": 0,
+        "deliveries": 4
+      },
+      "explicit_deliveries": 0,
+      "after": {
+        "bookings": 4,
+        "pending_deliveries": 0,
+        "deliveries": 4
+      }
+    },
+    "planner": {
+      "type": "Planned",
+      "plan": {
+        "type": "Plan",
+        "score": 16,
+        "assignments": [
+          {
+            "type": "Assignment",
+            "id": "a",
+            "slot": 1
+          },
+          {
+            "type": "Assignment",
+            "id": "b",
+            "slot": 1
+          },
+          {
+            "type": "Assignment",
+            "id": "docs",
+            "slot": 2
+          }
+        ]
+      }
+    }
+  }
+}

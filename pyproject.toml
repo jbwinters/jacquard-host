@@ -8,6 +8,23 @@ dynamic = ["version"]
 description = "Language-neutral host integrations and adapters for Jacquard"
 readme = "README.md"
 requires-python = ">=3.11"
+license = {file = "LICENSE"}
+keywords = ["jacquard", "algebraic-effects", "embedding"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/jbwinters/jacquard-host"
+Issues = "https://github.com/jbwinters/jacquard-host/issues"
+Documentation = "https://github.com/jbwinters/jacquard-host/blob/main/docs/PYTHON-SDK.md"
+Changelog = "https://github.com/jbwinters/jacquard-host/blob/main/CHANGELOG.md"
 
 [project.scripts]
 jacquard-host-kit = "jacquard_host.kit:main"

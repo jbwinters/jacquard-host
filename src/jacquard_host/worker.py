@@ -18,7 +18,7 @@ from typing import Any, BinaryIO, Mapping, Sequence
 
 from jacquard_host.protocol.errors import CarrierLoss
 from jacquard_host.protocol.framing import FrameReader, frame_bytes, validate_deadline_seconds, write_bytes
-from jacquard_host.protocol.json_codec import decode_object, encode_object
+from jacquard_host.protocol.json_codec import decode_object, encode_object, validate_object
 
 DEFAULT_COMMAND: tuple[str, ...] = ("jacquard",)
 MAX_STDERR_BYTES = 65536
@@ -101,6 +101,7 @@ class WorkerProcess:
         return decode_object(payload, max_depth=limits["max_json_depth"])
 
     def write_frame(self, frame: dict[str, Any], limits: Mapping[str, int]) -> None:
+        validate_object(frame, max_depth=limits["max_json_depth"])
         data = frame_bytes(encode_object(frame), max_frame_bytes=limits["max_frame_bytes"])
         self.write_bytes(data)
 

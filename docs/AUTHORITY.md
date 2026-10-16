@@ -1,7 +1,7 @@
 # Host authority inventory
 
-What the host actually does outside Jacquard, recorded for roadmap H2.0 and
-for Core's authority work (Core task 207). Two columns matter: whether the
+What the synthetic trial host actually does outside Jacquard, recorded for
+roadmap H2.0 and Core's authority work (Core task 207). Two columns matter: whether the
 action is triggered by running Jacquard code or is host startup
 configuration, and what authority it uses.
 
@@ -13,8 +13,11 @@ configuration, and what authority it uses.
 
 That is the complete list. No other outside action can be reached from a
 running term: the registry is closed, an unconfigured operation is refused by
-Core before any request leaves the worker (E1606), and the adapter dispatches
-by exact identity only.
+Core when reached (E1606), before that operation is dispatched, and the adapter
+dispatches by exact identity only. Previously configured operations in the same
+invocation can already have completed: a missing later binding is not a
+transactional preflight guarantee. The multi-operation fulfillment experiment in
+`docs/development/python-projects/` demonstrates this case.
 
 ## Host startup configuration (not reachable from Jacquard)
 
@@ -26,6 +29,16 @@ by exact identity only.
 | Bind and accept | `jacquard_host.socket_host` | loopback TCP only (`127.0.0.1`, `::1`, or the name `localhost`); anything else is refused at construction |
 | Open the study database | `jacquard_host.study` | one SQLite file; WAL when the filesystem allows; no other filesystem access |
 | Kill a worker at the deadline | `jacquard_host.worker` | signal to the child it spawned |
+
+The optional Python SDK adds startup-owned preparation: public Core
+check/hash/run commands, source snapshots, runtime/prelude digest reads, and
+verified cache files under a caller-configured directory (default
+`.scratch/jacquard-host`). Explicit `Invocation.save(path)` writes an operator
+inspection, including raw argument/result frames, to the chosen path. These
+are host/application actions, not operations reachable by passing a path to
+Jacquard code. Applications own their mapped Python classes and service
+objects. The separate SDK inventory example's SQLite and receipt-deduped
+delivery authority is described in `examples/python_sdk/README.md`.
 
 ## Not used
 

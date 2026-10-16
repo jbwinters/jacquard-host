@@ -38,7 +38,10 @@ def _run(command: Sequence[str], args: Sequence[str], *, prelude: str | os.PathL
     env = dict(os.environ)
     if prelude is not None:
         env["JACQUARD_PRELUDE"] = os.path.abspath(os.fspath(prelude))
-    completed = subprocess.run([*command, *args], capture_output=True, text=True, env=env, check=False)
+    try:
+        completed = subprocess.run([*command, *args], capture_output=True, text=True, env=env, check=False, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{args[0]} exceeded the 30 second preparation deadline") from None
     if completed.returncode != 0:
         raise RuntimeError(f"{' '.join(args[:1])} exited {completed.returncode}: {completed.stderr.strip()}")
     return completed.stdout
@@ -143,6 +146,9 @@ class _Parser:
             items.append(self.type_())
             if self.peek() == ",":
                 self.take(",")
+                if self.peek() == close:
+                    self.take(close)
+                    return tuple(items)
                 continue
             self.take(close)
             return tuple(items)
@@ -151,7 +157,8 @@ class _Parser:
         token = self.take()
         if token == "(":
             items = self.type_list(")")
-            return items[0] if len(items) == 1 else TupleType(items)
+            trailing_comma = self.tokens[self.index - 2] == ","
+            return items[0] if len(items) == 1 and not trailing_comma else TupleType(items)
         if not token[:1].isalpha():
             raise SignatureError(f"unexpected {token!r} in a type")
         return Nominal(self.resolve(token))
@@ -191,8 +198,9 @@ def parse_signature(text: str, names: Mapping[str, Hash]) -> Interface:
     Only the v0 subset is accepted: positional first-order parameters, a
     closed effect row, nominal types with type arguments, tuples, and unit.
     Type variables, arrows inside data, and open rows raise
-    :class:`SignatureError`. A one-item tuple type cannot be expressed: the
-    checker prints it as ``(Int)``, which this grammar reads as plain ``Int``;
-    build such an interface by hand with :class:`TupleType`.
+    :class:`SignatureError`. Explicit one-item tuples use ``(Int,)``. The pinned
+    checker prints them as ``(Int)``, indistinguishable from plain ``Int``;
+    build such an interface by hand with :class:`TupleType` when consuming
+    that ambiguous printer output.
     """
     return _Parser(_tokens(text), names).interface()
