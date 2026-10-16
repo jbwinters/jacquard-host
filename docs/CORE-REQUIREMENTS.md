@@ -21,8 +21,8 @@ demands; the host keeps working without them.
 
 ## Authority requirements (for Core task 207)
 
-For the trial slice the closed `once` registry plus Core's E1606 preflight
-refusal was sufficient. The single outside action was `study.save-response`,
+For the trial slice the closed `once` registry plus Core's E1606 refusal before
+dispatch was sufficient. The single outside action was `study.save-response`,
 refused before action on invalid input and never retried on unknown
 completion. No path, host, port, or database-row containment was needed or
 claimed, and the host requests none from Core for this slice. What the host

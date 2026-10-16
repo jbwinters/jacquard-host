@@ -21,10 +21,45 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Compile sources
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests examples scripts
       - name: Run unit tests
         run: PYTHONPATH=src python -m unittest discover -s tests -v
       - name: Install build tools
         run: python -m pip install 'setuptools>=68' wheel
       - name: Check installed distribution
         run: python scripts/check_distribution.py
+
+  live-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Checkout pinned public Core
+        uses: actions/checkout@v4
+        with:
+          repository: jbwinters/jacquard-lang
+          ref: 61575c7bcd98c8922e739de647556d1368729ad8
+          path: .scratch/jacquard-core
+          persist-credentials: false
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.1.1"
+          opam-pin: false
+      - name: Build pinned worker
+        working-directory: .scratch/jacquard-core
+        run: |
+          opam install . --deps-only -y
+          opam exec -- dune build bin/main.exe
+      - name: Install SDK wheel
+        run: python -m pip install .
+      - name: Configure Core
+        run: |
+          echo "JACQUARD_BIN=$GITHUB_WORKSPACE/.scratch/jacquard-core/_build/default/bin/main.exe" >> "$GITHUB_ENV"
+          echo "JACQUARD_PRELUDE=$GITHUB_WORKSPACE/.scratch/jacquard-core/prelude" >> "$GITHUB_ENV"
+      - name: Run live suite against installed SDK
+        run: python -m unittest discover -s tests -v
+      - name: Run public examples
+        run: python scripts/check_examples.py

@@ -89,6 +89,32 @@ class InvocationResult:
     def primary_code(self) -> str | None:
         return self.diagnostics[0].code if self.diagnostics else None
 
+    @property
+    def code(self) -> str | None:
+        """One accessor for Core diagnostics and separately labeled host codes."""
+        return self.primary_code or self.host_evidence.get("code")
+
+    @property
+    def message(self) -> str:
+        """A useful message even when a failure has no Core diagnostic."""
+        if self.ok:
+            return "Jacquard invocation succeeded"
+        if self.diagnostics:
+            diagnostic = self.diagnostics[0]
+            detail = f"{diagnostic.summary} {diagnostic.cause}"
+        else:
+            detail = self.host_evidence.get("detail") or self.host_evidence.get("reason") or self.kind
+            if self.kind == "carrier_loss" and self.stderr:
+                detail += ": " + self.stderr[:4096].decode("utf-8", "replace").strip()
+        return f"{self.code or self.kind}: {detail}"
+
+    def unwrap(self) -> Any:
+        """Return the successful value or raise an auditable InvocationError."""
+        if not self.ok:
+            from jacquard_host.errors import invocation_error
+            raise invocation_error(self)
+        return self.value
+
 
 def _bounded_message(message: str, max_bytes: int) -> str:
     """Cut a host-authored message at a scalar boundary so it fits the selected limit.
