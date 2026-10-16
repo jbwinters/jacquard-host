@@ -50,3 +50,25 @@ Keep generated caches, SQLite state, reports, secrets, and participant data out
 of commits. Raw inspection reports contain application values. Use `.scratch/`
 for local artifacts. Do not change or normalize the frozen conformance fixtures
 to make a test pass; report a mismatch against the pinned contract.
+
+## TypeScript
+
+The independent Node.js adapter lives in `typescript/`; it does not call Python.
+Node.js 22+ and npm are required. TypeScript and Node declarations are locked
+development dependencies; the package has no third-party runtime dependency.
+
+```sh
+cd typescript
+npm ci
+npm test
+npm run check:package
+# With the pinned Core configured:
+npm run test:live
+npm run check:package
+```
+
+CI checks offline tests, consumer types, and installed tarballs on Node 22/24.
+The shared Core build job runs the live Node suite and installed examples too.
+Kit assets are copied verbatim from the Python package's pinned fixture directory
+at build time and digest-checked independently. Do not edit generated `data/`
+or `dist/` files. Update source, examples, or the shared pin instead.

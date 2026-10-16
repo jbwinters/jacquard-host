@@ -21,3 +21,11 @@ test-cache/
 *.sqlite-shm
 *.sqlite-wal
 .DS_Store
+
+# TypeScript build outputs (conformance assets are copied from the pinned kit)
+node_modules/
+typescript/dist/
+typescript/data/
+typescript/LICENSE
+typescript/NOTICE
+*.tgz

@@ -1,18 +1,22 @@
 # Jacquard Host
 
-Call checked Jacquard functions from Python and implement their declared host
-operations with ordinary Python services. Jacquard owns the decision logic;
-Python owns persistence, I/O, and application lifetimes.
+Call checked Jacquard functions from Python or TypeScript and implement their
+declared host operations with ordinary services. Jacquard owns the decision
+logic; the host owns persistence, I/O, and application lifetimes.
 
 The SDK prepares and caches checked programs, converts native Python values,
 binds services to exact operation identities, and retains the raw evidence for
-every invocation. Python 3.11+, with no third-party runtime dependencies.
+every invocation. Python 3.11+ or Node.js 22+, with no third-party runtime
+dependencies. The [TypeScript SDK](typescript/README.md) implements the pinned
+protocol independently and supports async service methods.
 
 **Experimental:** the SDK targets Core's pinned `jacquard-host-v0` protocol.
 Core is installed separately. Each invocation runs one fresh, serial worker;
 the host and operating system are trusted. See [limits](docs/LIMITS.md).
 
 ## Get started
+
+For Node.js, follow the [TypeScript walkthrough](typescript/README.md). For Python:
 
 From a clone of this repository:
 
@@ -103,8 +107,8 @@ participant collection require separate application work.
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for offline tests, installed-distribution
-checks, and live runs. CI tests Python 3.11–3.13 and separately builds the pinned
-Core worker for the live suite and public examples.
+checks, and live runs. CI tests Python 3.11–3.13 and Node.js 22/24, and separately
+builds the pinned Core worker for both adapters' live suites and public examples.
 
 [Evidence](docs/EVIDENCE.md) records the checks and platform claims;
 [development experiments](docs/development/README.md) preserve the usability

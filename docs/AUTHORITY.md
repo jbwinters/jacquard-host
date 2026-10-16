@@ -40,6 +40,19 @@ Jacquard code. Applications own their mapped Python classes and service
 objects. The separate SDK inventory example's SQLite and receipt-deduped
 delivery authority is described in `examples/python_sdk/README.md`.
 
+The independent TypeScript SDK performs the same public Core preparation and
+digest/cache actions, with default cache `.scratch/jacquard-host-ts`. Its Node
+carrier uses bounded pipes and process signals, and captures host observations
+under `jacquard-host-typescript-evidence-v0` beside the unchanged Core frames.
+The parent environment is inherited with the configured `JACQUARD_PRELUDE`;
+executable lookup also uses the host's `PATH`. Service handlers can be async,
+and an optional context carries a cooperative abort signal. Expiring the worker
+does not prove an outside action stopped. The TypeScript fulfillment example
+owns one configured JSON snapshot with booking/outbox updates and a simulated
+receipt-deduplicated sink; no file path is accepted from Jacquard. Its
+single-process limits are in `typescript/README.md`. The Python socket/trial
+host is unchanged.
+
 ## Not used
 
 - No outbound network connection of any kind.

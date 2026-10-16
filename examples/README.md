@@ -1,4 +1,9 @@
-# Python examples
+# Example projects
+
+The same Jacquard rules run through both SDKs. The commands below use Python;
+the [TypeScript walkthrough](../typescript/README.md#run-the-projects) includes
+compiled Node.js front ends for all four projects, their inputs bundled in the
+npm tarball, and an independent fulfillment recovery example.
 
 Start with [setup](../docs/SETUP.md), then run these from the repository root.
 They use synthetic inputs, the installed Python SDK, and the pinned Core worker.

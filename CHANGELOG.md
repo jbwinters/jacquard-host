@@ -2,6 +2,10 @@
 
 ## 0.2.0 — unreleased
 
+- Add an independent TypeScript/Node.js adapter and SDK, async services, explicit
+  record/union codecs, lossless bigints, cached preparation, and npm tarball
+  installation checks. Both adapters replay the same 21 pinned recordings.
+
 - Add `Runtime.prepare`, cached checked programs, scoped service binding, and
   native Python calls with explicit dataclass and enum mappings.
 - Validate arguments and required handlers before starting a worker. Provide
