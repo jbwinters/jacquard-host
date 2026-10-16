@@ -180,7 +180,10 @@ export function invokeFrame(target: string | Hash, spec: Interface, args: readon
   const budget = new Budget(limits); budget.count(args.length, true);
   sortedHashes(spec.effects, limits.max_effects);
   if (operations.length > limits.max_operations) exceeded('registry exceeds max_operations');
-  const entries = [...operations].sort((a, b) => (a.effect + a.operation).localeCompare(b.effect + b.operation));
+  const entries = [...operations].sort((a, b) => {
+    const left = a.effect + a.operation; const right = b.effect + b.operation;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]; hash(entry.effect); hash(entry.operation);
     if (!spec.effects.includes(entry.effect)) malformed('operation effect is outside the interface row');
