@@ -2,6 +2,13 @@
 
 ## Pinned Core artifacts
 
+Python and TypeScript consume the same artifacts. The Node package copies the
+kit verbatim into its build assets and verifies the four digests independently
+in `typescript/src/kit.ts`; its pin constants are in `typescript/src/compat.ts`.
+Both adapters currently replay all 21 recordings against the pinned worker,
+including Core's recorded `noncanonical-target-hash` divergence. This adds
+independent v0 evidence; it does not change the protocol version or declare v1.
+
 The adapter is pinned to these Jacquard Core artifacts. The same values live
 in `src/jacquard_host/compat.py`, and the test suite fails if the vendored kit
 under `src/jacquard_host/data/conformance/host-protocol-v0/`, this document, and that module disagree.
@@ -50,8 +57,8 @@ the pin; the commit hashes record where the kit and the pack live. The
 adapter's claim is that it replays the pinned kit in full and agrees with
 every recording; the protocol itself remains the experimental `v0` carrier
 that Core's pack describes, with the limits and pending decisions recorded
-there. A "stable v1" claim is Core's to make and is gated on a second
-independent adapter.
+there. Core owns a "stable v1" decision and its acceptance of the independent
+adapter and serial-application evidence; these implementations still select v0.
 
 ## Adoption rule
 
@@ -78,14 +85,18 @@ invocation, effect, diagnostic, cancellation, and evidence contract.
 
 1. Copy the four kit files from the Core commit into
    `src/jacquard_host/data/conformance/host-protocol-v0/`.
-2. Update the digests and commit in `src/jacquard_host/compat.py` and in this
-   document.
+2. Update the digests and commit in `src/jacquard_host/compat.py`,
+   `typescript/src/compat.ts`, and this document.
 3. Run the offline suite, then replay the kit against the matching Core build:
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src JACQUARD_BIN=/path/to/jacquard JACQUARD_PRELUDE=/path/to/prelude \
   python3 -m jacquard_host.kit --report .scratch/kit-replay.json
+# With the same environment configured, from typescript/:
+npm test
+npm run test:live
+npm run check:package
 ```
 
 A transcript that stops matching its recording is a protocol or

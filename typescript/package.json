@@ -1,0 +1,24 @@
+{
+  "name": "jacquard-host",
+  "version": "0.2.0",
+  "description": "Node.js SDK and independent protocol adapter for Jacquard",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./protocol": { "types": "./dist/protocol.d.ts", "import": "./dist/protocol.js" },
+    "./kit": { "types": "./dist/kit.d.ts", "import": "./dist/kit.js" }
+  },
+  "files": ["dist", "src", "data", "README.md", "LICENSE", "NOTICE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/assets.mjs",
+    "test": "npm run build && tsc -p tsconfig.types.json && node --test test/*.test.mjs",
+    "test:live": "npm run build && node --test test/*.live.mjs",
+    "check:package": "npm run build && node scripts/check-package.mjs",
+    "prepack": "npm run build"
+  },
+  "repository": { "type": "git", "url": "https://github.com/jbwinters/jacquard-host.git", "directory": "typescript" },
+  "bugs": { "url": "https://github.com/jbwinters/jacquard-host/issues" },
+  "devDependencies": { "@types/node": "22.20.5", "typescript": "7.0.2" }
+}

@@ -5,3 +5,7 @@ recursive-include examples *.py *.jac *.json *.md
 include CHANGELOG.md CONTRIBUTING.md
 include LICENSE NOTICE
 recursive-include docs/development *.py
+recursive-include typescript *.ts *.mjs *.json *.md
+prune typescript/node_modules
+prune typescript/dist
+prune typescript/data
