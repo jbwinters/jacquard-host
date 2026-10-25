@@ -356,7 +356,7 @@ class HardeningTest(unittest.TestCase):
     def test_a_failed_rename_inside_sync_restores_everything(self) -> None:
         root, pin_path, kit_dirs = self.copy()
         before = self.snapshot(root)
-        # Renames: 8 kit files, the pin, then generated files; fail the second generated one.
+        # Renames: 10 kit files (two copies), the pin, then generated files; fail the second generated one.
         with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
              self.assertRaisesRegex(OSError, "original rename failure"):
             self.adopt(root, pin_path, kit_dirs)
@@ -378,6 +378,50 @@ class HardeningTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("restore denied", message)
         self.assertIn("original rename failure", message)
+
+    def test_denied_cleanup_does_not_hide_the_original_failure(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        generated = root / "src/jacquard_host/compat.py"
+        real_write, real_unlink = Path.write_bytes, Path.unlink
+        def refuse_restore(path, data):
+            if path == generated:
+                raise PermissionError("restore denied")
+            return real_write(path, data)
+        def refuse_cleanup(path, missing_ok=False):
+            if path.name.endswith(".core-pin") and path.exists():
+                raise PermissionError("temporary cleanup denied")
+            return real_unlink(path, missing_ok=missing_ok)
+        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 3), \
+             patch.object(Path, "write_bytes", refuse_restore), patch.object(Path, "unlink", refuse_cleanup), \
+             self.assertRaises(core_pin.RestoreError) as caught:
+            self.adopt(root, pin_path, kit_dirs)
+        message = str(caught.exception)
+        for part in ("restore denied", "original rename failure", "leftover temporary files"):
+            self.assertIn(part, message)
+
+    def test_an_inner_restore_failure_is_replaced_by_the_cause_once_restored(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        generated = root / "src/jacquard_host/compat.py"
+        real_write, denied = Path.write_bytes, []
+        def refuse_once(path, data):
+            if path == generated and not denied:
+                denied.append(path)
+                raise PermissionError("restore denied once")
+            return real_write(path, data)
+        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 3), \
+             patch.object(Path, "write_bytes", refuse_once), \
+             self.assertRaisesRegex(OSError, "original rename failure"):
+            self.adopt(root, pin_path, kit_dirs)
+        self.assertEqual(self.snapshot(root), before)
+
+    def test_an_interrupt_with_a_failed_restore_is_named(self) -> None:
+        with patch.object(Path, "replace", side_effect=KeyboardInterrupt()), \
+             patch.object(core_pin, "restore", side_effect=core_pin.RestoreError("restore denied")), \
+             self.assertRaisesRegex(core_pin.RestoreError, "KeyboardInterrupt"):
+            target = Path(tempfile.mkdtemp(prefix="core-interrupt-"))
+            self.addCleanup(shutil.rmtree, target)
+            core_pin.write_files({target / "file": b"x"})
 
     def test_malformed_decisions_are_refused_by_their_callers(self) -> None:
         with self.assertRaisesRegex(core_pin.PinError, "pending_decisions"):

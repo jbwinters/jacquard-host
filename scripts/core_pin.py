@@ -462,14 +462,30 @@ def write_files(contents: dict[Path, bytes]) -> None:
         for temporary, path in staged:
             temporary.replace(path)
     except BaseException as error:
+        leftovers = remove_temporaries(staged)
         try:
             restore(originals)
         except RestoreError as failure:
-            raise RestoreError(f"{failure}; the write itself failed first: {error}") from error
+            raise RestoreError(f"{failure}; the write itself failed first: {describe(error)}{leftovers}") from error
         raise
-    finally:
-        for temporary, _ in staged:
+    leftovers = remove_temporaries(staged)
+    if leftovers:  # the writes succeeded; leftovers are only clutter
+        print(f"core_pin: files were written{leftovers}", file=sys.stderr)
+
+
+def describe(error: BaseException) -> str:
+    return str(error) or type(error).__name__
+
+
+def remove_temporaries(staged: list[tuple[Path, Path]]) -> str:
+    """Best-effort removal of staged files; never masks a failure in flight."""
+    left = []
+    for temporary, _ in staged:
+        try:
             temporary.unlink(missing_ok=True)
+        except OSError:
+            left.append(str(temporary))
+    return f"; remove leftover temporary files {', '.join(left)}" if left else ""
 
 
 def restore(originals: dict[Path, bytes | None]) -> None:
@@ -508,7 +524,7 @@ def adopt(pin: dict, tag: str, checkout: Path | None, *, root: Path = REPO,
         try:
             restore(originals)
         except RestoreError as failure:
-            raise RestoreError(f"{failure}; the update itself failed first: {original}") from original
+            raise RestoreError(f"{failure}; the update itself failed first: {describe(original)}") from original
         # The tree is restored. A RestoreError from an inner write no longer
         # describes it, so report the failure that started the rollback.
         if isinstance(original, RestoreError) and original.__cause__ is not None:
