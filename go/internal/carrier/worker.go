@@ -79,6 +79,7 @@ type Worker struct {
 	stop       func() bool
 
 	mu         sync.Mutex
+	group      sync.Mutex // excludes group signals from the final reap
 	fault      error
 	waited     bool
 	reaped     bool
@@ -137,6 +138,7 @@ func Start(parent context.Context, store string, options Options) (*Worker, erro
 	go func() {
 		defer close(w.stderrDone)
 		_, _ = io.Copy(w.stderr, errPipe)
+		_ = errPipe.Close()
 	}()
 	w.stop = context.AfterFunc(ctx, w.expire)
 	return w, nil
@@ -149,9 +151,20 @@ const exitGrace = time.Second
 // expire kills the worker's process group and closes both pipes, so a read or
 // write blocked on a descendant that inherited them returns at the deadline.
 func (w *Worker) expire() {
-	killTree(w.cmd.Process)
+	w.killTree()
 	_ = w.stdout.Close()
 	_ = w.stdin.Close()
+}
+
+// killTree stops the worker and its process group while the leader is
+// unreaped; the group lock keeps the final reap from releasing the group id
+// in between.
+func (w *Worker) killTree() {
+	w.group.Lock()
+	defer w.group.Unlock()
+	if !w.reaped {
+		killTree(w.cmd.Process)
+	}
 }
 
 // Context is cancelled when the worker fails, expires, or is disposed.
@@ -261,33 +274,42 @@ func (w *Worker) reap() {
 	}
 	w.waited = true
 	w.mu.Unlock()
-	// The leader's exit keeps its process group id reserved until it is
-	// reaped, so stop descendants that still hold stderr before reaping.
-	_ = w.cmd.Wait()
-	w.mu.Lock()
-	w.reaped = true
-	w.mu.Unlock()
+	// Where the platform allows, wait for the exit without reaping: the
+	// unreaped leader keeps its process group id reserved, so descendants that
+	// still hold stderr can be stopped by group without reaching another group.
+	// The grace is measured from the exit; a clean worker closes stderr with it.
+	held := false
+	if waitExited(w.cmd.Process.Pid) {
+		held = !w.drained(exitGrace)
+		if held {
+			killGroup(w.cmd.Process.Pid)
+		}
+		// The worker has exited, so this Wait only reaps it.
+		w.group.Lock()
+		_ = w.cmd.Wait()
+		w.reaped = true
+		w.group.Unlock()
+	} else {
+		// Wait blocks until exit here; expiry must still be able to kill.
+		_ = w.cmd.Wait()
+		w.group.Lock()
+		w.reaped = true
+		w.group.Unlock()
+	}
 	if state := w.cmd.ProcessState; state != nil {
 		if w.Signal = signalName(state); w.Signal == "" {
 			code := state.ExitCode()
 			w.ExitStatus = &code
 		}
 	}
-	// Measured from the worker's exit: a clean worker closes stderr with it.
-	held := false
-	select {
-	case <-w.stderrDone:
-	case <-time.After(exitGrace):
-		held = true
-		killGroup(w.cmd.Process.Pid)
-		select {
-		case <-w.stderrDone:
-		case <-time.After(exitGrace):
-			// A descendant left the process group (for example via setsid);
-			// stop draining rather than wait for it.
-			_ = w.errPipe.Close()
-			<-w.stderrDone
-		}
+	if !held {
+		held = !w.drained(exitGrace)
+	}
+	if held && !w.drained(exitGrace) {
+		// A descendant outside the group (for example after setsid) still
+		// holds stderr; stop draining rather than wait for it.
+		_ = w.errPipe.Close()
+		<-w.stderrDone
 	}
 	if held && w.ExitStatus != nil && *w.ExitStatus == 0 {
 		w.mu.Lock()
@@ -295,6 +317,16 @@ func (w *Worker) reap() {
 			w.fault = &Loss{Message: "worker descendants kept its pipes open after exit"}
 		}
 		w.mu.Unlock()
+	}
+}
+
+// drained reports whether stderr reached end of stream within limit.
+func (w *Worker) drained(limit time.Duration) bool {
+	select {
+	case <-w.stderrDone:
+		return true
+	case <-time.After(limit):
+		return false
 	}
 }
 
@@ -308,7 +340,7 @@ func (w *Worker) Dispose() {
 	live := !w.waited
 	w.mu.Unlock()
 	if live {
-		killTree(w.cmd.Process)
+		w.killTree()
 		w.reap()
 	}
 	<-w.stderrDone
