@@ -29,6 +29,27 @@ jobs:
       - run: npm run check:package
         working-directory: typescript
 
+  go:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.24", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go/go.mod
+      - name: Check formatting
+        working-directory: go
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+        working-directory: go
+      - name: Offline tests with the race detector
+        run: go test -race -count=1 ./...
+        working-directory: go
+
   bootstrap:
     runs-on: ubuntu-latest
     strategy:
@@ -81,3 +102,10 @@ jobs:
       - name: Check installed npm tarball and all four examples
         run: npm run check:package
         working-directory: typescript
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go/go.mod
+      - name: Run independent Go adapter against Core
+        run: go test -count=1 -v ./...
+        working-directory: go

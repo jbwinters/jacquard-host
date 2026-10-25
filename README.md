@@ -8,7 +8,9 @@ The SDK prepares and caches checked programs, converts native Python values,
 binds services to exact operation identities, and retains the raw evidence for
 every invocation. Python 3.11+ or Node.js 22+, with no third-party runtime
 dependencies. The [TypeScript SDK](typescript/README.md) implements the pinned
-protocol independently and supports async service methods.
+protocol independently and supports async service methods. An independent
+[Go adapter](go/README.md) (Go 1.24+, standard library only) provides the
+protocol-level host and conformance replayer.
 
 **Experimental:** the SDK targets Core's pinned `jacquard-host-v0` protocol.
 Core is installed separately. Each invocation runs one fresh, serial worker;
@@ -108,8 +110,9 @@ participant collection require separate application work.
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for offline tests, installed-distribution
-checks, and live runs. CI tests Python 3.11–3.13 and Node.js 22/24, and separately
-builds the pinned Core worker for both adapters' live suites and public examples.
+checks, and live runs. CI tests Python 3.11–3.13, Node.js 22/24, and Go 1.24 and
+stable, and separately installs the pinned Core release for every adapter's live
+suite and the public examples.
 
 [Evidence](docs/EVIDENCE.md) records the checks and platform claims;
 [development experiments](docs/development/README.md) preserve the usability

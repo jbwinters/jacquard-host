@@ -47,6 +47,17 @@ The vendored kit changed only in `kit.json`'s recorded `core_version`.
 | Installed wheel examples and distribution | `scripts/check_examples.py` passes all four examples with duplicate fulfillment and explicit recovery; `scripts/check_distribution.py` passes |
 | TypeScript | `npm test` 12 of 12, `npm run test:live` 19 of 19, and `npm run check:package` including all four installed examples, against the same release |
 
+## Independent Go adapter (2026-10-25)
+
+Recorded against the same `jacquard-core-0.3.0` release asset, with Go 1.24.13
+on Linux 7.0.
+
+| Lane | Result |
+|---|---|
+| Go offline (`go test -race ./...`) | 21 tests pass with the race detector: strict JSON/Unicode/duplicate keys, exact Int and Real codecs, limits, count-before-identity error codes, hello/selection, invoke-frame validation, failure pairs, session ordering and one response slot, malformed/extra/noncanonical Core frames, EOF/truncated/silent/stalled/nonzero workers, a descendant holding the pipes stopped at the deadline with its process group, a descendant holding stderr after a successful or failed exit stopped (and reported as carrier loss) with exit status kept, bounded stderr, write backpressure, context cancellation, local refusal before spawn, registry validation, all 21 recordings through a stand-in, and prose drift reported without normalization |
+| Go live (`go test ./...` with Core configured) | 4 further tests pass: all 21 recordings match against Core with no prose drift; pure and effectful invocations with exact evidence and shutdown; the four failure pairs, handler errors, and panics reported without retry or private detail; cooperative and abandoned handlers at the deadline send no late response |
+| Pin consistency | `go/protocol/compat.go` is generated, and `go/kit/data/` matches the pinned digests and the Python copy (`scripts/core_pin.py check`) |
+
 CI now installs this release asset rather than building Core from source. The
 results below were recorded against the earlier development pin and are kept as
 that pin's evidence.
@@ -123,6 +134,7 @@ reaches persistence has request ordinal 1 and one accepted `ok` observation.
 | Linux, Python 3.11, 3.12, 3.13 | supported | CI runs the offline suite on each (`.github/workflows/ci.yml`) |
 | Linux, Python 3.14 | exercised | the live suite, kit replay, and trial were run locally on 3.14.7 (Linux 7.0) |
 | Linux, Node.js 22 and 24 | CI lanes | Offline TypeScript tests and npm packaging on both; real-worker TypeScript tests and installed examples on Node 24 in the shared pinned-Core job |
+| Linux, Go 1.24 and stable | CI lanes | Offline Go tests with the race detector on both; live Go tests in the shared pinned-Core job |
 | Linux, Node.js 26.7 | exercised | TypeScript offline/live suites and tarball installation exercised locally; no broader runtime or OS claim |
 | macOS | development only | no CI; the descriptor-count assertions are skipped without `/proc` (the socket host tests skip, the kit and adapter tests skip only the count); SQLite WAL mode is recorded, not assumed |
 | Windows and others | no claim | see LIMITS.md |

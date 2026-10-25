@@ -16,7 +16,8 @@ Contributions are licensed under [Apache 2.0](LICENSE), matching this repository
 ## Core releases
 
 `core-pin.json` names the one Core release all adapters target. Do not edit
-`src/jacquard_host/compat.py`, `typescript/src/compat.ts`, or the generated block
+`src/jacquard_host/compat.py`, `typescript/src/compat.ts`, `go/protocol/compat.go`,
+the Go kit copy under `go/kit/data/`, or the generated block
 in `docs/COMPATIBILITY.md` by hand: change the pin with
 `python3 scripts/core_pin.py update --tag ...`, which also vendors the kit, and
 `python3 scripts/core_pin.py check` (run in CI) reports any drift.
@@ -63,6 +64,26 @@ Keep generated caches, SQLite state, reports, secrets, and participant data out
 of commits. Raw inspection reports contain application values. Use `.scratch/`
 for local artifacts. Do not change or normalize the frozen conformance fixtures
 to make a test pass; report a mismatch against the pinned contract.
+
+## Go
+
+The independent Go adapter lives in `go/` as module
+`github.com/jbwinters/jacquard-host/go`; it uses only the standard library and
+does not call Python or Node.js. Go 1.24+ is required.
+
+```sh
+cd go
+gofmt -l .
+go vet ./...
+go test -race ./...
+# With the pinned Core configured (eval "$(python3 scripts/core_pin.py install)"):
+go test -count=1 ./...
+```
+
+CI runs the offline tests with the race detector on Go 1.24 and the current
+stable release, and the live tests in the shared pinned-Core job.
+`go/protocol/compat.go` is generated and `go/kit/data/` is a byte copy of the
+pinned kit, both maintained by `scripts/core_pin.py`; do not edit them by hand.
 
 ## TypeScript
 

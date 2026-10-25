@@ -9,3 +9,5 @@ recursive-include typescript *.ts *.mjs *.json *.md
 prune typescript/node_modules
 prune typescript/dist
 prune typescript/data
+include go/go.mod
+recursive-include go *.go *.md *.json *.jac

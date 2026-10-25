@@ -38,6 +38,8 @@ REPO = Path(__file__).resolve().parents[1]
 PIN = REPO / "core-pin.json"
 SCHEMA = "jacquard-host-core-pin-v1"
 KIT_DIR = REPO / "src" / "jacquard_host" / "data" / "conformance" / "host-protocol-v0"
+# Go embeds its own byte-identical copy; go:embed cannot reach outside the module.
+KIT_DIRS = (KIT_DIR, REPO / "go" / "kit" / "data" / "host-protocol-v0")
 KIT_FILES = ("kit/kit.json", "kit/transcripts.json", "kit/fixtures.jac", "vectors.json")
 # Copied with the kit but not part of the digest pin; prose may be refreshed.
 KIT_EXTRAS = ("kit/README.md",)
@@ -159,9 +161,37 @@ Release assets verified by `scripts/core_pin.py install`:
 {assets}"""
 
 
+def render_go(pin: dict) -> str:
+    release, kit = pin["release"], pin["kit"]
+    width = max(len(name) for name in KIT_FILES) + 3
+    digests = "".join(f'\t{(chr(34) + name + chr(34) + ":").ljust(width)} "{kit["digests"][name]}",\n' for name in KIT_FILES)
+    pending = ", ".join(f'"{name}"' for name in kit["pending_decisions"])
+    return f"""// Generated from core-pin.json by scripts/core_pin.py; do not edit by hand.
+
+package protocol
+
+// The Jacquard Core release and host protocol this adapter is pinned to.
+const (
+\tProtocol    = "{pin["protocol"]}"
+\tCarrier     = "{pin["carrier"]}"
+\tCoreVersion = "{release["version"]}"
+\tCoreTag     = "{release["tag"]}"
+\tCoreCommit  = "{release["commit"]}"
+)
+
+// KitDigests are the SHA-256 digests of the pinned conformance kit files.
+var KitDigests = map[string]string{{
+{digests}}}
+
+// PendingDecisions are decisions Core recorded as pending; replay reproduces them.
+var PendingDecisions = []string{{{pending}}}
+"""
+
+
 GENERATED = {
     "src/jacquard_host/compat.py": render_python,
     "typescript/src/compat.ts": render_typescript,
+    "go/protocol/compat.go": render_go,
 }
 BLOCKS = {
     "docs/COMPATIBILITY.md": render_compatibility,
@@ -188,14 +218,20 @@ def problems(pin: dict, root: Path = REPO) -> list[str]:
         path = root / name
         if not path.exists() or path.read_text(encoding="utf-8") != text:
             found.append(f"{name} is out of date; run scripts/core_pin.py sync")
-    kit_dir = root / KIT_DIR.relative_to(REPO)
-    for name in KIT_FILES:
-        path = kit_dir / name
-        observed = sha256(path.read_bytes()) if path.exists() else "missing"
-        if observed != pin["kit"]["digests"][name]:
-            found.append(f"vendored {name}: sha256 {observed} is not the pinned {pin['kit']['digests'][name]}")
+    kit_dirs = [root / directory.relative_to(REPO) for directory in KIT_DIRS]
+    for kit_dir in kit_dirs:
+        label = kit_dir.relative_to(root)
+        for name in KIT_FILES:
+            path = kit_dir / name
+            observed = sha256(path.read_bytes()) if path.exists() else "missing"
+            if observed != pin["kit"]["digests"][name]:
+                found.append(f"vendored {label}/{name}: sha256 {observed} is not the pinned {pin['kit']['digests'][name]}")
+        for name in KIT_EXTRAS:
+            first, copy = kit_dirs[0] / name, kit_dir / name
+            if not copy.exists() or copy.read_bytes() != first.read_bytes():
+                found.append(f"vendored {label}/{name} differs from {kit_dirs[0].relative_to(root)}/{name}")
     if not found:
-        manifest = json.loads((kit_dir / "kit/kit.json").read_text(encoding="utf-8"))
+        manifest = json.loads((kit_dirs[0] / "kit/kit.json").read_text(encoding="utf-8"))
         found += manifest_problems(manifest, pin)
     return found
 
@@ -363,7 +399,7 @@ def kit_file(repository: str, commit: str, path: str, checkout: Path | None) -> 
     return fetch(f"https://raw.githubusercontent.com/{repository}/{commit}/{path}")
 
 
-def update(pin: dict, tag: str, checkout: Path | None, kit_dir: Path = KIT_DIR) -> dict:
+def update(pin: dict, tag: str, checkout: Path | None, kit_dirs: tuple[Path, ...] = KIT_DIRS) -> dict:
     if not tag.startswith(TAG_PREFIX):
         raise PinError(f"release tags start with {TAG_PREFIX}")
     repository = pin["repository"]
@@ -385,7 +421,7 @@ def update(pin: dict, tag: str, checkout: Path | None, kit_dir: Path = KIT_DIR) 
     if "linux-x86_64" not in new["assets"]:
         raise PinError(f"{tag} has no linux-x86_64 asset, which CI installs")
     validate(new)
-    write_kit(files, kit_dir)
+    write_files({directory / name: data for directory in kit_dirs for name, data in files.items()})
     return new
 
 
@@ -483,7 +519,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"Adopt it with: python3 scripts/core_pin.py update --tag {latest}")
             return 3
         generated = [REPO / name for name in (*GENERATED, *BLOCKS)]
-        kit_paths = [KIT_DIR / name for name in (*KIT_FILES, *KIT_EXTRAS)]
+        kit_paths = [directory / name for directory in KIT_DIRS for name in (*KIT_FILES, *KIT_EXTRAS)]
         originals = {path: path.read_bytes() if path.exists() else None for path in [PIN, *generated, *kit_paths]}
         new = update(pin, args.tag, args.core_checkout)
         try:
