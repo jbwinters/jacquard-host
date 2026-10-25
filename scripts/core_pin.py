@@ -55,6 +55,10 @@ class PinError(Exception):
     pass
 
 
+class RestoreError(PinError):
+    """Restoring originals failed; __cause__ is the failure that required it."""
+
+
 def load(path: Path = PIN) -> dict:
     return validate(json.loads(path.read_text(encoding="utf-8")))
 
@@ -457,8 +461,11 @@ def write_files(contents: dict[Path, bytes]) -> None:
             temporary.write_bytes(data)
         for temporary, path in staged:
             temporary.replace(path)
-    except BaseException:
-        restore(originals)
+    except BaseException as error:
+        try:
+            restore(originals)
+        except RestoreError as failure:
+            raise RestoreError(f"{failure}; the write itself failed first: {error}") from error
         raise
     finally:
         for temporary, _ in staged:
@@ -480,7 +487,7 @@ def restore(originals: dict[Path, bytes | None]) -> None:
         except OSError as error:
             failures.append(f"{path}: {error}")
     if failures:
-        raise PinError("could not restore after a failed update; run check and repair: " + "; ".join(failures))
+        raise RestoreError("could not restore after a failed update; run check and repair: " + "; ".join(failures))
 
 
 def adopt(pin: dict, tag: str, checkout: Path | None, *, root: Path = REPO,
@@ -500,8 +507,12 @@ def adopt(pin: dict, tag: str, checkout: Path | None, *, root: Path = REPO,
     except BaseException as original:
         try:
             restore(originals)
-        except PinError as failure:
-            raise PinError(f"{failure}; the update itself failed first: {original}") from original
+        except RestoreError as failure:
+            raise RestoreError(f"{failure}; the update itself failed first: {original}") from original
+        # The tree is restored. A RestoreError from an inner write no longer
+        # describes it, so report the failure that started the rollback.
+        if isinstance(original, RestoreError) and original.__cause__ is not None:
+            raise original.__cause__ from None
         raise
 
 

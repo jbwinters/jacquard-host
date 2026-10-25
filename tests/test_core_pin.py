@@ -340,9 +340,57 @@ class HardeningTest(unittest.TestCase):
     def test_a_failed_restore_reports_the_original_failure(self) -> None:
         root, pin_path, kit_dirs = self.copy()
         with patch.object(core_pin, "sync", side_effect=OSError("synthetic sync failure")), \
-             patch.object(core_pin, "restore", side_effect=core_pin.PinError("could not restore")), \
+             patch.object(core_pin, "restore", side_effect=core_pin.RestoreError("could not restore")), \
              self.assertRaisesRegex(core_pin.PinError, "could not restore.*synthetic sync failure"):
             self.adopt(root, pin_path, kit_dirs)
+
+    def rename_fails(self, on_call: int):
+        real_replace, calls = Path.replace, []
+        def flaky(path, target):
+            calls.append(path)
+            if len(calls) == on_call:
+                raise OSError("original rename failure")
+            return real_replace(path, target)
+        return patch.object(Path, "replace", flaky)
+
+    def test_a_failed_rename_inside_sync_restores_everything(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        # Renames: 8 kit files, the pin, then generated files; fail the second generated one.
+        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
+             self.assertRaisesRegex(OSError, "original rename failure"):
+            self.adopt(root, pin_path, kit_dirs)
+        self.assertEqual(self.snapshot(root), before)
+        self.assertEqual([path for path in root.rglob("*.core-pin")], [])
+
+    def test_nested_restore_failure_reports_every_failure(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        generated = root / "src/jacquard_host/compat.py"  # renamed before the failing rename
+        real_write = Path.write_bytes
+        def refuse(path, data):
+            if path == generated:
+                raise PermissionError("restore denied")
+            return real_write(path, data)
+        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 3), \
+             patch.object(Path, "write_bytes", refuse), \
+             self.assertRaises(core_pin.RestoreError) as caught:
+            self.adopt(root, pin_path, kit_dirs)
+        message = str(caught.exception)
+        self.assertIn("restore denied", message)
+        self.assertIn("original rename failure", message)
+
+    def test_malformed_decisions_are_refused_by_their_callers(self) -> None:
+        with self.assertRaisesRegex(core_pin.PinError, "pending_decisions"):
+            core_pin.manifest_problems({"protocol": "p", "carrier": "c", "core_version": "v", "pending_decisions": "x"}, self.pin)
+        files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
+        manifest = json.loads(files["kit/kit.json"])
+        manifest.update(core_version="9.9.9", pending_decisions=[{"name": 3}])
+        files["kit/kit.json"] = json.dumps(manifest).encode()
+        with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
+             patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
+             patch.object(core_pin, "release_assets", side_effect=AssertionError("fetched")), \
+             self.assertRaisesRegex(core_pin.PinError, "pending_decisions"):
+            core_pin.update(self.pin, "jacquard-core-9.9.9", None, ())
 
     def test_a_partial_staging_write_leaves_originals_and_no_temporaries(self) -> None:
         root, _, kit_dirs = self.copy()
