@@ -110,25 +110,40 @@ func Start(parent context.Context, store string, options Options) (*Worker, erro
 	isolate(w.cmd)
 	// Every pipe is an *os.File, so os/exec starts no copying goroutines and
 	// Wait returns as soon as the worker exits.
-	errPipe, errWriter, err := os.Pipe()
-	if err == nil {
-		w.errPipe, w.cmd.Stderr = errPipe, errWriter
-		if w.stdin, err = w.cmd.StdinPipe(); err == nil {
-			if w.stdout, err = w.cmd.StdoutPipe(); err != nil {
-				_ = w.stdin.Close()
-			}
+	// The host owns both ends of all three pipes: the child's ends close in
+	// the parent after Start (or on failure), the host's ends close here on
+	// failure and otherwise in CloseInput, Dispose, and the stderr drain.
+	var err error
+	var hostEnds, childEnds []*os.File
+	pipe := func(hostReads bool) (*os.File, *os.File) {
+		reader, writer, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			err = pipeErr
+			return nil, nil
 		}
+		if hostReads {
+			hostEnds, childEnds = append(hostEnds, reader), append(childEnds, writer)
+			return reader, writer
+		}
+		hostEnds, childEnds = append(hostEnds, writer), append(childEnds, reader)
+		return writer, reader
 	}
+	stdinHost, stdinChild := pipe(false)
+	stdoutHost, stdoutChild := pipe(true)
+	errPipe, errWriter := pipe(true)
 	if err == nil {
+		w.stdin, w.stdout, w.errPipe = stdinHost, stdoutHost, errPipe
+		w.cmd.Stdin, w.cmd.Stdout, w.cmd.Stderr = stdinChild, stdoutChild, errWriter
 		err = w.cmd.Start()
 	}
-	if errWriter != nil {
-		_ = errWriter.Close()
+	for _, file := range childEnds {
+		_ = file.Close()
 	}
 	if err != nil {
-		if errPipe != nil {
-			_ = errPipe.Close()
+		for _, file := range hostEnds {
+			_ = file.Close()
 		}
+		w.stdin, w.stdout = nil, nil
 		close(w.stderrDone)
 		w.SpawnError = err
 		w.fault = &Loss{Message: fmt.Sprintf("could not start %s (%v); check the configured Core installation", command[0], err)}
@@ -321,14 +336,27 @@ func (w *Worker) reap() {
 }
 
 // drained reports whether stderr reached end of stream within limit.
+// Once the invocation is cancelled or expired, it waits only briefly, so
+// disposal is not held for the full grace.
 func (w *Worker) drained(limit time.Duration) bool {
 	select {
 	case <-w.stderrDone:
 		return true
 	case <-time.After(limit):
 		return false
+	case <-w.ctx.Done():
+		select {
+		case <-w.stderrDone:
+			return true
+		case <-time.After(cancelledGrace):
+			return false
+		}
 	}
 }
+
+// cancelledGrace bounds the stderr wait after cancellation or expiry, when
+// the process group has already been signalled.
+const cancelledGrace = 100 * time.Millisecond
 
 // Dispose kills a live child, reaps it, and releases the deadline timer.
 func (w *Worker) Dispose() {
@@ -344,6 +372,9 @@ func (w *Worker) Dispose() {
 		w.reap()
 	}
 	<-w.stderrDone
+	if w.stdout != nil {
+		_ = w.stdout.Close()
+	}
 	w.cancel()
 }
 

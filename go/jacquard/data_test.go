@@ -374,3 +374,86 @@ func TestVersionIsCheckedOncePerExecutableUnderConcurrency(t *testing.T) {
 		t.Fatalf("--version ran %d times", calls.Load())
 	}
 }
+
+type valueService struct{}
+
+func (*valueService) PointerOnly(string) string { return "" }
+
+type emptyRecord struct{}
+
+func TestFollowUpMappingAndBindingRules(t *testing.T) {
+	d := fixture(t)
+	if err := RegisterEnum(d, map[urgency]string{"PAGE": "PageNow"}); err != nil {
+		t.Fatal(err)
+	}
+	if d.Record("PageNow", emptyRecord{}) == nil {
+		t.Fatal("a record over an enum constructor was accepted")
+	}
+	record := protocol.Nominal{Identity: id("8")}
+	if _, err := d.Encode(nil, record); !isInvalid(err) {
+		t.Fatalf("untyped nil at a record type: %v", err)
+	}
+	if err := d.Record("Routed", emptyRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	if encoded, err := d.Encode(emptyRecord{}, protocol.TupleType{}); !isInvalid(err) {
+		t.Fatalf("registered empty record at a unit position: %#v %v", encoded, err)
+	}
+	if encoded, err := d.Encode(Unit{}, protocol.TupleType{}); err != nil || !reflect.DeepEqual(encoded, protocol.Tuple{}) {
+		t.Fatalf("unit: %#v %v", encoded, err)
+	}
+	p := &Program{Data: d}
+	for name, service := range map[string]any{
+		"variadic":       Operations{"op": func(...string) string { return "" }},
+		"result shape":   Operations{"op": func() (int, int) { return 0, 0 }},
+		"not a function": Operations{"op": 3},
+	} {
+		if _, problem := p.lookup(service, "op"); problem == "" {
+			t.Errorf("%s: no binding problem reported", name)
+		}
+	}
+	if _, problem := p.lookup(valueService{}, "pointer-only"); !strings.Contains(problem, "pointer receiver") {
+		t.Fatalf("pointer receiver: %q", problem)
+	}
+	if fn, problem := p.lookup(&valueService{}, "pointer-only"); problem != "" || !fn.IsValid() {
+		t.Fatalf("pointer service: %q", problem)
+	}
+}
+
+func TestDiscoveryRunsOncePerKeyAndWaitersObserveTheirContext(t *testing.T) {
+	r, err := NewRuntime(RuntimeOptions{Binary: "unused", Prelude: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hashes atomic.Int32
+	release := make(chan struct{})
+	r.command = func(ctx context.Context, _ string, args ...string) (string, error) {
+		hashes.Add(1)
+		<-release
+		return "0:x " + strings.Repeat("a", 64) + "\n", nil
+	}
+	var wait sync.WaitGroup
+	for range 3 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if groups, err := r.preludeGroups(context.Background(), "unused", "key"); err != nil || len(groups) != 3 {
+				t.Errorf("%v %v", groups, err)
+			}
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.preludeGroups(cancelled, "unused", "key"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter ignored its context: %v", err)
+	}
+	close(release)
+	wait.Wait()
+	if hashes.Load() != 3 { // one flight: three prelude files
+		t.Fatalf("hash ran %d times", hashes.Load())
+	}
+	if groups, err := r.preludeGroups(context.Background(), "unused", "key"); err != nil || len(groups) != 3 || hashes.Load() != 3 {
+		t.Fatalf("cached discovery reran: %v %v", groups, err)
+	}
+}

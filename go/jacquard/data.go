@@ -118,7 +118,7 @@ func (d *Data) Record(constructor string, prototype any) error {
 	if err != nil {
 		return err
 	}
-	if builtins[name] || d.byID[id] != nil || d.records[t] != nil {
+	if _, enum := d.enumByID[id]; builtins[name] || enum || d.byID[id] != nil || d.records[t] != nil {
 		return &BindingError{Message: fmt.Sprintf("constructor %s is builtin or already mapped", constructor)}
 	}
 	r := &record{tag: constructor, identity: id, typ: t}
@@ -242,8 +242,12 @@ func (d *Data) encode(v reflect.Value, expected protocol.BoundaryType, path stri
 		case "option":
 			return d.encodeOption(v, child, path, depth)
 		default:
-			// A checked non-optional data type: a pointer cannot mean Option here.
-			if v.IsValid() && v.Kind() == reflect.Pointer {
+			// A checked non-optional data type: neither nil nor a pointer can mean
+			// Option here.
+			if !v.IsValid() {
+				return nil, invalid(path, "nil where a non-optional value is expected")
+			}
+			if v.Kind() == reflect.Pointer {
 				if v.IsNil() {
 					return nil, invalid(path, "nil where a non-optional value is expected")
 				}
@@ -251,7 +255,7 @@ func (d *Data) encode(v reflect.Value, expected protocol.BoundaryType, path stri
 			}
 		}
 	case protocol.TupleType:
-		if (!v.IsValid() || (v.Kind() == reflect.Struct && v.NumField() == 0)) && len(t.Items) == 0 {
+		if (!v.IsValid() || (v.Kind() == reflect.Struct && v.NumField() == 0 && d.records[v.Type()] == nil)) && len(t.Items) == 0 {
 			return protocol.Tuple{}, nil
 		}
 		if !v.IsValid() || (v.Kind() != reflect.Slice && v.Kind() != reflect.Array) || v.Len() != len(t.Items) {

@@ -4,6 +4,7 @@ package host_test
 
 import (
 	"context"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -47,7 +48,9 @@ func TestDeadlineDuringTheExitGraceIsReportedAsTheDeadline(t *testing.T) {
 	if result.HostEvidence["reason"] != "deadline" {
 		t.Fatalf("reason %v: %s", result.HostEvidence["reason"], result.Message())
 	}
-	descendantDies(t, "stderr-descendant", result.Stderr)
+	if runtime.GOOS == "linux" { // elsewhere the exited worker may already be reaped
+		descendantDies(t, "stderr-descendant", result.Stderr)
+	}
 }
 
 func TestSlowCleanExitSucceeds(t *testing.T) {

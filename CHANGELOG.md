@@ -2,8 +2,16 @@
 
 ## 0.2.0 — unreleased
 
+- Go SDK: a constructor may map to a record or an enum, not both. `nil` at a
+  checked non-optional data type, and a registered empty record at a unit
+  position, are refused or kept distinct locally. An unsupported handler
+  signature is a binding error naming the problem. Version checks and prelude
+  discovery run once per key, and waiters observe their own context. The Go
+  host owns all three worker pipes and shortens the exit grace after
+  cancellation.
 - The Go worker's stderr is now a pipe the host owns. After the worker exits, a
-  descendant that still holds it is stopped with the process group. A clean
+  descendant that still holds it is stopped with the process group on Linux;
+  other platforms only stop reading the pipe. A clean
   worker that is merely slow to exit no longer triggers a group kill. A deadline
   that expires during the exit grace is reported as the deadline. A descendant
   that escaped the group no longer holds the host.

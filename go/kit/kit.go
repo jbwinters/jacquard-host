@@ -255,6 +255,27 @@ func proseDrift(expected, actual any, path string) []string {
 // so the 256 bound never refuses one (kit.ts uses 64 and would throw); prose
 // drift paths are reported in sorted key order, which matches the kit's
 // canonical (sorted) JSON.
+// jsString mirrors JavaScript's String() for the JSON scalars kit.ts coerces.
+func jsString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case nil:
+		return "null"
+	case []any:
+		parts := make([]string, len(v))
+		for i, item := range v {
+			if item != nil {
+				parts[i] = jsString(item)
+			}
+		}
+		return strings.Join(parts, ",")
+	case protocol.Object:
+		return "[object Object]"
+	}
+	return fmt.Sprint(value)
+}
+
 func canonical(value any) string {
 	text, err := protocol.Stringify(value, 256)
 	if err != nil {
@@ -403,7 +424,7 @@ func ReplayOne(ctx context.Context, t Transcript, store string, options Options)
 		for _, step := range t.HostInput {
 			if step.Frame["kind"] == "effect_failure" {
 				if message, present := step.Frame["message"]; present {
-					text, _ := message.(string)
+					text := jsString(message)
 					cause, isText := diagnostic["cause"].(string)
 					conforms = conforms && isText && strings.HasSuffix(cause, text)
 				}
