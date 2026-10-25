@@ -1,16 +1,16 @@
 # Jacquard Host
 
-Call checked Jacquard functions from Python or TypeScript and implement their
+Call checked Jacquard functions from Python, TypeScript, or Go and implement their
 declared host operations with ordinary services. Jacquard owns the decision
 logic; the host owns persistence, I/O, and application lifetimes.
 
 The SDK prepares and caches checked programs, converts native Python values,
 binds services to exact operation identities, and retains the raw evidence for
-every invocation. Python 3.11+ or Node.js 22+, with no third-party runtime
-dependencies. The [TypeScript SDK](typescript/README.md) implements the pinned
-protocol independently and supports async service methods. An independent
-[Go adapter](go/README.md) (Go 1.24+, standard library only) provides the
-protocol-level host and conformance replayer.
+every invocation. Python 3.11+, Node.js 22+, or Go 1.24+, with no third-party
+runtime dependencies. The [TypeScript SDK](typescript/README.md) and the
+[Go SDK](go/README.md) implement the pinned protocol independently; the
+TypeScript SDK supports async service methods, and the Go SDK maps native Go
+types and context cancellation.
 
 **Experimental:** the SDK targets Core's pinned `jacquard-host-v0` protocol.
 Core is installed separately. Each invocation runs one fresh, serial worker;
@@ -18,7 +18,8 @@ the host and operating system are trusted. See [limits](docs/LIMITS.md).
 
 ## Get started
 
-For Node.js, follow the [TypeScript walkthrough](typescript/README.md). For Python:
+For Node.js, follow the [TypeScript walkthrough](typescript/README.md); for Go,
+the [Go walkthrough](go/README.md). For Python:
 
 From a clone of this repository:
 

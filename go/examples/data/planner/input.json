@@ -1,0 +1,32 @@
+{
+  "capacities": [
+    4,
+    3
+  ],
+  "jobs": [
+    {
+      "id": "large",
+      "effort": 4,
+      "value": 9,
+      "latest": 1
+    },
+    {
+      "id": "fix-a",
+      "effort": 2,
+      "value": 6,
+      "latest": 1
+    },
+    {
+      "id": "fix-b",
+      "effort": 2,
+      "value": 6,
+      "latest": 1
+    },
+    {
+      "id": "docs",
+      "effort": 3,
+      "value": 4,
+      "latest": 2
+    }
+  ]
+}

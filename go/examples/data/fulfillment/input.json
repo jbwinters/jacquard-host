@@ -1,0 +1,13 @@
+{
+  "id": "synthetic-order-1",
+  "lines": [
+    {
+      "sku": "sensor",
+      "units": 2
+    },
+    {
+      "sku": "cable",
+      "units": 3
+    }
+  ]
+}

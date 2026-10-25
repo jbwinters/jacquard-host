@@ -58,6 +58,15 @@ on Linux 7.0.
 | Go live (`go test ./...` with Core configured) | 4 further tests pass: all 21 recordings match against Core with no prose drift; pure and effectful invocations with exact evidence and shutdown; the four failure pairs, handler errors, and panics reported without retry or private detail; cooperative and abandoned handlers at the deadline send no late response |
 | Pin consistency | `go/protocol/compat.go` is generated, and `go/kit/data/` matches the pinned digests and the Python copy (`scripts/core_pin.py check`) |
 
+## Go SDK and projects (2026-10-25)
+
+Recorded against the same release asset with Go 1.24.13 on Linux 7.0.
+
+| Lane | Result |
+|---|---|
+| Go SDK offline | 7 further tests pass: signature parsing and identity groups, review regressions (tuples in record fields and handler results, exact integer-to-Real conversion, atomic enum registration, nullary union records, pointers at non-optional types), one version check under concurrent preparation, native value mapping through checked types (records, full Int range, Real bits, integer-valued Reals, refused out-of-range and invalid text), options/enums/unions and nested options, dynamic values and depth refusal, service method adaptation (context, failures, arity, plain errors, operation maps), and embedded example files identical to `examples/` |
+| Go SDK live | 14 further tests pass: quickstart calls, invocation rendering and saved inspection files; triage records, enums, options, and 64 rows in explicit batches against an oracle; late invalid input and over-deep calls refused before any worker; binding completeness and pure calls without services; unknown completion once with raw evidence; 25 planning cases matching an independent exhaustive oracle with feasible assignments; warm cache reuse without Core commands, byte-exact source invalidation, corruption refusal; full Int range, Real bits, and nested options; spawn failure and cancellation; output overflow without adaptive batching; result-mapping failure retaining the raw result; prelude contents in the cache key and concurrent preparation publishing once; three fulfillment faults with explicit recovery across restart; and all four commands including duplicate fulfillment, `--inspect`, and explicit delivery |
+
 CI now installs this release asset rather than building Core from source. The
 results below were recorded against the earlier development pin and are kept as
 that pin's evidence.
