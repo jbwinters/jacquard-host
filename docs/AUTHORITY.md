@@ -53,6 +53,13 @@ receipt-deduplicated sink; no file path is accepted from Jacquard. Its
 single-process limits are in `typescript/README.md`. The Python socket/trial
 host is unchanged.
 
+The independent Go adapter (`go/`) starts the configured Core executable with
+`host worker --store DIR`, bounded pipes, and a lifetime deadline, and records
+host observations under `jacquard-host-go-evidence-v0` beside the unchanged
+Core frames. Its handlers come only from an explicit `OperationRegistry`
+keyed by exact identities. It does not prepare programs, write caches, or own
+application storage; callers supply the store and environment.
+
 ## Not used
 
 - No outbound network connection of any kind.

@@ -42,7 +42,8 @@ class CorePinTest(unittest.TestCase):
         for name in [*core_pin.GENERATED, *core_pin.BLOCKS]:
             (root / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO / name, root / name)
-        shutil.copytree(core_pin.KIT_DIR, root / core_pin.KIT_DIR.relative_to(REPO))
+        for directory in core_pin.KIT_DIRS:
+            shutil.copytree(directory, root / directory.relative_to(REPO))
         return root
 
     def test_hand_edits_and_kit_tampering_are_reported(self) -> None:
@@ -54,6 +55,9 @@ class CorePinTest(unittest.TestCase):
         found = core_pin.problems(self.pin, root)
         self.assertTrue(any("compat.ts" in item for item in found), found)
         self.assertTrue(any("fixtures.jac" in item for item in found), found)
+        go_readme = root / core_pin.KIT_DIRS[1].relative_to(REPO) / "kit/README.md"
+        go_readme.write_text("drifted")
+        self.assertTrue(any("go/kit/data" in item and "README.md" in item for item in core_pin.problems(self.pin, root)))
 
     def test_sync_rewrites_only_generated_regions(self) -> None:
         root = self.copy()
@@ -192,6 +196,9 @@ class UpdateTest(unittest.TestCase):
         self.kit = Path(tempfile.mkdtemp(prefix="core-kit-"))
         self.addCleanup(shutil.rmtree, self.kit)
         shutil.copytree(core_pin.KIT_DIR, self.kit, dirs_exist_ok=True)
+        self.go_kit = Path(tempfile.mkdtemp(prefix="core-go-kit-"))
+        self.addCleanup(shutil.rmtree, self.go_kit)
+        shutil.copytree(core_pin.KIT_DIR, self.go_kit, dirs_exist_ok=True)
         self.files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
 
     def run_update(self, manifest_changes: dict, assets: dict) -> dict:
@@ -202,7 +209,7 @@ class UpdateTest(unittest.TestCase):
         with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
              patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
              patch.object(core_pin, "release_assets", return_value=assets) as self.fetched:
-            return core_pin.update(self.pin, "jacquard-core-9.9.9", None, self.kit)
+            return core_pin.update(self.pin, "jacquard-core-9.9.9", None, (self.kit, self.go_kit))
 
     def test_a_release_is_adopted_with_its_kit_and_assets(self) -> None:
         assets = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
@@ -211,6 +218,7 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(new["assets"], assets)
         written = (self.kit / "kit/kit.json").read_bytes()
         self.assertEqual(new["kit"]["digests"]["kit/kit.json"], core_pin.sha256(written))
+        self.assertEqual((self.go_kit / "kit/kit.json").read_bytes(), written)
         self.assertEqual([path.name for path in self.kit.rglob(".*.core-pin")], [])
 
     def test_a_failed_replacement_restores_every_kit_file(self) -> None:

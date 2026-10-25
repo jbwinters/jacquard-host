@@ -5,9 +5,11 @@
 Every adapter in this repository is pinned to one published Jacquard Core
 release, recorded once in [`core-pin.json`](../core-pin.json). The Python
 constants (`src/jacquard_host/compat.py`), the TypeScript constants
-(`typescript/src/compat.ts`), and the block below are generated from that file
-by `scripts/core_pin.py sync`; `scripts/core_pin.py check` fails CI when any of
-them, or the vendored kit, drifts from the pin. Adapters verify the kit's four
+(`typescript/src/compat.ts`), the Go constants (`go/protocol/compat.go`), and the
+block below are generated from that file by `scripts/core_pin.py sync`;
+`scripts/core_pin.py check` fails CI when any of them, or either vendored kit
+copy (the Python package data and Go's embedded `go/kit/data/`), drifts from
+the pin. Adapters verify the kit's four
 digests independently at load time, and the SDKs refuse a Core whose
 `--version` differs from the pinned version.
 
@@ -38,7 +40,7 @@ Release assets verified by `scripts/core_pin.py install`:
 | macos-x86_64 | `jacquard-macos-x86_64.tar.gz` | `8efc54bcf7573cb7cfd35fa3e77a584680ce68de872bdb212ed8369a974ff967` |
 <!-- core-pin:end -->
 
-Python and TypeScript replay the same 21 recordings against the pinned
+Python, TypeScript, and Go replay the same 21 recordings against the pinned
 worker, including Core's recorded `noncanonical-target-hash` divergence: the
 HB.1 vector expects E1603 while the shipped preflight classifies an uppercase
 target hash as a malformed scalar (E1601). The transcript is recorded as
@@ -101,6 +103,7 @@ eval "$(python3 scripts/core_pin.py install)"
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m pip install . && python3 scripts/check_examples.py
 (cd typescript && npm ci && npm test && npm run test:live && npm run check:package)
+(cd go && go test -race ./... && go test -count=1 ./...)
 ```
 
 `update` resolves the tag to its commit, copies the kit files from

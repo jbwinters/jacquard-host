@@ -2,6 +2,10 @@
 
 ## 0.2.0 — unreleased
 
+- Add an independent Go adapter (`go/`, standard library only): strict v0
+  codecs, the host session state machine, a bounded process carrier, a
+  low-level `Host` with a closed operation registry, context cancellation, and
+  an embedded kit replayer. It replays all 21 pinned recordings against Core.
 - Pin all adapters to the Jacquard Core `jacquard-core-0.3.0` release (was a
   development commit reporting 0.2.0). The host protocol and recordings are
   unchanged; only the kit's recorded Core version differs.
