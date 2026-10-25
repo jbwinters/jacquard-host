@@ -178,8 +178,10 @@ action stopped.
   `ErrDeadlineExceeded` means the worker's own lifetime deadline expired.
 - **Descendants after exit.** On Unix the worker runs in its own process group,
   and its stderr is a pipe the host owns. If a descendant still holds that pipe
-  one second after the worker exits, the host stops the remaining group. A
-  successful exit is then reported as a carrier loss.
+  one second after the worker exits, a successful exit is reported as a carrier
+  loss. On Linux the host also stops the remaining group, while the exited
+  worker is still unreaped so its group id cannot be reused. Other platforms
+  only stop reading the pipe.
 - **Escaped descendants.** A descendant that left the group, for example through
   `setsid`, is not stopped. The host stops reading its pipe after a second grace
   period and returns.

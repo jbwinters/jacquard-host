@@ -9,6 +9,20 @@ import (
 	"time"
 )
 
+// Post-exit group cleanup needs waitid(WNOWAIT), so it is Linux-only.
+func TestDescendantHoldingStderrAfterExitFailsClosed(t *testing.T) {
+	for mode, status := range map[string]int{"stderr-descendant": 0, "stderr-descendant-nonzero": 74} {
+		result := faulty(t, mode, 5*time.Second, nil).Invoke(context.Background(), identities(t)["kit-ready"], unit, nil, nil)
+		if result.OK() || result.Kind != "carrier_loss" || result.Code() != "E1611" {
+			t.Fatalf("%s: kind %s: %s", mode, result.Kind, result.Message())
+		}
+		if result.ExitStatus == nil || *result.ExitStatus != status {
+			t.Fatalf("%s: exit status %v", mode, result.ExitStatus)
+		}
+		descendantDies(t, mode, result.Stderr)
+	}
+}
+
 func openDescriptors(t *testing.T) int {
 	t.Helper()
 	entries, err := os.ReadDir("/proc/self/fd")
