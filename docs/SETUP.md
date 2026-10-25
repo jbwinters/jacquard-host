@@ -37,6 +37,10 @@ The release unpacks under `.scratch/jacquard-core/`. `install` prints the
 `JACQUARD_BIN` (the release's real executable, not its `sh` launcher) and
 `JACQUARD_PRELUDE` exports; run it again in a new shell, which reuses the
 verified download. A checksum mismatch or a different `--version` fails.
+The install's link safety does not rely on Python's tarfile `data` filter. It
+refuses archive links that name anything other than a sibling entry, and it
+refuses hardlinks. The filter still applies, so a Python with the 2025 tarfile
+fixes (3.11.13, 3.12.11, 3.13.4, or later) is preferable.
 
 ### Build the same release from source
 

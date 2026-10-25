@@ -269,5 +269,98 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual({name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}, before)
 
 
+class HardeningTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.pin = core_pin.load()
+
+    def test_maintainer_fields_are_validated(self) -> None:
+        for path, value in ((("repository",), "owner/../name"), (("repository",), "no-slash"),
+                            (("kit", "path"), "../outside"), (("kit", "path"), "/absolute"),
+                            (("kit", "evidence"), "docs/./release"), (("kit", "evidence"), "a b")):
+            broken = json.loads(json.dumps(self.pin))
+            target = broken
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            with self.subTest(field=path, value=value), self.assertRaises(core_pin.PinError):
+                core_pin.validate(broken)
+
+    def test_malformed_decisions_and_tags_are_refused_before_any_fetch(self) -> None:
+        for entries in ("x", ["name"], [{"name": 3}]):
+            with self.subTest(entries=entries), self.assertRaisesRegex(core_pin.PinError, "pending_decisions"):
+                core_pin.decision_names({"pending_decisions": entries})
+        with patch.object(core_pin, "tag_commit", side_effect=AssertionError("fetched")) as fetched:
+            for tag in ("jacquard-core-latest", "jacquard-core-1.2", "v1.2.3", "jacquard-core-1.2.3; rm"):
+                with self.subTest(tag=tag), self.assertRaisesRegex(core_pin.PinError, "release tags"):
+                    core_pin.update(self.pin, tag, None)
+            fetched.assert_not_called()
+
+    def copy(self) -> tuple[Path, Path, tuple[Path, ...]]:
+        root = Path(tempfile.mkdtemp(prefix="core-adopt-"))
+        self.addCleanup(shutil.rmtree, root)
+        for name in [*core_pin.GENERATED, *core_pin.BLOCKS]:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO / name, root / name)
+        kit_dirs = tuple(root / directory.relative_to(REPO) for directory in core_pin.KIT_DIRS)
+        for source, target in zip(core_pin.KIT_DIRS, kit_dirs):
+            shutil.copytree(source, target)
+        pin_path = root / "core-pin.json"
+        shutil.copyfile(core_pin.PIN, pin_path)
+        return root, pin_path, kit_dirs
+
+    def snapshot(self, root: Path) -> dict[str, bytes]:
+        return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+    def adopt(self, root: Path, pin_path: Path, kit_dirs: tuple[Path, ...]) -> None:
+        files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
+        manifest = json.loads(files["kit/kit.json"])
+        manifest["core_version"] = "9.9.9"
+        files["kit/kit.json"] = json.dumps(manifest).encode()
+        assets = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
+        with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
+             patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
+             patch.object(core_pin, "release_assets", return_value=assets):
+            core_pin.adopt(self.pin, "jacquard-core-9.9.9", None, root=root, pin_path=pin_path, kit_dirs=kit_dirs)
+
+    def test_adoption_succeeds_end_to_end(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        self.adopt(root, pin_path, kit_dirs)
+        adopted = core_pin.load(pin_path)
+        self.assertEqual(adopted["release"]["tag"], "jacquard-core-9.9.9")
+        self.assertEqual(core_pin.problems(adopted, root), [])
+
+    def test_a_failed_sync_restores_pin_kit_and_generated_files(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        with patch.object(core_pin, "sync", side_effect=OSError("synthetic sync failure")), \
+             self.assertRaisesRegex(OSError, "synthetic sync failure"):
+            self.adopt(root, pin_path, kit_dirs)
+        self.assertEqual(self.snapshot(root), before)
+
+    def test_a_failed_restore_reports_the_original_failure(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        with patch.object(core_pin, "sync", side_effect=OSError("synthetic sync failure")), \
+             patch.object(core_pin, "restore", side_effect=core_pin.PinError("could not restore")), \
+             self.assertRaisesRegex(core_pin.PinError, "could not restore.*synthetic sync failure"):
+            self.adopt(root, pin_path, kit_dirs)
+
+    def test_a_partial_staging_write_leaves_originals_and_no_temporaries(self) -> None:
+        root, _, kit_dirs = self.copy()
+        targets = {kit_dirs[0] / name: b"changed" for name in core_pin.KIT_FILES}
+        before = {path: path.read_bytes() for path in targets}
+        real_write, calls = Path.write_bytes, []
+        def flaky(path, data):
+            if path.name.endswith(".core-pin"):
+                calls.append(path)
+                if len(calls) == 2:
+                    path.write_text("partial")
+                    raise OSError("disk full")
+            return real_write(path, data)
+        with patch.object(Path, "write_bytes", flaky), self.assertRaisesRegex(OSError, "disk full"):
+            core_pin.write_files(targets)
+        self.assertEqual({path: path.read_bytes() for path in targets}, before)
+        self.assertEqual([path for path in root.rglob("*.core-pin")], [])
+
+
 if __name__ == "__main__":
     unittest.main()
