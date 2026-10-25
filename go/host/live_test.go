@@ -161,11 +161,11 @@ func TestLiveHandlerDeadlineKillsTheWorkerWithoutALateResponse(t *testing.T) {
 		},
 	} {
 		var calls atomic.Int32
-		var cancelled atomic.Bool
+		finished := make(chan bool, 1)
 		registry := l.registry(t, func(ctx context.Context, args []protocol.Value) (protocol.Value, error) {
 			calls.Add(1)
 			value, err := handler(ctx, args)
-			cancelled.Store(ctx.Err() != nil)
+			finished <- ctx.Err() != nil
 			return value, err
 		})
 		start := time.Now()
@@ -174,8 +174,13 @@ func TestLiveHandlerDeadlineKillsTheWorkerWithoutALateResponse(t *testing.T) {
 			len(result.HostFrames) != 2 || time.Since(start) > 2*time.Second {
 			t.Errorf("%s: %v frames=%d after %v", name, result.HostEvidence, len(result.HostFrames), time.Since(start))
 		}
-		if name == "cooperative" && !cancelled.Load() {
-			t.Errorf("%s: handler context was not cancelled", name)
+		select {
+		case cancelled := <-finished:
+			if !cancelled {
+				t.Errorf("%s: handler context was not cancelled", name)
+			}
+		case <-time.After(3 * time.Second):
+			t.Errorf("%s: handler did not finish", name)
 		}
 	}
 }

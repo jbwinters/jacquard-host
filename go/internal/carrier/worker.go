@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jbwinters/jacquard-host/go/protocol"
@@ -68,7 +67,7 @@ func (o Options) command() []string {
 type Worker struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
-	stdout io.Reader
+	stdout io.ReadCloser
 	stderr *boundedBuffer
 	ctx    context.Context
 	parent context.Context
@@ -78,6 +77,7 @@ type Worker struct {
 	mu         sync.Mutex
 	fault      error
 	waited     bool
+	reaped     bool
 	inputDone  bool
 	SpawnError error
 	ExitStatus *int
@@ -103,9 +103,12 @@ func Start(parent context.Context, store string, options Options) (*Worker, erro
 	}
 	w.cmd.Stderr = w.stderr
 	w.cmd.WaitDelay = time.Second
+	isolate(w.cmd)
 	var err error
 	if w.stdin, err = w.cmd.StdinPipe(); err == nil {
-		w.stdout, err = w.cmd.StdoutPipe()
+		if w.stdout, err = w.cmd.StdoutPipe(); err != nil {
+			_ = w.stdin.Close()
+		}
 	}
 	if err == nil {
 		err = w.cmd.Start()
@@ -116,8 +119,21 @@ func Start(parent context.Context, store string, options Options) (*Worker, erro
 		w.waited = true
 		return w, nil
 	}
-	w.stop = context.AfterFunc(ctx, func() { _ = w.cmd.Process.Kill() })
+	w.stop = context.AfterFunc(ctx, w.expire)
 	return w, nil
+}
+
+// expire kills the worker's process group and closes both pipes, so a read or
+// write blocked on a descendant that inherited them returns at the deadline.
+func (w *Worker) expire() {
+	w.mu.Lock()
+	reaped := w.reaped
+	w.mu.Unlock()
+	if !reaped {
+		killTree(w.cmd.Process)
+	}
+	_ = w.stdout.Close()
+	_ = w.stdin.Close()
 }
 
 // Context is cancelled when the worker fails, expires, or is disposed.
@@ -228,12 +244,14 @@ func (w *Worker) reap() {
 	w.waited = true
 	w.mu.Unlock()
 	_ = w.cmd.Wait()
+	w.mu.Lock()
+	w.reaped = true
+	w.mu.Unlock()
 	state := w.cmd.ProcessState
 	if state == nil {
 		return
 	}
-	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		w.Signal = status.Signal().String()
+	if w.Signal = signalName(state); w.Signal != "" {
 		return
 	}
 	code := state.ExitCode()
@@ -250,7 +268,7 @@ func (w *Worker) Dispose() {
 	live := !w.waited
 	w.mu.Unlock()
 	if live {
-		_ = w.cmd.Process.Kill()
+		killTree(w.cmd.Process)
 		w.reap()
 	}
 	w.cancel()

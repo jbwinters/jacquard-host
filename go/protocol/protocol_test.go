@@ -173,3 +173,16 @@ func TestFailurePairs(t *testing.T) {
 		}
 	}
 }
+
+func TestCountsAreCheckedBeforeIdentities(t *testing.T) {
+	many := make([]any, 65)
+	for i := range many {
+		many[i] = Object{"kind": "int", "value": "1"}
+	}
+	_, err := DecodeValue(Object{"kind": "constructor", "identity": "bad", "arguments": many}, NewBudget(HardLimits))
+	code(t, err, "E1602", "constructor count before identity")
+	wire := HardLimits.JSON()
+	wire["max_arguments"] = int64(1) << 60
+	_, err = DecodeLimits(wire)
+	code(t, err, "E1601", "limit beyond the exact integer range")
+}

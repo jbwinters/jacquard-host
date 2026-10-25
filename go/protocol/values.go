@@ -93,7 +93,7 @@ func DecodeLimits(value any) (Limits, error) {
 	}
 	for _, field := range fields {
 		number, ok := obj[field.name].(int64)
-		if !ok {
+		if !ok || number > maxSafeInteger || number < -maxSafeInteger {
 			return Limits{}, malformed("limit %s must be an integer", field.name)
 		}
 		if number < 1 || number > int64(field.hard) {
@@ -103,6 +103,9 @@ func DecodeLimits(value any) (Limits, error) {
 	}
 	return limits, nil
 }
+
+// maxSafeInteger matches the exact-integer range of the other adapters' limit checks.
+const maxSafeInteger = 1<<53 - 1
 
 var hashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -222,12 +225,17 @@ func DecodeType(value any, budget *Budget) (BoundaryType, error) {
 		if _, err := exact(obj, "arguments", "identity", "kind"); err != nil {
 			return nil, err
 		}
+		// Count before the identity check, as the other adapters do.
+		items, err := counted(obj["arguments"], budget, false)
+		if err != nil {
+			return nil, err
+		}
 		identity, err := ParseHash(obj["identity"])
 		if err != nil {
 			return nil, err
 		}
-		items, err := decodeTypes(obj["arguments"], budget)
-		return Nominal{identity, items}, err
+		types, err := decodeTypeItems(items, budget)
+		return Nominal{identity, types}, err
 	case "tuple":
 		if _, err := exact(obj, "items", "kind"); err != nil {
 			return nil, err
@@ -238,14 +246,24 @@ func DecodeType(value any, budget *Budget) (BoundaryType, error) {
 	return nil, unsupported("unsupported boundary type kind")
 }
 
-func decodeTypes(value any, budget *Budget) ([]BoundaryType, error) {
+func counted(value any, budget *Budget, arguments bool) ([]any, error) {
 	items, err := asArray(value)
 	if err != nil {
 		return nil, err
 	}
-	if err := budget.count(len(items), false); err != nil {
+	return items, budget.count(len(items), arguments)
+}
+
+func decodeTypes(value any, budget *Budget) ([]BoundaryType, error) {
+	items, err := counted(value, budget, false)
+	if err != nil {
 		return nil, err
 	}
+	return decodeTypeItems(items, budget)
+}
+
+func decodeTypeItems(items []any, budget *Budget) ([]BoundaryType, error) {
+	var err error
 	out := make([]BoundaryType, len(items))
 	for i, item := range items {
 		if out[i], err = DecodeType(item, budget); err != nil {
@@ -363,24 +381,30 @@ func DecodeValue(value any, budget *Budget) (Value, error) {
 		if _, err := exact(obj, "arguments", "identity", "kind"); err != nil {
 			return nil, err
 		}
+		items, err := counted(obj["arguments"], budget, true)
+		if err != nil {
+			return nil, err
+		}
 		identity, err := ParseHash(obj["identity"])
 		if err != nil {
 			return nil, err
 		}
-		items, err := decodeValues(obj["arguments"], budget, true)
-		return Constructor{identity, items}, err
+		values, err := decodeValueItems(items, budget)
+		return Constructor{identity, values}, err
 	}
 	return nil, unsupported("unsupported boundary value kind")
 }
 
 func decodeValues(value any, budget *Budget, arguments bool) ([]Value, error) {
-	items, err := asArray(value)
+	items, err := counted(value, budget, arguments)
 	if err != nil {
 		return nil, err
 	}
-	if err := budget.count(len(items), arguments); err != nil {
-		return nil, err
-	}
+	return decodeValueItems(items, budget)
+}
+
+func decodeValueItems(items []any, budget *Budget) ([]Value, error) {
+	var err error
 	out := make([]Value, len(items))
 	for i, item := range items {
 		if out[i], err = DecodeValue(item, budget); err != nil {

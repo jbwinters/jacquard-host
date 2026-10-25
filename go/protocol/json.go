@@ -264,8 +264,9 @@ func (d *decoder) quoted() (string, error) {
 	return "", malformed("unterminated JSON string")
 }
 
-// Stringify encodes a JSON value canonically: sorted keys, no whitespace, and
-// the same escaping as JavaScript's JSON.stringify. Integers must be int or
+// Stringify encodes a JSON value deterministically: keys sorted by code point
+// (the protocol's keys are ASCII, where every adapter agrees), no whitespace,
+// and the same escaping as JavaScript's JSON.stringify. Integers must be int or
 // int64 within the 63-bit range.
 func Stringify(value any, maxDepth int) (string, error) {
 	var out strings.Builder

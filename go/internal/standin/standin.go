@@ -5,8 +5,10 @@ package standin
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -43,6 +45,15 @@ func MainIfRequested() {
 		block()
 	case "truncated":
 		_, _ = os.Stdout.Write([]byte{0, 0, 0})
+		os.Exit(0)
+	case "descendant":
+		// Leave a descendant holding stdout, like a launcher that does not exec.
+		child := exec.Command("sleep", "30")
+		child.Stdout = os.Stdout
+		if child.Start() != nil {
+			os.Exit(3)
+		}
+		fmt.Fprintf(os.Stderr, "%d", child.Process.Pid)
 		os.Exit(0)
 	}
 	loaded, err := kit.Load()

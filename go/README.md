@@ -88,8 +88,12 @@ exposing its message. Nothing is retried.
 
 `Options.Deadline` bounds the whole worker lifetime: spawn, every pipe read and
 write, each handler, and process exit. When it expires, or the caller's context
-is cancelled, the host kills and reaps the worker, cancels the handler's
-context, and sends no late response. A handler that ignores its context keeps
+is cancelled, the host kills the worker's process group, closes its pipes,
+reaps it, cancels the handler's context, and sends no late response. On Unix
+the worker runs in its own process group, so descendants that inherited its
+pipes (for example a launcher that does not `exec`) are stopped too, and a
+terminal interrupt sent to the host's group does not reach the worker
+directly; it exits when its input closes or its deadline expires. A handler that ignores its context keeps
 running in its goroutine until it returns; the host has stopped waiting for it.
 This does not prove that an outside action stopped or rolled back.
 

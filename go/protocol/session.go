@@ -447,8 +447,13 @@ func ParseCoreFrame(frame Object, limits Limits) (any, error) {
 		if ordinal < 1 {
 			return nil, outOfOrder("request ordinals start at one")
 		}
-		if ordinal > 1<<53 {
+		if ordinal > maxSafeInteger {
 			return nil, outOfOrder("request ordinal is not consecutive")
+		}
+		budget := NewBudget(limits)
+		items, err := counted(frame["arguments"], budget, true)
+		if err != nil {
+			return nil, err
 		}
 		effect, err := ParseHash(frame["effect"])
 		if err != nil {
@@ -458,7 +463,7 @@ func ParseCoreFrame(frame Object, limits Limits) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		args, err := decodeValues(frame["arguments"], NewBudget(limits), true)
+		args, err := decodeValueItems(items, budget)
 		if err != nil {
 			return nil, err
 		}
