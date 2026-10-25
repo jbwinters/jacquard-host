@@ -269,7 +269,7 @@ func InvokeFrame(target Hash, spec Interface, args []Value, operations []Operati
 	}, nil
 }
 
-func validateEvidence(value any, limits Limits) (Object, string, error) {
+func validateEvidence(value any, limits Limits, budget *Budget) (Object, string, error) {
 	evidence, err := exact(value, "core", "host_observations")
 	if err != nil {
 		return nil, "", err
@@ -302,7 +302,6 @@ func validateEvidence(value any, limits Limits) (Object, string, error) {
 	if _, err := sortedHashes(spec["effects"], limits.MaxEffects); err != nil {
 		return nil, "", err
 	}
-	budget := NewBudget(limits)
 	parameters, err := asArray(spec["parameters"])
 	if err != nil {
 		return nil, "", err
@@ -475,7 +474,9 @@ func ParseCoreFrame(frame Object, limits Limits) (any, error) {
 		if err := invocation(frame); err != nil {
 			return nil, err
 		}
-		evidence, terminal, err := validateEvidence(frame["evidence"], limits)
+		// Core encodes evidence types and the result value against one frame budget.
+		budget := NewBudget(limits)
+		evidence, terminal, err := validateEvidence(frame["evidence"], limits, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -491,7 +492,7 @@ func ParseCoreFrame(frame Object, limits Limits) (any, error) {
 			if terminal != "ok" {
 				return nil, malformed("ok result has a non-ok terminal")
 			}
-			value, err := DecodeValue(result["value"], NewBudget(limits))
+			value, err := DecodeValue(result["value"], budget)
 			if err != nil {
 				return nil, err
 			}
