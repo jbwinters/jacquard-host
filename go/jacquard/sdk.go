@@ -51,10 +51,10 @@ type Runtime struct {
 	deadline time.Duration
 	limits   protocol.Limits
 
-	mu       sync.Mutex
-	discover sync.Mutex // serializes the version check and prelude discovery
-	checked  map[string]bool
-	preludes map[string][]group
+	mu sync.Mutex
+	// flights runs each version check and prelude discovery once per key;
+	// a successful flight stays as the cached result.
+	flights map[string]*flight
 	// command runs a Core subcommand; tests may observe it.
 	command func(ctx context.Context, binary string, args ...string) (string, error)
 }
@@ -90,7 +90,7 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		return nil, &BindingError{Message: "invalid runtime limits: " + err.Error()}
 	}
 	r := &Runtime{binary: binary, prelude: absolute, deadline: options.Deadline, limits: limits,
-		checked: map[string]bool{}, preludes: map[string][]group{}}
+		flights: map[string]*flight{}}
 	r.command = r.run
 	return r, nil
 }
@@ -345,55 +345,94 @@ func (r *Runtime) prepare(ctx context.Context, sources []string, options Prepare
 	return r.load(directory, identity, binary)
 }
 
+// flight is one in-progress or completed discovery.
+type flight struct {
+	done   chan struct{}
+	groups []group
+	err    error
+}
+
+// once runs work once per key. Concurrent callers share one run, and a
+// successful result stays cached. A caller stops waiting when its own context
+// ends; if the run it waited for failed (for example because the leading
+// caller was cancelled) while its own context is live, it runs or joins the
+// next attempt itself.
+func (r *Runtime) once(ctx context.Context, key string, work func(context.Context) ([]group, error)) ([]group, error) {
+	for {
+		r.mu.Lock()
+		f, waiting := r.flights[key]
+		if !waiting {
+			f = &flight{done: make(chan struct{})}
+			r.flights[key] = f
+		}
+		r.mu.Unlock()
+		if !waiting {
+			f.groups, f.err = run(ctx, work)
+			if f.err != nil {
+				r.mu.Lock()
+				delete(r.flights, key) // before done closes, so waiters retry afresh
+				r.mu.Unlock()
+			}
+			close(f.done)
+			return f.groups, f.err
+		}
+		select {
+		case <-f.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if f.err == nil {
+			return f.groups, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// run calls work, turning a panic into an error so waiters are released.
+func run(ctx context.Context, work func(context.Context) ([]group, error)) (groups []group, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			groups, err = nil, &PreparationError{Message: fmt.Sprintf("Core discovery panicked: %v", recovered)}
+		}
+	}()
+	return work(ctx)
+}
+
 // checkVersion runs `--version` once per executable digest, even when
-// preparations start concurrently.
+// preparations start concurrently. Like the Python SDK, it accepts output
+// whose last field is the pinned version (for example "jacquard 0.3.0").
 func (r *Runtime) checkVersion(ctx context.Context, binary, binaryHash string) error {
-	r.discover.Lock()
-	defer r.discover.Unlock()
-	r.mu.Lock()
-	checked := r.checked[binaryHash]
-	r.mu.Unlock()
-	if checked {
-		return nil
-	}
-	version, err := r.command(ctx, binary, "--version")
-	if err != nil {
-		return err
-	}
-	if fields := strings.Fields(version); len(fields) == 0 || fields[len(fields)-1] != protocol.CoreVersion {
-		return &PreparationError{Message: fmt.Sprintf("expected pinned Core version %s, found %q; the exact release is also required", protocol.CoreVersion, strings.TrimSpace(version))}
-	}
-	r.mu.Lock()
-	r.checked[binaryHash] = true
-	r.mu.Unlock()
-	return nil
+	_, err := r.once(ctx, "version:"+binaryHash, func(ctx context.Context) ([]group, error) {
+		version, err := r.command(ctx, binary, "--version")
+		if err != nil {
+			return nil, err
+		}
+		if fields := strings.Fields(version); len(fields) == 0 || fields[len(fields)-1] != protocol.CoreVersion {
+			return nil, &PreparationError{Message: fmt.Sprintf("expected pinned Core version %s, found %q; the exact release is also required", protocol.CoreVersion, strings.TrimSpace(version))}
+		}
+		return nil, nil
+	})
+	return err
 }
 
 func (r *Runtime) preludeGroups(ctx context.Context, binary, key string) ([]group, error) {
-	r.discover.Lock()
-	defer r.discover.Unlock()
-	r.mu.Lock()
-	cached, ok := r.preludes[key]
-	r.mu.Unlock()
-	if ok {
-		return cached, nil
-	}
-	var groups []group
-	for _, name := range []string{"01-prim.jqd", "02-data.jqd", "19-audit.jqd"} {
-		output, err := r.command(ctx, binary, "hash", filepath.Join(r.prelude, name))
-		if err != nil {
-			return nil, err
+	return r.once(ctx, "prelude:"+key, func(ctx context.Context) ([]group, error) {
+		var groups []group
+		for _, name := range []string{"01-prim.jqd", "02-data.jqd", "19-audit.jqd"} {
+			output, err := r.command(ctx, binary, "hash", filepath.Join(r.prelude, name))
+			if err != nil {
+				return nil, err
+			}
+			parsed, err := hashGroups(output)
+			if err != nil {
+				return nil, err
+			}
+			groups = append(groups, parsed...)
 		}
-		parsed, err := hashGroups(output)
-		if err != nil {
-			return nil, err
-		}
-		groups = append(groups, parsed...)
-	}
-	r.mu.Lock()
-	r.preludes[key] = groups
-	r.mu.Unlock()
-	return groups, nil
+		return groups, nil
+	})
 }
 
 func (r *Runtime) load(directory string, identity map[string]string, binary string) (*Program, error) {
@@ -542,6 +581,9 @@ func (p *Program) Function(name string, options FunctionOptions) (*Function, err
 		for _, operation := range effect.operations {
 			handler, ok := p.handler(services[effectName], operation.Name)
 			if !ok {
+				if _, unsupported := p.lookup(services[effectName], operation.Name); unsupported != "" {
+					return nil, &BindingError{Message: fmt.Sprintf("%s: %s.%s %s", name, goName(effectName), goName(operation.Name), unsupported)}
+				}
 				missing = append(missing, goName(effectName)+"."+goName(operation.Name))
 				continue
 			}
@@ -558,26 +600,52 @@ func (p *Program) Function(name string, options FunctionOptions) (*Function, err
 
 var contextType = reflect.TypeFor[context.Context]()
 
-// handler adapts a Go method or function to a host.Handler. Arguments decode
-// into the method's parameter types; an optional leading context.Context
-// receives cancellation. Results may be (T), (T, error), (error), or none for
-// unit; a *host.Failure error is reported as that failure.
-func (p *Program) handler(service any, operation string) (host.Handler, bool) {
+// lookup finds the function serving operation, or explains why a present
+// candidate cannot serve it.
+func (p *Program) lookup(service any, operation string) (reflect.Value, string) {
 	if service == nil {
-		return nil, false
+		return reflect.Value{}, ""
 	}
 	var fn reflect.Value
 	if ops, ok := service.(Operations); ok {
 		for _, key := range []string{operation, goName(operation)} {
 			if f, ok := ops[key]; ok {
-				fn = reflect.ValueOf(f)
+				if fn = reflect.ValueOf(f); !fn.IsValid() || (fn.Kind() == reflect.Func && fn.IsNil()) {
+					return reflect.Value{}, "is nil"
+				}
 				break
 			}
 		}
 	} else {
-		fn = reflect.ValueOf(service).MethodByName(goName(operation))
+		value := reflect.ValueOf(service)
+		fn = value.MethodByName(goName(operation))
+		if !fn.IsValid() && value.Kind() != reflect.Pointer {
+			if _, found := reflect.PointerTo(value.Type()).MethodByName(goName(operation)); found {
+				return reflect.Value{}, "has a pointer receiver; pass a pointer to the service"
+			}
+		}
 	}
-	if !fn.IsValid() || fn.Kind() != reflect.Func {
+	if !fn.IsValid() {
+		return reflect.Value{}, ""
+	}
+	if fn.Kind() != reflect.Func {
+		return reflect.Value{}, "is not a function"
+	}
+	if t := fn.Type(); t.IsVariadic() {
+		return reflect.Value{}, "must not be variadic"
+	} else if t.NumOut() > 2 || (t.NumOut() == 2 && t.Out(1) != errorType) {
+		return reflect.Value{}, "must return T, (T, error), error, or nothing"
+	}
+	return fn, ""
+}
+
+// handler adapts a Go method or function to a host.Handler. Arguments decode
+// into the method's parameter types; an optional leading context.Context
+// receives cancellation. Results may be (T), (T, error), (error), or none for
+// unit; a *host.Failure error is reported as that failure.
+func (p *Program) handler(service any, operation string) (host.Handler, bool) {
+	fn, problem := p.lookup(service, operation)
+	if !fn.IsValid() || problem != "" {
 		return nil, false
 	}
 	t := fn.Type()
@@ -585,9 +653,6 @@ func (p *Program) handler(service any, operation string) (host.Handler, bool) {
 	first := 0
 	if withContext {
 		first = 1
-	}
-	if t.IsVariadic() || t.NumOut() > 2 || (t.NumOut() == 2 && t.Out(1) != errorType) {
-		return nil, false
 	}
 	return func(ctx context.Context, arguments []protocol.Value) (protocol.Value, error) {
 		if len(arguments) != t.NumIn()-first {

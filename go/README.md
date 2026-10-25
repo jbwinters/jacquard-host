@@ -118,6 +118,14 @@ constructor's positional order. Register types before invoking functions;
 registration is not synchronized with concurrent calls. `Data.Make("ConstructorName", fields...)`
 builds a `jacquard.Variant` for dynamic code.
 
+Some mapping rules follow from the pinned CLI, which exports no field types:
+- **Pointer fields.** A pointer field inside a record always maps to `Option`.
+  To send a nested non-optional record, use a value field. The pointer
+  dereference rule applies only where a checked signature names the type.
+- **Local refusals.** A constructor can map to either a record or an enum, not
+  both. `nil` where a checked signature expects a non-optional data type is
+  refused locally. A registered empty record is never treated as unit.
+
 `Call[any]` or `Invocation.Value` returns native values:
 - `int64`, `float64`, `string`, `bool`, and `protocol.Hash`;
 - `[]any` for lists and non-empty tuples;
@@ -168,7 +176,8 @@ from operation names to functions.
 - cancelling the caller's context has the same effect.
 
 When the deadline passes or the context is cancelled, the worker's process
-group is killed and its pipes are closed. The handler's context is cancelled,
+group is killed while the worker is unreaped (always on Linux), and its pipes
+are closed. The handler's context is cancelled,
 and no late response is sent. A handler that ignores its context keeps running
 until it returns. Nothing is retried, and this does not prove that an outside
 action stopped.
@@ -201,6 +210,15 @@ action stopped.
 - `*jacquard.PreparationError` covers checking and the cache.
 - `MapBatches` returns the completed values with a `*jacquard.BatchError`
   naming the failed batch. It validates every batch first and retries nothing.
+
+Handler failures that occur before the handler runs are reported as an outside
+failure, which means nothing was done. That covers a request argument that does
+not decode into the handler's parameter type, and a wrong argument count. A
+handler signature that cannot serve an operation, such as a variadic function,
+a wrong result shape, or a pointer-receiver method on a value service, is a
+`*jacquard.BindingError` when the function is bound. The version check, like the
+Python SDK's, accepts `--version` output whose last field is the pinned
+version.
 
 `Invocation.Save` writes argument and result values; it runs only when called.
 

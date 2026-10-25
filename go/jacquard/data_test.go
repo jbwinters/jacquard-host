@@ -374,3 +374,138 @@ func TestVersionIsCheckedOncePerExecutableUnderConcurrency(t *testing.T) {
 		t.Fatalf("--version ran %d times", calls.Load())
 	}
 }
+
+type valueService struct{}
+
+func (*valueService) PointerOnly(string) string { return "" }
+
+type emptyRecord struct{}
+
+func TestFollowUpMappingAndBindingRules(t *testing.T) {
+	d := fixture(t)
+	if err := RegisterEnum(d, map[urgency]string{"PAGE": "PageNow"}); err != nil {
+		t.Fatal(err)
+	}
+	if d.Record("PageNow", emptyRecord{}) == nil {
+		t.Fatal("a record over an enum constructor was accepted")
+	}
+	record := protocol.Nominal{Identity: id("8")}
+	if _, err := d.Encode(nil, record); !isInvalid(err) {
+		t.Fatalf("untyped nil at a record type: %v", err)
+	}
+	if err := d.Record("Routed", emptyRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	if encoded, err := d.Encode(emptyRecord{}, protocol.TupleType{}); !isInvalid(err) {
+		t.Fatalf("registered empty record at a unit position: %#v %v", encoded, err)
+	}
+	if encoded, err := d.Encode(Unit{}, protocol.TupleType{}); err != nil || !reflect.DeepEqual(encoded, protocol.Tuple{}) {
+		t.Fatalf("unit: %#v %v", encoded, err)
+	}
+	p := &Program{Data: d}
+	for name, service := range map[string]any{
+		"variadic":       Operations{"op": func(...string) string { return "" }},
+		"result shape":   Operations{"op": func() (int, int) { return 0, 0 }},
+		"not a function": Operations{"op": 3},
+		"untyped nil":    Operations{"op": nil},
+		"typed nil":      Operations{"op": (func() string)(nil)},
+	} {
+		if _, problem := p.lookup(service, "op"); problem == "" {
+			t.Errorf("%s: no binding problem reported", name)
+		}
+	}
+	if _, problem := p.lookup(valueService{}, "pointer-only"); !strings.Contains(problem, "pointer receiver") {
+		t.Fatalf("pointer receiver: %q", problem)
+	}
+	if fn, problem := p.lookup(&valueService{}, "pointer-only"); problem != "" || !fn.IsValid() {
+		t.Fatalf("pointer service: %q", problem)
+	}
+}
+
+func TestDiscoveryRunsOncePerKeyAndWaitersObserveTheirContext(t *testing.T) {
+	r, err := NewRuntime(RuntimeOptions{Binary: "unused", Prelude: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hashes atomic.Int32
+	release, started := make(chan struct{}), make(chan struct{}, 3)
+	r.command = func(ctx context.Context, _ string, args ...string) (string, error) {
+		hashes.Add(1)
+		started <- struct{}{}
+		<-release
+		return "0:x " + strings.Repeat("a", 64) + "\n", nil
+	}
+	var wait sync.WaitGroup
+	for range 3 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if groups, err := r.preludeGroups(context.Background(), "unused", "key"); err != nil || len(groups) != 3 {
+				t.Errorf("%v %v", groups, err)
+			}
+		}()
+	}
+	<-started // a flight is in progress and cannot finish until release
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.preludeGroups(cancelled, "unused", "key"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter ignored its context: %v", err)
+	}
+	close(release)
+	wait.Wait()
+	if hashes.Load() != 3 { // one flight: three prelude files
+		t.Fatalf("hash ran %d times", hashes.Load())
+	}
+	if groups, err := r.preludeGroups(context.Background(), "unused", "key"); err != nil || len(groups) != 3 || hashes.Load() != 3 {
+		t.Fatalf("cached discovery reran: %v %v", groups, err)
+	}
+}
+
+func TestACancelledLeaderDoesNotFailLiveWaiters(t *testing.T) {
+	r, err := NewRuntime(RuntimeOptions{Binary: "unused", Prelude: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	r.command = func(ctx context.Context, _ string, _ ...string) (string, error) {
+		if calls.Add(1) == 1 {
+			started <- struct{}{}
+			<-ctx.Done() // the leader is cancelled while Core runs
+			return "", ctx.Err()
+		}
+		return protocol.CoreVersion + "\n", nil
+	}
+	leader, cancel := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() { leaderDone <- r.checkVersion(leader, "unused", "digest") }()
+	<-started
+	waiterDone := make(chan error, 1)
+	go func() { waiterDone <- r.checkVersion(context.Background(), "unused", "digest") }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	if err := <-leaderDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader: %v", err)
+	}
+	if err := <-waiterDone; err != nil {
+		t.Fatalf("live waiter inherited the leader's cancellation: %v", err)
+	}
+	if err := r.checkVersion(context.Background(), "unused", "digest"); err != nil || calls.Load() != 2 {
+		t.Fatalf("cached check: %v after %d calls", err, calls.Load())
+	}
+}
+
+func TestAPanickingDiscoveryReleasesWaiters(t *testing.T) {
+	r, err := NewRuntime(RuntimeOptions{Binary: "unused", Prelude: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.once(context.Background(), "k", func(context.Context) ([]group, error) { panic("boom") })
+	var preparation *PreparationError
+	if !errors.As(err, &preparation) {
+		t.Fatalf("panic: %v", err)
+	}
+	if _, err := r.once(context.Background(), "k", func(context.Context) ([]group, error) { return nil, nil }); err != nil {
+		t.Fatalf("retry after panic: %v", err)
+	}
+}
