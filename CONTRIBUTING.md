@@ -67,9 +67,9 @@ to make a test pass; report a mismatch against the pinned contract.
 
 ## Go
 
-The independent Go adapter lives in `go/` as module
-`github.com/jbwinters/jacquard-host/go`; it uses only the standard library and
-does not call Python or Node.js. Go 1.24+ is required.
+The independent Go adapter and SDK live in `go/` as module
+`github.com/jbwinters/jacquard-host/go`; they use only the standard library and
+do not call Python or Node.js. Go 1.24+ is required.
 
 ```sh
 cd go
@@ -84,6 +84,8 @@ CI runs the offline tests with the race detector on Go 1.24 and the current
 stable release, and the live tests in the shared pinned-Core job.
 `go/protocol/compat.go` is generated and `go/kit/data/` is a byte copy of the
 pinned kit, both maintained by `scripts/core_pin.py`; do not edit them by hand.
+`go/examples/data/` embeds copies of the example rules and inputs: after changing
+a file under `examples/`, copy it there too (a Go test fails if they differ).
 
 ## TypeScript
 

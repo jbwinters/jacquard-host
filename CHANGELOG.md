@@ -2,6 +2,11 @@
 
 ## 0.2.0 — unreleased
 
+- Add the Go SDK (`go/jacquard`): cached, verified preparation; native Go type
+  mapping with registered records, enums, and unions; reflection-bound
+  services with context cancellation; explicit batching; raw evidence and
+  inspection files; and all four example projects (`go/cmd/jacquard-examples`)
+  with explicit fulfillment recovery.
 - Add an independent Go adapter (`go/`, standard library only): strict v0
   codecs, the host session state machine, a bounded process carrier, a
   low-level `Host` with a closed operation registry, context cancellation, and

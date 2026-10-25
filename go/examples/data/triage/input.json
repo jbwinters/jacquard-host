@@ -1,0 +1,32 @@
+{
+  "policy": {
+    "page": 4,
+    "stale": 60
+  },
+  "incidents": [
+    {
+      "id": "inc-1",
+      "service": "checkout",
+      "severity": 5,
+      "age": 3,
+      "visible": true,
+      "owner": null
+    },
+    {
+      "id": "inc-2",
+      "service": "search",
+      "severity": 2,
+      "age": 75,
+      "visible": false,
+      "owner": "search-team"
+    },
+    {
+      "id": "inc-3",
+      "service": "billing",
+      "severity": 1,
+      "age": 5,
+      "visible": false,
+      "owner": "billing-team"
+    }
+  ]
+}

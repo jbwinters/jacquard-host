@@ -57,8 +57,14 @@ The independent Go adapter (`go/`) starts the configured Core executable with
 `host worker --store DIR`, bounded pipes, and a lifetime deadline, and records
 host observations under `jacquard-host-go-evidence-v0` beside the unchanged
 Core frames. Its handlers come only from an explicit `OperationRegistry`
-keyed by exact identities. It does not prepare programs, write caches, or own
-application storage; callers supply the store and environment.
+keyed by exact identities. The Go SDK (`go/jacquard`) performs the same public
+Core preparation and digest-verified caching as the other SDKs, with default
+cache `.scratch/jacquard-host-go` under the working directory, and inherits the
+parent environment with the configured `JACQUARD_PRELUDE`. Service handlers
+receive a context that is cancelled at expiry; a handler that ignores it keeps
+running until it returns. The Go fulfillment example owns one configured JSON
+snapshot with booking/outbox updates and a simulated receipt-deduplicated sink;
+no file path is accepted from Jacquard.
 
 ## Not used
 
