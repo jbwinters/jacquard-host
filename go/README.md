@@ -173,6 +173,17 @@ and no late response is sent. A handler that ignores its context keeps running
 until it returns. Nothing is retried, and this does not prove that an outside
 action stopped.
 
+- **Classification.** A deadline set on the caller's own context is reported as
+  an abort (`reason` `aborted`), like any other cancellation.
+  `ErrDeadlineExceeded` means the worker's own lifetime deadline expired.
+- **Descendants after exit.** On Unix the worker runs in its own process group,
+  and its stderr is a pipe the host owns. If a descendant still holds that pipe
+  one second after the worker exits, the host stops the remaining group. A
+  successful exit is then reported as a carrier loss.
+- **Escaped descendants.** A descendant that left the group, for example through
+  `setsid`, is not stopped. The host stops reading its pipe after a second grace
+  period and returns.
+
 ## Errors
 
 - `Function.Invoke` returns an error only for local refusals: a

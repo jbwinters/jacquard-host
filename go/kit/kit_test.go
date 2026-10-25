@@ -62,6 +62,37 @@ func TestOutcomeEvidenceAndResultShareOneFrameBudget(t *testing.T) {
 	limits.MaxValueNodes = 1
 	_, err := protocol.ParseCoreFrame(outcome, limits)
 	code(t, err, "E1602")
+	// An error outcome spends its two evidence types only.
+	refused := find(t, load(t), "refused-authority").CoreOutput
+	errorOutcome := refused[len(refused)-1]
+	limits.MaxValueNodes = 2
+	if _, err := protocol.ParseCoreFrame(errorOutcome, limits); err != nil {
+		t.Fatal(err)
+	}
+	limits.MaxValueNodes = 1
+	_, err = protocol.ParseCoreFrame(errorOutcome, limits)
+	code(t, err, "E1602")
+}
+
+func TestReplayTreatsAbsentExpectationsLikeTheReference(t *testing.T) {
+	loaded := load(t)
+	original := find(t, loaded, "pure-success")
+	missing := original
+	missing.Expect = protocol.Object{}
+	if replay := kit.ReplayOne(context.Background(), missing, "unused", standinOptions(original.Name)); replay.Status != "diverges" {
+		t.Fatalf("absent terminal expectation conformed: %v", replay.Differences)
+	}
+	hostile := find(t, loaded, "unknown-version")
+	unbounded := hostile
+	unbounded.Expect = protocol.Object{}
+	for key, value := range hostile.Expect {
+		if key != "terminal_frames_max" {
+			unbounded.Expect[key] = value
+		}
+	}
+	if replay := kit.ReplayOne(context.Background(), unbounded, "unused", standinOptions(hostile.Name)); replay.Status != "diverges" {
+		t.Fatal("missing terminal_frames_max conformed")
+	}
 }
 
 func TestSessionEnforcesOneInvocationAndLocalTerminalRefusal(t *testing.T) {

@@ -251,6 +251,10 @@ func proseDrift(expected, actual any, path string) []string {
 	return nil
 }
 
+// canonical compares decoded frames. Frames are at most max_json_depth deep,
+// so the 256 bound never refuses one (kit.ts uses 64 and would throw); prose
+// drift paths are reported in sorted key order, which matches the kit's
+// canonical (sorted) JSON.
 func canonical(value any) string {
 	text, err := protocol.Stringify(value, 256)
 	if err != nil {
@@ -386,32 +390,39 @@ func ReplayOne(ctx context.Context, t Transcript, store string, options Options)
 		"host_local_refusal": refusal, "host_inputs_skipped_after_terminal": skipped,
 	}
 	exitIs := func(code int) bool { return replay.ExitStatus != nil && *replay.ExitStatus == code }
+	// As in kit.ts, an absent expectation never equals an observed value or null.
+	expects := func(key string, observed any) bool {
+		value, present := t.Expect[key]
+		return present && value == observed
+	}
 	sameFrames := canonical(stripProse(frames(observed))) == canonical(stripProse(frames(t.CoreOutput)))
 	expect := t.Expect
 	var conforms bool
 	if t.Kind == "positive" {
-		conforms = terminalName == expect["terminal"] && exitIs(0) && sameFrames
+		conforms = expects("terminal", terminalName) && exitIs(0) && sameFrames
 		for _, step := range t.HostInput {
 			if step.Frame["kind"] == "effect_failure" {
-				message, _ := step.Frame["message"].(string)
-				cause, isText := diagnostic["cause"].(string)
-				conforms = conforms && isText && strings.HasSuffix(cause, message)
+				if message, present := step.Frame["message"]; present {
+					text, _ := message.(string)
+					cause, isText := diagnostic["cause"].(string)
+					conforms = conforms && isText && strings.HasSuffix(cause, text)
+				}
 				break
 			}
 		}
 	} else {
-		maximum, _ := expect["terminal_frames_max"].(int64)
+		maximum, bounded := expect["terminal_frames_max"].(int64)
 		forbid, _ := expect["forbid_outside_action"].(bool)
 		exit := 0
 		if expect["code"] == "E1611" {
 			exit = 74
 		}
-		conforms = requests == expect["effect_requests_before_failure"] && terminals <= maximum &&
+		conforms = expects("effect_requests_before_failure", requests) && bounded && terminals <= maximum &&
 			(!forbid || requests == 0) && exitIs(exit)
 		if t.Phase == "terminal" {
-			conforms = conforms && refusal == expect["code"] && terminalName == "ok"
+			conforms = conforms && expects("code", refusal) && terminalName == "ok"
 		} else {
-			conforms = conforms && primary == expect["code"]
+			conforms = conforms && expects("code", primary)
 		}
 	}
 	replay.Status = "diverges"

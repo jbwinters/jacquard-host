@@ -2,6 +2,17 @@
 
 ## 0.2.0 — unreleased
 
+- The Go worker's stderr is now a pipe the host owns. After the worker exits, a
+  descendant that still holds it is stopped with the process group. A clean
+  worker that is merely slow to exit no longer triggers a group kill. A deadline
+  that expires during the exit grace is reported as the deadline. A descendant
+  that escaped the group no longer holds the host.
+- The Go and TypeScript adapters decode boundary descriptors in Core's order,
+  with identity checked before the count, so error codes agree with Core and
+  Python. TypeScript no longer coerces evidence fields with `String()`. Python
+  checks evidence collections against `max_effects`, `max_operations`, and
+  `max_effect_requests`. The Go kit replay treats absent expectations as the
+  TypeScript replayer does.
 - All three adapters now count an outcome frame's evidence types and result
   value against one `max_value_nodes` budget, as Core encodes it; previously the
   result started a fresh budget. The Python adapter also validates the evidence's

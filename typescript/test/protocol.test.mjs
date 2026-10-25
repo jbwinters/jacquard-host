@@ -59,11 +59,27 @@ test('request identity types, ordinal order, and one response slot fail with the
   session.respondOk('pong');
   assert.throws(() => session.respondOk('again'), code('E1608'));
 });
+test('decoders follow Core order and evidence fields are not coerced', async () => {
+  const many = Array.from({ length: 65 }, () => ({ kind: 'int', value: '1' }));
+  assert.throws(() => decodeValue({ kind: 'constructor', identity: 'bad', arguments: many }), code('E1601'));
+  assert.throws(() => decodeValue({ kind: 'constructor', identity: 'a'.repeat(64), arguments: many }), code('E1602'));
+  const spent = new Budget(); spent.nodes = HARD_LIMITS.max_value_nodes;
+  assert.throws(() => decodeType({ kind: 'nominal', identity: 'a'.repeat(64) }, spent), code('E1601'));
+  assert.throws(() => decodeValue({ kind: 'secret' }, spent), code('E1604'));
+  assert.throws(() => decodeValue({ value: '1' }), code('E1601'));
+  const kit = await loadKit(); const outcome = structuredClone(kit.transcripts[0].core_output[1]);
+  const { parseCoreFrame } = await import('../dist/protocol.js');
+  outcome.evidence.core.terminal = ['ok'];
+  assert.throws(() => parseCoreFrame(outcome), code('E1601'));
+});
 test('outcome evidence types and the result value share one frame node budget', async () => {
   const kit = await loadKit(); const outcome = kit.transcripts[0].core_output[1];
   const { parseCoreFrame } = await import('../dist/protocol.js');
   parseCoreFrame(outcome, { ...HARD_LIMITS, max_value_nodes: 2 });
   assert.throws(() => parseCoreFrame(outcome, { ...HARD_LIMITS, max_value_nodes: 1 }), code('E1602'));
+  const refused = kit.transcripts.find(item => item.name === 'refused-authority').core_output.at(-1);
+  parseCoreFrame(refused, { ...HARD_LIMITS, max_value_nodes: 2 });
+  assert.throws(() => parseCoreFrame(refused, { ...HARD_LIMITS, max_value_nodes: 1 }), code('E1602'));
 });
 test('all 21 pinned recordings replay through the independent Node carrier', async () => {
   const kit = await loadKit();

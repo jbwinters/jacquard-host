@@ -46,6 +46,18 @@ func MainIfRequested() {
 	case "truncated":
 		_, _ = os.Stdout.Write([]byte{0, 0, 0})
 		os.Exit(0)
+	case "escaped-descendant":
+		// A descendant in its own session holds stderr; group kills miss it.
+		child, err := startEscaped()
+		if err != nil {
+			os.Exit(3)
+		}
+		fmt.Fprintf(os.Stderr, "%d", child.Process.Pid)
+		loaded, err := kit.Load()
+		if err != nil {
+			os.Exit(3)
+		}
+		os.Exit(fault(loaded, "ok"))
 	case "stderr-descendant", "stderr-descendant-nonzero":
 		// Answer normally, but leave a descendant holding only stderr.
 		child := exec.Command("sleep", "30")
@@ -170,6 +182,9 @@ func fault(loaded *kit.Kit, mode string) int {
 			block()
 		}
 		_ = os.Stdout.Close()
+		if mode == "slow-exit" {
+			time.Sleep(1500 * time.Millisecond)
+		}
 		if mode == "nonzero" {
 			return 74
 		}

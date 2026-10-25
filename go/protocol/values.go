@@ -213,24 +213,24 @@ func (b *Budget) text(text string) error {
 
 // DecodeType parses one wire boundary type.
 func DecodeType(value any, budget *Budget) (BoundaryType, error) {
-	obj, err := asObject(value)
+	obj, kind, err := kinded(value)
 	if err != nil {
 		return nil, err
 	}
-	if err := budget.consume(); err != nil {
-		return nil, err
-	}
-	switch obj["kind"] {
+	switch kind {
 	case "nominal":
 		if _, err := exact(obj, "arguments", "identity", "kind"); err != nil {
 			return nil, err
 		}
-		// Count before the identity check, as the other adapters do.
-		items, err := counted(obj["arguments"], budget, false)
+		if err := budget.consume(); err != nil {
+			return nil, err
+		}
+		// Core's order: exact fields, one node, identity, then the count.
+		identity, err := ParseHash(obj["identity"])
 		if err != nil {
 			return nil, err
 		}
-		identity, err := ParseHash(obj["identity"])
+		items, err := counted(obj["arguments"], budget, false)
 		if err != nil {
 			return nil, err
 		}
@@ -240,10 +240,26 @@ func DecodeType(value any, budget *Budget) (BoundaryType, error) {
 		if _, err := exact(obj, "items", "kind"); err != nil {
 			return nil, err
 		}
+		if err := budget.consume(); err != nil {
+			return nil, err
+		}
 		items, err := decodeTypes(obj["items"], budget)
 		return TupleType{items}, err
 	}
 	return nil, unsupported("unsupported boundary type kind")
+}
+
+// kinded returns a descriptor object and its kind string (E1601 when absent).
+func kinded(value any) (Object, string, error) {
+	obj, err := asObject(value)
+	if err != nil {
+		return nil, "", err
+	}
+	kind, ok := obj["kind"].(string)
+	if !ok {
+		return nil, "", malformed("a boundary descriptor needs one kind string")
+	}
+	return obj, kind, nil
 }
 
 func counted(value any, budget *Budget, arguments bool) ([]any, error) {
@@ -320,16 +336,16 @@ var (
 
 // DecodeValue parses one wire boundary value.
 func DecodeValue(value any, budget *Budget) (Value, error) {
-	obj, err := asObject(value)
+	obj, kind, err := kinded(value)
 	if err != nil {
 		return nil, err
 	}
-	if err := budget.consume(); err != nil {
-		return nil, err
-	}
-	switch obj["kind"] {
+	switch kind {
 	case "int":
 		if _, err := exact(obj, "kind", "value"); err != nil {
+			return nil, err
+		}
+		if err := budget.consume(); err != nil {
 			return nil, err
 		}
 		text, err := asString(obj["value"])
@@ -348,6 +364,9 @@ func DecodeValue(value any, budget *Budget) (Value, error) {
 		if _, err := exact(obj, "bits", "kind"); err != nil {
 			return nil, err
 		}
+		if err := budget.consume(); err != nil {
+			return nil, err
+		}
 		text, err := asString(obj["bits"])
 		if err != nil {
 			return nil, err
@@ -361,6 +380,9 @@ func DecodeValue(value any, budget *Budget) (Value, error) {
 		if _, err := exact(obj, "kind", "value"); err != nil {
 			return nil, err
 		}
+		if err := budget.consume(); err != nil {
+			return nil, err
+		}
 		text, err := asString(obj["value"])
 		if err != nil {
 			return nil, err
@@ -370,9 +392,15 @@ func DecodeValue(value any, budget *Budget) (Value, error) {
 		if _, err := exact(obj, "kind", "value"); err != nil {
 			return nil, err
 		}
+		if err := budget.consume(); err != nil {
+			return nil, err
+		}
 		return ParseHash(obj["value"])
 	case "tuple":
 		if _, err := exact(obj, "items", "kind"); err != nil {
+			return nil, err
+		}
+		if err := budget.consume(); err != nil {
 			return nil, err
 		}
 		items, err := decodeValues(obj["items"], budget, false)
@@ -381,11 +409,14 @@ func DecodeValue(value any, budget *Budget) (Value, error) {
 		if _, err := exact(obj, "arguments", "identity", "kind"); err != nil {
 			return nil, err
 		}
-		items, err := counted(obj["arguments"], budget, true)
-		if err != nil {
+		if err := budget.consume(); err != nil {
 			return nil, err
 		}
 		identity, err := ParseHash(obj["identity"])
+		if err != nil {
+			return nil, err
+		}
+		items, err := counted(obj["arguments"], budget, true)
 		if err != nil {
 			return nil, err
 		}

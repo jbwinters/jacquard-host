@@ -13,10 +13,21 @@ import (
 // descendants that inherited its pipes, such as a launcher that does not exec.
 func isolate(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }
 
+// killTree stops a live worker and its process group. Signal(0) reports a
+// reaped leader through the process handle (a pidfd on Linux); only an
+// unreaped leader keeps the group id from being reused, so a reaped group is
+// left to reap's own cleanup.
 func killTree(process *os.Process) {
-	_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
+	if process.Signal(syscall.Signal(0)) == nil {
+		_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
+	}
 	_ = process.Kill()
 }
+
+// killGroup stops the members left in a reaped worker's process group. It runs
+// only while one of them still holds the worker's stderr, which keeps the
+// group, and so its id, alive.
+func killGroup(pgid int) { _ = syscall.Kill(-pgid, syscall.SIGKILL) }
 
 func signalName(state *os.ProcessState) string {
 	status, ok := state.Sys().(syscall.WaitStatus)

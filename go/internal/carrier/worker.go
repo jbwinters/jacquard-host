@@ -69,10 +69,14 @@ type Worker struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr *boundedBuffer
-	ctx    context.Context
-	parent context.Context
-	cancel context.CancelFunc
-	stop   func() bool
+	// errPipe is the host's read end of the worker's stderr; draining ends
+	// when every writer, the worker and any descendant, has closed it.
+	errPipe    *os.File
+	stderrDone chan struct{}
+	ctx        context.Context
+	parent     context.Context
+	cancel     context.CancelFunc
+	stop       func() bool
 
 	mu         sync.Mutex
 	fault      error
@@ -96,42 +100,56 @@ func Start(parent context.Context, store string, options Options) (*Worker, erro
 	}
 	ctx, cancel := context.WithTimeout(parent, deadline)
 	command := options.command()
-	w := &Worker{ctx: ctx, parent: parent, cancel: cancel, stderr: &boundedBuffer{limit: protocol.HardLimits.MaxStderrBytes}}
+	w := &Worker{ctx: ctx, parent: parent, cancel: cancel, stderr: &boundedBuffer{limit: protocol.HardLimits.MaxStderrBytes},
+		stderrDone: make(chan struct{})}
 	w.cmd = exec.Command(command[0], append(append([]string{}, command[1:]...), "host", "worker", "--store", store)...)
 	if options.Env != nil {
 		w.cmd.Env = options.Env
 	}
-	w.cmd.Stderr = w.stderr
-	w.cmd.WaitDelay = time.Second
 	isolate(w.cmd)
-	var err error
-	if w.stdin, err = w.cmd.StdinPipe(); err == nil {
-		if w.stdout, err = w.cmd.StdoutPipe(); err != nil {
-			_ = w.stdin.Close()
+	// Every pipe is an *os.File, so os/exec starts no copying goroutines and
+	// Wait returns as soon as the worker exits.
+	errPipe, errWriter, err := os.Pipe()
+	if err == nil {
+		w.errPipe, w.cmd.Stderr = errPipe, errWriter
+		if w.stdin, err = w.cmd.StdinPipe(); err == nil {
+			if w.stdout, err = w.cmd.StdoutPipe(); err != nil {
+				_ = w.stdin.Close()
+			}
 		}
 	}
 	if err == nil {
 		err = w.cmd.Start()
 	}
+	if errWriter != nil {
+		_ = errWriter.Close()
+	}
 	if err != nil {
+		if errPipe != nil {
+			_ = errPipe.Close()
+		}
+		close(w.stderrDone)
 		w.SpawnError = err
 		w.fault = &Loss{Message: fmt.Sprintf("could not start %s (%v); check the configured Core installation", command[0], err)}
 		w.waited = true
 		return w, nil
 	}
+	go func() {
+		defer close(w.stderrDone)
+		_, _ = io.Copy(w.stderr, errPipe)
+	}()
 	w.stop = context.AfterFunc(ctx, w.expire)
 	return w, nil
 }
 
+// exitGrace bounds how long stderr may stay open after the worker exits
+// before the remaining process group is treated as holding its pipes.
+const exitGrace = time.Second
+
 // expire kills the worker's process group and closes both pipes, so a read or
 // write blocked on a descendant that inherited them returns at the deadline.
 func (w *Worker) expire() {
-	w.mu.Lock()
-	reaped := w.reaped
-	w.mu.Unlock()
-	if !reaped {
-		killTree(w.cmd.Process)
-	}
+	killTree(w.cmd.Process)
 	_ = w.stdout.Close()
 	_ = w.stdin.Close()
 }
@@ -243,32 +261,41 @@ func (w *Worker) reap() {
 	}
 	w.waited = true
 	w.mu.Unlock()
-	started := time.Now()
-	err := w.cmd.Wait()
-	// ErrWaitDelay means a descendant still held the output pipes after a
-	// successful exit: fail closed. An unsuccessful exit status masks that
-	// error (the run already fails), so a wait that lasted WaitDelay also
-	// stops any remaining group members.
-	if held := errors.Is(err, exec.ErrWaitDelay); held || time.Since(started) >= w.cmd.WaitDelay {
-		killTree(w.cmd.Process)
+	// The leader's exit keeps its process group id reserved until it is
+	// reaped, so stop descendants that still hold stderr before reaping.
+	_ = w.cmd.Wait()
+	w.mu.Lock()
+	w.reaped = true
+	w.mu.Unlock()
+	if state := w.cmd.ProcessState; state != nil {
+		if w.Signal = signalName(state); w.Signal == "" {
+			code := state.ExitCode()
+			w.ExitStatus = &code
+		}
+	}
+	// Measured from the worker's exit: a clean worker closes stderr with it.
+	held := false
+	select {
+	case <-w.stderrDone:
+	case <-time.After(exitGrace):
+		held = true
+		killGroup(w.cmd.Process.Pid)
+		select {
+		case <-w.stderrDone:
+		case <-time.After(exitGrace):
+			// A descendant left the process group (for example via setsid);
+			// stop draining rather than wait for it.
+			_ = w.errPipe.Close()
+			<-w.stderrDone
+		}
+	}
+	if held && w.ExitStatus != nil && *w.ExitStatus == 0 {
 		w.mu.Lock()
-		if held && w.fault == nil {
+		if w.fault == nil && w.ctx.Err() == nil {
 			w.fault = &Loss{Message: "worker descendants kept its pipes open after exit"}
 		}
 		w.mu.Unlock()
 	}
-	w.mu.Lock()
-	w.reaped = true
-	w.mu.Unlock()
-	state := w.cmd.ProcessState
-	if state == nil {
-		return
-	}
-	if w.Signal = signalName(state); w.Signal != "" {
-		return
-	}
-	code := state.ExitCode()
-	w.ExitStatus = &code
 }
 
 // Dispose kills a live child, reaps it, and releases the deadline timer.
@@ -284,6 +311,7 @@ func (w *Worker) Dispose() {
 		killTree(w.cmd.Process)
 		w.reap()
 	}
+	<-w.stderrDone
 	w.cancel()
 }
 
