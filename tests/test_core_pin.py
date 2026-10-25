@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
+import shlex
 import shutil
+import subprocess
+import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from jacquard_host import compat
 
@@ -87,6 +92,119 @@ class CorePinTest(unittest.TestCase):
             path.write_text(json.dumps(broken))
             with self.assertRaisesRegex(core_pin.PinError, "does not name version"):
                 core_pin.load(path)
+
+
+def archive(members: list[tuple[str, bytes | None, str | None]]) -> bytes:
+    """Build a gzip tar of (name, file bytes or None for a directory, symlink target)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, data, link in members:
+            info = tarfile.TarInfo(name)
+            if link is not None:
+                info.type, info.linkname = tarfile.SYMTYPE, link
+                tar.addfile(info)
+            elif data is None:
+                info.type, info.mode = tarfile.DIRTYPE, 0o755
+                tar.addfile(info)
+            else:
+                info.size, info.mode = len(data), 0o755
+                tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def release(version: str, extra: list | None = None) -> bytes:
+    script = f"#!/bin/sh\necho {version}\n".encode()
+    return archive([("jacquard-x/", None, None), ("jacquard-x/libexec/", None, None),
+                    ("jacquard-x/libexec/jacquard/", None, None),
+                    ("jacquard-x/libexec/jacquard/jacquard", script, None),
+                    ("jacquard-x/share/jacquard/prelude/01-prim.jqd", b"prelude", None), *(extra or [])])
+
+
+class InstallTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dest = Path(tempfile.mkdtemp(prefix="core install "))
+        self.addCleanup(shutil.rmtree, self.dest)
+
+    def pin(self, data: bytes) -> dict:
+        pin = json.loads(json.dumps(core_pin.load()))
+        pin["assets"] = {"test-x86_64": {"name": "jacquard-test-x86_64.tar.gz", "sha256": core_pin.sha256(data)}}
+        return pin
+
+    def install(self, data: bytes, pin: dict | None = None) -> dict:
+        with patch.object(core_pin, "fetch", return_value=data):
+            return core_pin.install(pin or self.pin(data), self.dest, "test-x86_64")
+
+    def test_verified_release_installs_and_exports_quoted_paths(self) -> None:
+        data = release(core_pin.load()["release"]["version"])
+        env = self.install(data)
+        self.assertTrue(env["JACQUARD_BIN"].endswith("libexec/jacquard/jacquard"))
+        self.assertTrue(Path(env["JACQUARD_PRELUDE"], "01-prim.jqd").is_file())
+        script = core_pin.exports(env) + 'printf %s "$JACQUARD_BIN"'
+        self.assertEqual(subprocess.run(["sh", "-c", script], capture_output=True, text=True).stdout, env["JACQUARD_BIN"])
+        with patch.object(core_pin, "fetch", side_effect=AssertionError("reuse must not download")):
+            self.assertEqual(core_pin.install(self.pin(data), self.dest, "test-x86_64"), env)
+        self.assertEqual(shlex.split(core_pin.exports({"A": "x y"}))[1], "A=x y")
+
+    def test_checksum_and_version_failures_leave_nothing_installed(self) -> None:
+        data = release("0.0.0")
+        tampered = self.pin(data)
+        tampered["assets"]["test-x86_64"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(core_pin.PinError, "is not the pinned"):
+            self.install(data, tampered)
+        with self.assertRaisesRegex(core_pin.PinError, "not " + core_pin.load()["release"]["version"]):
+            self.install(data)
+        self.assertEqual(list(self.dest.iterdir()), [])
+
+    def test_escaping_members_and_links_are_refused_before_extraction(self) -> None:
+        version = core_pin.load()["release"]["version"]
+        for extra in ([("jacquard-x/link", None, "../../outside")], [("jacquard-x/abs", None, "/etc")],
+                      [("../escape", b"x", None)], [("jacquard-x/link", None, "../.."), ("jacquard-x/link/escaped", b"x", None)]):
+            with self.subTest(extra=extra), self.assertRaisesRegex(core_pin.PinError, "refusing"):
+                self.install(release(version, extra))
+        self.assertEqual(list(self.dest.iterdir()), [])
+
+    def test_missing_platform_asset_points_to_a_source_build(self) -> None:
+        with self.assertRaisesRegex(core_pin.PinError, "from source"):
+            core_pin.install(core_pin.load(), self.dest, "plan9-mips")
+
+
+class UpdateTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.pin = core_pin.load()
+        self.kit = Path(tempfile.mkdtemp(prefix="core-kit-"))
+        self.addCleanup(shutil.rmtree, self.kit)
+        shutil.copytree(core_pin.KIT_DIR, self.kit, dirs_exist_ok=True)
+        self.files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
+
+    def run_update(self, manifest_changes: dict, assets: dict) -> dict:
+        files = dict(self.files)
+        manifest = json.loads(files["kit/kit.json"])
+        manifest.update(manifest_changes)
+        files["kit/kit.json"] = json.dumps(manifest).encode()
+        with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
+             patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
+             patch.object(core_pin, "release_assets", return_value=assets):
+            return core_pin.update(self.pin, "jacquard-core-9.9.9", None, self.kit)
+
+    def test_a_release_is_adopted_with_its_kit_and_assets(self) -> None:
+        assets = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
+        new = self.run_update({"core_version": "9.9.9"}, assets)
+        self.assertEqual(new["release"], {"tag": "jacquard-core-9.9.9", "version": "9.9.9", "commit": "e" * 40})
+        self.assertEqual(new["assets"], assets)
+        written = (self.kit / "kit/kit.json").read_bytes()
+        self.assertEqual(new["kit"]["digests"]["kit/kit.json"], core_pin.sha256(written))
+        self.assertEqual([path.name for path in self.kit.rglob(".*.core-pin")], [])
+
+    def test_protocol_change_mismatched_version_or_missing_linux_asset_is_refused(self) -> None:
+        linux = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
+        cases = [({"core_version": "9.9.9", "protocol": "jacquard-host-v1"}, linux, "protocol change"),
+                 ({"core_version": "9.9.8"}, linux, "core_version"),
+                 ({"core_version": "9.9.9"}, {}, "linux-x86_64")]
+        before = {name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}
+        for changes, assets, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(core_pin.PinError, message):
+                self.run_update(changes, assets)
+        self.assertEqual({name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}, before)
 
 
 if __name__ == "__main__":

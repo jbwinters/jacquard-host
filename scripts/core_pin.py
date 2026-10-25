@@ -26,9 +26,12 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[1]
@@ -56,8 +59,17 @@ def load(path: Path = PIN) -> dict:
         raise PinError(f"release tag {release['tag']} does not name version {release['version']}")
     if not re.fullmatch(r"[0-9a-f]{40}", release["commit"]):
         raise PinError("release commit must be a full lowercase SHA-1")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?", release["version"]):
+        raise PinError(f"release version {release['version']!r} is not a release version")
     if sorted(pin["kit"]["digests"]) != sorted(KIT_FILES):
         raise PinError(f"kit digests must cover exactly {', '.join(KIT_FILES)}")
+    digests = [*pin["kit"]["digests"].values(), *(asset["sha256"] for asset in pin["assets"].values())]
+    if not all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):
+        raise PinError("every digest must be 64 lowercase hexadecimal digits")
+    names = [pin["protocol"], pin["carrier"], *pin["kit"]["pending_decisions"], *pin["assets"]]
+    names += [asset["name"] for asset in pin["assets"].values()]
+    if not all(re.fullmatch(r"[0-9a-z][0-9a-z._-]*", name) for name in names):
+        raise PinError("protocol, carrier, decision, and asset names must be plain lowercase identifiers")
     return pin
 
 
@@ -234,6 +246,42 @@ def platform_key() -> str:
     return f"{system}-{machine}"
 
 
+def check_members(archive: tarfile.TarFile, root: Path, name: str) -> None:
+    """Refuse members or link targets that would land outside root."""
+    base = root.resolve()
+    for member in archive.getmembers():
+        target = (base / member.name).resolve()
+        if not target.is_relative_to(base) or not (member.isfile() or member.isdir() or member.issym()):
+            raise PinError(f"{name}: refusing archive member {member.name}")
+        if member.issym():
+            link = (target.parent / member.linkname).resolve()
+            if Path(member.linkname).is_absolute() or not link.is_relative_to(base):
+                raise PinError(f"{name}: refusing link {member.name} -> {member.linkname}")
+
+
+def release_env(prefix: Path) -> dict[str, str]:
+    # Point at the real executable, not the sh launcher, so SDK cache keys cover its bytes.
+    return {
+        "JACQUARD_BIN": str(prefix / "libexec" / "jacquard" / "jacquard"),
+        "JACQUARD_PRELUDE": str(prefix / "share" / "jacquard" / "prelude"),
+        "JACQUARD_RUNTIME": str(prefix / "share" / "jacquard" / "runtime"),
+    }
+
+
+def only_directory(root: Path) -> Path:
+    entries = [path for path in root.iterdir() if path.name != ".verified-sha256"]
+    if len(entries) != 1 or not entries[0].is_dir():
+        raise PinError(f"{root}: expected one extracted release directory")
+    return entries[0]
+
+
+def check_version(env: dict[str, str], version: str) -> None:
+    result = subprocess.run([env["JACQUARD_BIN"], "--version"], capture_output=True, text=True, timeout=30,
+                            env={**os.environ, **env})
+    if result.returncode or result.stdout.strip().split()[-1:] != [version]:
+        raise PinError(f"installed Core reports {result.stdout.strip()!r}, not {version}")
+
+
 def install(pin: dict, dest: Path, key: str | None = None) -> dict[str, str]:
     key = key or platform_key()
     asset = pin["assets"].get(key)
@@ -241,34 +289,35 @@ def install(pin: dict, dest: Path, key: str | None = None) -> dict[str, str]:
         raise PinError(f"{pin['release']['tag']} has no {key} asset; build the pinned commit from source (docs/SETUP.md)")
     root = dest / f"{pin['release']['tag']}-{key}"
     marker = root / ".verified-sha256"
-    if not (marker.exists() and marker.read_text().strip() == asset["sha256"]):
-        url = f"https://github.com/{pin['repository']}/releases/download/{pin['release']['tag']}/{asset['name']}"
-        data = fetch(url)
-        if sha256(data) != asset["sha256"]:
-            raise PinError(f"{asset['name']}: sha256 {sha256(data)} is not the pinned {asset['sha256']}")
-        root.mkdir(parents=True, exist_ok=True)
+    if marker.exists() and marker.read_text().strip() == asset["sha256"]:
+        env = release_env(only_directory(root))
+        check_version(env, pin["release"]["version"])
+        return env
+    if not hasattr(tarfile, "data_filter"):
+        raise PinError("safe archive extraction needs Python 3.11.4 or later (tarfile data filter)")
+    url = f"https://github.com/{pin['repository']}/releases/download/{pin['release']['tag']}/{asset['name']}"
+    data = fetch(url)
+    if sha256(data) != asset["sha256"]:
+        raise PinError(f"{asset['name']}: sha256 {sha256(data)} is not the pinned {asset['sha256']}")
+    dest.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{root.name}-", dir=dest))
+    try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-            for member in archive.getmembers():
-                target = (root / member.name).resolve()
-                if not target.is_relative_to(root.resolve()) or not (member.isfile() or member.isdir() or member.issym()):
-                    raise PinError(f"{asset['name']}: refusing archive member {member.name}")
-            archive.extractall(root, filter="data") if hasattr(tarfile, "data_filter") else archive.extractall(root)
-        marker.write_text(asset["sha256"] + "\n")
-    prefixes = [path for path in root.iterdir() if path.is_dir()]
-    if len(prefixes) != 1:
-        raise PinError(f"{root}: expected one extracted release directory")
-    prefix = prefixes[0]
-    # Point at the real executable, not the sh launcher, so SDK cache keys cover its bytes.
-    env = {
-        "JACQUARD_BIN": str(prefix / "libexec" / "jacquard" / "jacquard"),
-        "JACQUARD_PRELUDE": str(prefix / "share" / "jacquard" / "prelude"),
-        "JACQUARD_RUNTIME": str(prefix / "share" / "jacquard" / "runtime"),
-    }
-    version = subprocess.run([env["JACQUARD_BIN"], "--version"], capture_output=True, text=True, timeout=30,
-                             env={**os.environ, **env})
-    if version.returncode or version.stdout.strip().split()[-1:] != [pin["release"]["version"]]:
-        raise PinError(f"installed Core reports {version.stdout.strip()!r}, not {pin['release']['version']}")
-    return env
+            check_members(archive, staging, asset["name"])
+            archive.extractall(staging, filter="data")
+        prefix = only_directory(staging)
+        check_version(release_env(prefix), pin["release"]["version"])
+        (staging / ".verified-sha256").write_text(asset["sha256"] + "\n")
+        if root.exists():
+            shutil.rmtree(root)
+        staging.rename(root)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return release_env(only_directory(root))
+
+
+def exports(env: dict[str, str]) -> str:
+    return "".join(f"export {key}={shlex.quote(value)}\n" for key, value in env.items())
 
 
 def parse_sha256(text: str, name: str) -> str:
@@ -310,7 +359,7 @@ def kit_file(repository: str, commit: str, path: str, checkout: Path | None) -> 
     return fetch(f"https://raw.githubusercontent.com/{repository}/{commit}/{path}")
 
 
-def update(pin: dict, tag: str, checkout: Path | None) -> dict:
+def update(pin: dict, tag: str, checkout: Path | None, kit_dir: Path = KIT_DIR) -> dict:
     if not tag.startswith(TAG_PREFIX):
         raise PinError(f"release tags start with {TAG_PREFIX}")
     repository = pin["repository"]
@@ -322,16 +371,33 @@ def update(pin: dict, tag: str, checkout: Path | None) -> dict:
     new["release"] = {"tag": tag, "version": tag.removeprefix(TAG_PREFIX), "commit": commit}
     new["kit"]["digests"] = {name: sha256(files[name]) for name in KIT_FILES}
     new["kit"]["pending_decisions"] = [entry["name"] for entry in manifest.get("pending_decisions", [])]
-    new["assets"] = release_assets(repository, tag)
     if manifest.get("protocol") != pin["protocol"] or manifest.get("carrier") != pin["carrier"]:
         raise PinError(f"{tag} ships protocol {manifest.get('protocol')} / {manifest.get('carrier')}; "
                        "a protocol change needs adapter work, not a pin refresh")
     found = manifest_problems(manifest, new)
     if found:
         raise PinError("; ".join(found))
-    for name, data in files.items():
-        (KIT_DIR / name).write_bytes(data)
+    new["assets"] = release_assets(repository, tag)
+    if "linux-x86_64" not in new["assets"]:
+        raise PinError(f"{tag} has no linux-x86_64 asset, which CI installs")
+    write_kit(files, kit_dir)
     return new
+
+
+def write_kit(files: dict[str, bytes], kit_dir: Path) -> None:
+    """Write every kit file to a sibling file first, then rename them all."""
+    staged = []
+    try:
+        for name, data in files.items():
+            path = kit_dir / name
+            temporary = path.with_name(f".{path.name}.core-pin")
+            temporary.write_bytes(data)
+            staged.append((temporary, path))
+        for temporary, path in staged:
+            temporary.replace(path)
+    finally:
+        for temporary, _ in staged:
+            temporary.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -372,10 +438,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "install":
             env = install(pin, args.dest.resolve(), args.platform)
             if args.github_env:
+                if any("\n" in value for value in env.values()):
+                    raise PinError("install paths must not contain newlines")
                 with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
                     handle.writelines(f"{key}={value}\n" for key, value in env.items())
-            for key, value in env.items():
-                print(f"export {key}={value}")
+            print(exports(env), end="")
             return 0
         if args.command == "status":
             latest = api(pin["repository"], "releases/latest")["tag_name"]
@@ -386,7 +453,9 @@ def main(argv: list[str] | None = None) -> int:
                   f"Adopt it with: python3 scripts/core_pin.py update --tag {latest}")
             return 3
         new = update(pin, args.tag, args.core_checkout)
-        PIN.write_text(dump(new), encoding="utf-8")
+        staged = PIN.with_name(".core-pin.json.tmp")
+        staged.write_text(dump(new), encoding="utf-8")
+        staged.replace(PIN)
         for name in sync(new):
             print(f"updated {name}")
         print(f"pinned {args.tag}. Now run the offline and live suites for every adapter (CONTRIBUTING.md).")

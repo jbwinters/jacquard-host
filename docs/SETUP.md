@@ -22,8 +22,10 @@ library, its typing marker, application resources, and the pinned conformance ki
 
 The host adapters are pinned to one Jacquard Core release, recorded in
 [`core-pin.json`](../core-pin.json) (see [COMPATIBILITY.md](COMPATIBILITY.md)).
-On Linux x86_64 and macOS, download that release, verify its SHA-256 against the
-pin, and configure the current shell from the repository root:
+Core publishes Linux x86_64 and macOS (arm64, x86_64) assets; this repository's
+CI exercises only Linux x86_64. With Python 3.11.4 or later, download that
+release, verify its SHA-256 against the pin, and configure the current shell
+from the repository root:
 
 ```sh
 eval "$(python3 scripts/core_pin.py install)"
