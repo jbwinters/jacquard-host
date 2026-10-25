@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 import math
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 from jacquard_host import BindingError, InvalidArgument, InvocationError, PreparationError, Runtime, Some, Variant
 from jacquard_host.adapter import InvocationResult
+from jacquard_host.compat import CORE_VERSION
 from jacquard_host.data import Data
 from jacquard_host.errors import DeadlineExceeded, OperationFailed, WorkerLost
 from jacquard_host.protocol.json_codec import validate_object
@@ -159,7 +161,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             manifest = prelude / "operation-modes.manifest"
             manifest.write_text("original")
             runtime = Runtime(sys.executable, prelude=prelude)
-            with patch("jacquard_host.sdk.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "jacquard 0.2.0\n", "")):
+            with patch("jacquard_host.sdk.subprocess.run", return_value=subprocess.CompletedProcess([], 0, f"jacquard {CORE_VERSION}\n", "")):
                 first = runtime._installation()
                 manifest.write_text("changed")
                 second = runtime._installation()
@@ -168,8 +170,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
 
     def test_core_version_mismatch_has_an_actionable_sdk_error(self):
         runtime = Runtime(sys.executable, prelude="unused")
-        with patch("jacquard_host.sdk.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "jacquard 0.3.0\n", "")):
-            with self.assertRaisesRegex(PreparationError, "pins Core 0.2.0; found jacquard 0.3.0"):
+        with patch("jacquard_host.sdk.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "jacquard 9.9.9\n", "")):
+            with self.assertRaisesRegex(PreparationError, f"pins Core {re.escape(CORE_VERSION)}; found jacquard 9.9.9"):
                 runtime._installation()
 
 

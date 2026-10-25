@@ -90,8 +90,9 @@ lifetimes, host services, and integration evidence.
 
 The [exact compatibility pin](docs/COMPATIBILITY.md) includes the experimental
 v0 carrier, vendored fixtures, evidence pack, and pending Core decisions.
-The tagged Core 0.2.0 binary predates the worker; use the pinned build in
-[setup](docs/SETUP.md). Version strings alone do not establish compatibility.
+Adapters pin one Core release in [`core-pin.json`](core-pin.json); [setup](docs/SETUP.md)
+installs that release and verifies its checksum. Version strings alone do not
+establish compatibility.
 
 The current boundary is for bounded first-party programs on a trusted host.
 Nested lists reach the frame-depth limit quickly; independent batching helps

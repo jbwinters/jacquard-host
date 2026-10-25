@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import unittest
 
 import jacquard_host
@@ -9,8 +11,10 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(jacquard_host.__version__, "0.2.0")
         self.assertEqual(jacquard_host.PROTOCOL, "jacquard-host-v0")
         self.assertEqual(jacquard_host.CARRIER, "stdio-u32-json-v0")
-        self.assertEqual(compat.CORE_VERSION, "0.2.0")
-        self.assertEqual(len(compat.CORE_COMMIT), 40)
+        pin = json.loads((Path(__file__).resolve().parents[1] / "core-pin.json").read_text(encoding="utf-8"))
+        self.assertEqual(compat.CORE_VERSION, pin["release"]["version"])
+        self.assertEqual(compat.CORE_TAG, pin["release"]["tag"])
+        self.assertEqual(compat.CORE_COMMIT, pin["release"]["commit"])
         for digest in compat.KIT_DIGESTS.values():
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
 
