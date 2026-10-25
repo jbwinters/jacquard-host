@@ -2,6 +2,14 @@
 
 ## 0.2.0 — unreleased
 
+- Pin all adapters to the Jacquard Core `jacquard-core-0.3.0` release (was a
+  development commit reporting 0.2.0). The host protocol and recordings are
+  unchanged; only the kit's recorded Core version differs.
+- Record the pin once in `core-pin.json`. `scripts/core_pin.py` generates the
+  Python and TypeScript constants and the compatibility table, checks for drift
+  in CI, installs the checksum-verified release binary, reports newer releases,
+  and adopts a new release tag. CI installs the release instead of building Core.
+
 - Add an independent TypeScript/Node.js adapter and SDK, async services, explicit
   record/union codecs, lossless bigints, cached preparation, and npm tarball
   installation checks. Both adapters replay the same 21 pinned recordings.

@@ -31,7 +31,27 @@ PYTHONPATH=src JACQUARD_BIN=/path/to/jacquard JACQUARD_PRELUDE=/path/to/prelude 
 `JACQUARD_BIN` and `JACQUARD_PRELUDE` must come from one Core build at the
 pinned commit; the worker, the prelude, and the kit identities are one unit.
 
-## Results at the pinned commit
+## Core 0.3.0 release adoption (2026-10-25)
+
+Rerun when the pin moved from the development commit `61575c7` to the
+`jacquard-core-0.3.0` release (commit `daf87fb4837cc69339116746818f64821dc4cb8e`),
+using the checksum-verified `linux-x86_64` release asset installed by
+`scripts/core_pin.py install`, on Linux 7.0 with Python 3.14.7 and Node.js 26.12.1.
+The vendored kit changed only in `kit.json`'s recorded `core_version`.
+
+| Lane | Result |
+|---|---|
+| Core pin consistency (`scripts/core_pin.py check`) | generated Python/TypeScript constants, the compatibility table, and all four vendored kit digests agree with `core-pin.json` |
+| Live `unittest` discover from the checkout | 197 tests, all pass, no skips (190 earlier tests plus 7 pin-tool tests) |
+| Conformance kit replay (`python3 -m jacquard_host.kit`) | 21 of 21 transcripts match their recordings; `noncanonical-target-hash` still recorded `diverges` and reproduced; no prose drift |
+| Installed wheel examples and distribution | `scripts/check_examples.py` passes all four examples with duplicate fulfillment and explicit recovery; `scripts/check_distribution.py` passes |
+| TypeScript | `npm test` 12 of 12, `npm run test:live` 19 of 19, and `npm run check:package` including all four installed examples, against the same release |
+
+CI now installs this release asset rather than building Core from source. The
+results below were recorded against the earlier development pin and are kept as
+that pin's evidence.
+
+## Results at the earlier development pin (`61575c7`)
 
 | Lane | Result |
 |---|---|

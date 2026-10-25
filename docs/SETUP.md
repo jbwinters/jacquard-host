@@ -18,39 +18,52 @@ These instructions install from source. A PyPI release is not required or
 assumed. The source archive includes the examples; the wheel includes the
 library, its typing marker, application resources, and the pinned conformance kit.
 
-## Build the matching Core worker
+## Install the pinned Core release
 
-The `jacquard-core-0.2.0` binary release predates the host worker. Its version
-string alone is insufficient. Build the exact public commit below, which
-contains the worker and pinned kit. You need Git, opam 2.x, and the native build
-tools required by OCaml. Follow [opam's installation instructions](https://opam.ocaml.org/doc/Install.html)
-for your platform if opam is not installed.
+The host adapters are pinned to one Jacquard Core release, recorded in
+[`core-pin.json`](../core-pin.json) (see [COMPATIBILITY.md](COMPATIBILITY.md)).
+Core publishes Linux x86_64 and macOS (arm64, x86_64) assets; this repository's
+CI exercises only Linux x86_64. With Python 3.11.4 or later, download that
+release, verify its SHA-256 against the pin, and configure the current shell
+from the repository root:
 
-From the host repository root, with opam initialized:
+```sh
+eval "$(python3 scripts/core_pin.py install)"
+"$JACQUARD_BIN" --version
+python examples/quickstart/run.py
+```
+
+The release unpacks under `.scratch/jacquard-core/`. `install` prints the
+`JACQUARD_BIN` (the release's real executable, not its `sh` launcher) and
+`JACQUARD_PRELUDE` exports; run it again in a new shell, which reuses the
+verified download. A checksum mismatch or a different `--version` fails.
+
+### Build the same release from source
+
+For other platforms, build the pinned tag. You need Git, opam 2.x, and the
+native build tools required by OCaml; follow
+[opam's installation instructions](https://opam.ocaml.org/doc/Install.html) if
+opam is not installed (initialize a first installation with
+`opam init --bare --no-setup`).
 
 ```sh
 mkdir -p .scratch
-git clone https://github.com/jbwinters/jacquard-lang.git .scratch/jacquard-core
-git -C .scratch/jacquard-core checkout --detach 61575c7bcd98c8922e739de647556d1368729ad8
-cd .scratch/jacquard-core
+git clone https://github.com/jbwinters/jacquard-lang.git .scratch/jacquard-core-src
+git -C .scratch/jacquard-core-src checkout --detach "$(python3 scripts/core_pin.py get release.commit)"
+cd .scratch/jacquard-core-src
 opam switch create . ocaml-base-compiler.5.1.1 -y
 opam install . --deps-only -y
 opam exec -- dune build bin/main.exe
 cd ../..
 
-export JACQUARD_BIN="$PWD/.scratch/jacquard-core/_build/default/bin/main.exe"
-export JACQUARD_PRELUDE="$PWD/.scratch/jacquard-core/prelude"
-"$JACQUARD_BIN" --version
+export JACQUARD_BIN="$PWD/.scratch/jacquard-core-src/_build/default/bin/main.exe"
+export JACQUARD_PRELUDE="$PWD/.scratch/jacquard-core-src/prelude"
 "$JACQUARD_BIN" host worker --help
-python examples/quickstart/run.py
 ```
 
-Initialize a first-time opam installation with `opam init --bare --no-setup`
-before creating the switch. The local switch and all build artifacts stay under
-`.scratch/`. If using an existing build instead, set both variables to its
-absolute paths and verify its commit against [COMPATIBILITY.md](COMPATIBILITY.md).
-Keep the executable and prelude from the same checkout. Export the variables
-again when opening a new shell.
+The switch and build artifacts stay under `.scratch/`. If you use an existing
+build instead, set both variables to its absolute paths and check its commit
+against the pin. Keep the executable and prelude from the same release.
 
 The quickstart prints shipping costs of 5 and 0. Continue with the
 [example projects](../examples/README.md), or run every example:
@@ -64,5 +77,5 @@ and store files. A warm run verifies and reuses the cache. A missing handler,
 invalid input, mismatched version, or changed cached file fails explicitly;
 see [the SDK guide](PYTHON-SDK.md) for error handling and limits.
 
-For checkout access or build failures, report the Core commit, platform, Python
-version, and failing command. No unpinned fallback binary is selected.
+For download, checkout, or build failures, report the pinned Core tag, platform,
+Python version, and failing command. No unpinned fallback binary is selected.

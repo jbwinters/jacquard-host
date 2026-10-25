@@ -2,7 +2,7 @@ recursive-include docs *.md *.json
 recursive-include tests *.py
 recursive-include scripts *.py
 recursive-include examples *.py *.jac *.json *.md
-include CHANGELOG.md CONTRIBUTING.md
+include CHANGELOG.md CONTRIBUTING.md core-pin.json
 include LICENSE NOTICE
 recursive-include docs/development *.py
 recursive-include typescript *.ts *.mjs *.json *.md

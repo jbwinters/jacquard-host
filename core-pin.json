@@ -1,0 +1,38 @@
+{
+  "schema": "jacquard-host-core-pin-v1",
+  "repository": "jbwinters/jacquard-lang",
+  "release": {
+    "tag": "jacquard-core-0.3.0",
+    "version": "0.3.0",
+    "commit": "daf87fb4837cc69339116746818f64821dc4cb8e"
+  },
+  "protocol": "jacquard-host-v0",
+  "carrier": "stdio-u32-json-v0",
+  "kit": {
+    "path": "spec/host-protocol-v0",
+    "evidence": "docs/release/host-boundary",
+    "digests": {
+      "kit/kit.json": "a01b9401d7c2df4e17771b9c0d22f9ea5ce1a923dfb7d3396c27821c0e058a61",
+      "kit/transcripts.json": "ebaf590e3d1b7e8399f56de5ad85043ac3658416dd7f0af7b55b9f9f3ce93240",
+      "kit/fixtures.jac": "037bb8209ca0344ba0a2cd0fcc16e69f13c8f9b91e3404dc3f3161e351831d80",
+      "vectors.json": "9ba1bff8eee0b6dbea6475dc0c7e9cc6313d847ad80bd8d832457115eb1c738a"
+    },
+    "pending_decisions": [
+      "noncanonical-target-hash"
+    ]
+  },
+  "assets": {
+    "linux-x86_64": {
+      "name": "jacquard-linux-x86_64.tar.gz",
+      "sha256": "236d0f2658b98d52abafd3f5efa2cdabb7a8053537789b13c894e080c9ac9513"
+    },
+    "macos-arm64": {
+      "name": "jacquard-macos-arm64.tar.gz",
+      "sha256": "b47bcdb52f04a9baa049d38bc934257cfc7023d784235e7240b0c9b4971001a8"
+    },
+    "macos-x86_64": {
+      "name": "jacquard-macos-x86_64.tar.gz",
+      "sha256": "8efc54bcf7573cb7cfd35fa3e77a584680ce68de872bdb212ed8369a974ff967"
+    }
+  }
+}
