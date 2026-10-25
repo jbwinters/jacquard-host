@@ -79,13 +79,13 @@ the actual wire types.
 | Go | Jacquard |
 |---|---|
 | `int`, `int64`, and the other integer kinds | `Int`; Go's `int64` covers Core's full 63-bit range; out-of-range values are refused |
-| `float64` | `Real` as binary64 bits, including NaN payloads and signed zero |
+| `float64` | `Real` as binary64 bits, including NaN payloads and signed zero; integers are accepted at a `Real` parameter only when exactly representable |
 | `string`, `bool`, `protocol.Hash` | `Text` (valid UTF-8), `Bool`, `Hash` |
 | `[]T` | `List T` |
-| `*T` (nil is `None`) | `Option T`; `**T` keeps nested options distinct |
+| `*T` (nil is `None`) | `Option T`; `**T` keeps nested options distinct. Where the checked type is a non-optional data type, a non-nil pointer is dereferenced and nil is refused |
 | `struct{}` | unit |
-| `[N]T`, `[]any` | tuples |
-| registered struct | a constructor (`Data.Record`) |
+| `[N]T` | tuples; a `[]any` is also a tuple where the checked type is a tuple |
+| registered named struct | a constructor (`Data.Record`), including nullary constructors from empty structs |
 | registered string type | nullary constructors (`RegisterEnum`) |
 | registered interface | a sum of registered records (`RegisterUnion`) |
 
@@ -114,12 +114,13 @@ results, err := jacquard.MapBatches[Triage](ctx, route, 8, policy, incidents)
 ```
 
 A record's exported fields, in declaration order, must follow the Jacquard
-constructor's positional order. `Data.Make("ConstructorName", fields...)`
+constructor's positional order. Register types before invoking functions;
+registration is not synchronized with concurrent calls. `Data.Make("ConstructorName", fields...)`
 builds a `jacquard.Variant` for dynamic code.
 
 `Call[any]` or `Invocation.Value` returns native values:
 - `int64`, `float64`, `string`, `bool`, and `protocol.Hash`;
-- `[]any` for lists;
+- `[]any` for lists and non-empty tuples;
 - `nil` for `None`, and `jacquard.Some` only where a nested option would
   otherwise be ambiguous;
 - `jacquard.Unit` for unit;

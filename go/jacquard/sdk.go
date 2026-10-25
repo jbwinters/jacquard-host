@@ -52,6 +52,7 @@ type Runtime struct {
 	limits   protocol.Limits
 
 	mu       sync.Mutex
+	discover sync.Mutex // serializes the version check and prelude discovery
 	checked  map[string]bool
 	preludes map[string][]group
 	// command runs a Core subcommand; tests may observe it.
@@ -240,20 +241,8 @@ func (r *Runtime) prepare(ctx context.Context, sources []string, options Prepare
 	if err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
-	checked := r.checked[binaryHash]
-	r.mu.Unlock()
-	if !checked {
-		version, err := r.command(ctx, binary, "--version")
-		if err != nil {
-			return nil, err
-		}
-		if fields := strings.Fields(version); len(fields) == 0 || fields[len(fields)-1] != protocol.CoreVersion {
-			return nil, &PreparationError{Message: fmt.Sprintf("expected pinned Core version %s, found %q; the exact release is also required", protocol.CoreVersion, strings.TrimSpace(version))}
-		}
-		r.mu.Lock()
-		r.checked[binaryHash] = true
-		r.mu.Unlock()
+	if err := r.checkVersion(ctx, binary, binaryHash); err != nil {
+		return nil, err
 	}
 	preludeFiles, err := tree(r.prelude)
 	if err != nil {
@@ -356,7 +345,33 @@ func (r *Runtime) prepare(ctx context.Context, sources []string, options Prepare
 	return r.load(directory, identity, binary)
 }
 
+// checkVersion runs `--version` once per executable digest, even when
+// preparations start concurrently.
+func (r *Runtime) checkVersion(ctx context.Context, binary, binaryHash string) error {
+	r.discover.Lock()
+	defer r.discover.Unlock()
+	r.mu.Lock()
+	checked := r.checked[binaryHash]
+	r.mu.Unlock()
+	if checked {
+		return nil
+	}
+	version, err := r.command(ctx, binary, "--version")
+	if err != nil {
+		return err
+	}
+	if fields := strings.Fields(version); len(fields) == 0 || fields[len(fields)-1] != protocol.CoreVersion {
+		return &PreparationError{Message: fmt.Sprintf("expected pinned Core version %s, found %q; the exact release is also required", protocol.CoreVersion, strings.TrimSpace(version))}
+	}
+	r.mu.Lock()
+	r.checked[binaryHash] = true
+	r.mu.Unlock()
+	return nil
+}
+
 func (r *Runtime) preludeGroups(ctx context.Context, binary, key string) ([]group, error) {
+	r.discover.Lock()
+	defer r.discover.Unlock()
 	r.mu.Lock()
 	cached, ok := r.preludes[key]
 	r.mu.Unlock()

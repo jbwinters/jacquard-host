@@ -340,8 +340,11 @@ func payload(order Order) string {
 	for i, line := range lines {
 		pairs[i] = []any{line.SKU, line.Units}
 	}
-	encoded, _ := json.Marshal(pairs)
-	return string(encoded)
+	var out strings.Builder
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(pairs)
+	return strings.TrimSuffix(out.String(), "\n")
 }
 
 func (w *Warehouse) make(name string, fields ...any) jacquard.Variant {
@@ -445,7 +448,8 @@ func (w *Warehouse) PublishBooking(id, receipt string) error {
 	return nil
 }
 
-// DeliverPending publishes every undelivered outbox entry explicitly.
+// DeliverPending publishes every undelivered outbox entry explicitly. On
+// failure it returns how many entries were delivered before the error.
 func (w *Warehouse) DeliverPending() (int, error) {
 	var pending []outboxEntry
 	for _, entry := range w.state.Outbox {
@@ -453,9 +457,9 @@ func (w *Warehouse) DeliverPending() (int, error) {
 			pending = append(pending, entry)
 		}
 	}
-	for _, entry := range pending {
+	for delivered, entry := range pending {
 		if err := w.PublishBooking(entry.ID, entry.Receipt); err != nil {
-			return 0, err
+			return delivered, err
 		}
 	}
 	return len(pending), nil

@@ -39,7 +39,8 @@ type enumCase struct {
 // Data maps native Go values to the prepared program's Jacquard data. Types
 // with no Go counterpart are registered explicitly: Record for constructors,
 // RegisterEnum for nullary constructor sets, and RegisterUnion for interface
-// types whose members are records.
+// types whose members are records. Register types before invoking functions;
+// registration is not synchronized with concurrent calls.
 type Data struct {
 	names        map[string]protocol.Hash
 	constructors map[string]protocol.Hash
@@ -104,8 +105,8 @@ func (d *Data) Record(constructor string, prototype any) error {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t == nil || t.Kind() != reflect.Struct || t.NumField() == 0 {
-		return &BindingError{Message: "Record needs a struct with at least one field"}
+	if t == nil || t.Kind() != reflect.Struct || t.Name() == "" {
+		return &BindingError{Message: "Record needs a named struct type"}
 	}
 	for i := 0; i < t.NumField(); i++ {
 		if !t.Field(i).IsExported() {
@@ -132,21 +133,25 @@ func RegisterEnum[T ~string](d *Data, cases map[T]string) error {
 		return &BindingError{Message: "enum is empty or already mapped"}
 	}
 	table := map[string]protocol.Hash{}
+	members := map[protocol.Hash]enumCase{}
 	for value, constructor := range cases {
 		id, err := d.id(constructor)
 		if err != nil {
 			return err
 		}
-		if builtins[d.labels[id]] || d.byID[id] != nil {
-			return &BindingError{Message: "enum constructors must be distinct and not builtin"}
-		}
-		if _, taken := d.enumByID[id]; taken {
+		_, taken := d.enumByID[id]
+		_, repeated := members[id]
+		if builtins[d.labels[id]] || d.byID[id] != nil || taken || repeated {
 			return &BindingError{Message: "enum constructors must be distinct and not builtin"}
 		}
 		table[string(value)] = id
-		d.enumByID[id] = enumCase{t, reflect.ValueOf(value)}
+		members[id] = enumCase{t, reflect.ValueOf(value)}
 	}
+	// Publish only after every case validated.
 	d.enums[t] = table
+	for id, member := range members {
+		d.enumByID[id] = member
+	}
 	return nil
 }
 
@@ -186,12 +191,11 @@ func (d *Data) construct(name string, args ...protocol.Value) (protocol.Value, e
 }
 
 var (
-	hashType   = reflect.TypeFor[protocol.Hash]()
-	valueType  = reflect.TypeFor[protocol.Value]()
-	someType   = reflect.TypeFor[Some]()
-	varType    = reflect.TypeFor[Variant]()
-	errorType  = reflect.TypeFor[error]()
-	maxFloatOK = int64(1) << 53
+	hashType  = reflect.TypeFor[protocol.Hash]()
+	valueType = reflect.TypeFor[protocol.Value]()
+	someType  = reflect.TypeFor[Some]()
+	varType   = reflect.TypeFor[Variant]()
+	errorType = reflect.TypeFor[error]()
 )
 
 // Encode converts a native value, guided by an optional checked type.
@@ -237,6 +241,14 @@ func (d *Data) encode(v reflect.Value, expected protocol.BoundaryType, path stri
 			return d.encodeList(v, child, path, depth)
 		case "option":
 			return d.encodeOption(v, child, path, depth)
+		default:
+			// A checked non-optional data type: a pointer cannot mean Option here.
+			if v.IsValid() && v.Kind() == reflect.Pointer {
+				if v.IsNil() {
+					return nil, invalid(path, "nil where a non-optional value is expected")
+				}
+				v = v.Elem()
+			}
 		}
 	case protocol.TupleType:
 		if (!v.IsValid() || (v.Kind() == reflect.Struct && v.NumField() == 0)) && len(t.Items) == 0 {
@@ -317,7 +329,16 @@ func (d *Data) encodeDynamic(v reflect.Value, path string, depth int) (protocol.
 		return d.encodeReal(v, path)
 	case reflect.String:
 		return d.encodeText(v, path)
-	case reflect.Slice, reflect.Array:
+	case reflect.Array:
+		items := make(protocol.Tuple, v.Len())
+		for i := range items {
+			var err error
+			if items[i], err = d.encode(v.Index(i), nil, fmt.Sprintf("%s[%d]", path, i), depth+2); err != nil {
+				return nil, err
+			}
+		}
+		return items, nil
+	case reflect.Slice:
 		return d.encodeList(v, nil, path, depth)
 	case reflect.Pointer:
 		return d.encodeOption(v, nil, path, depth)
@@ -367,8 +388,15 @@ func (d *Data) encodeReal(v reflect.Value, path string) (protocol.Value, error) 
 	case reflect.Float32, reflect.Float64:
 		return protocol.RealOf(v.Float()), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if n := v.Int(); n >= -maxFloatOK && n <= maxFloatOK {
-			return protocol.RealOf(float64(n)), nil
+		n := v.Int()
+		if f := float64(n); f >= -0x1p63 && f < 0x1p63 && int64(f) == n {
+			return protocol.RealOf(f), nil
+		}
+		return nil, invalid(path, "integer is not exactly representable as a Real")
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		n := v.Uint()
+		if f := float64(n); f < 0x1p64 && uint64(f) == n {
+			return protocol.RealOf(f), nil
 		}
 		return nil, invalid(path, "integer is not exactly representable as a Real")
 	}
