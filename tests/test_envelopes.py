@@ -81,6 +81,37 @@ class OutcomeBudgetTest(unittest.TestCase):
         with self.assertRaises(LimitExceeded):
             envelopes.parse_core_frame(outcome, limits=dict(HARD_LIMITS, max_value_nodes=1))
 
+    def test_evidence_types_alone_and_error_outcomes_use_the_frame_budget(self) -> None:
+        kit = load_kit()
+        outcome = kit.transcripts[0]["core_output"][1]
+        core = outcome["evidence"]["core"]
+        with_parameter = {**outcome, "evidence": {**outcome["evidence"], "core": {**core,
+            "interface": {**core["interface"], "parameters": [{"items": [], "kind": "tuple"}]}}}}
+        with self.assertRaises(LimitExceeded):  # two evidence types exceed one node
+            envelopes.parse_core_frame(with_parameter, limits=dict(HARD_LIMITS, max_value_nodes=1))
+        refused = next(t for t in kit.transcripts if t["name"] == "refused-authority")["core_output"][-1]
+        envelopes.parse_core_frame(refused, limits=dict(HARD_LIMITS, max_value_nodes=2))
+        with self.assertRaises(LimitExceeded):  # an error outcome spends its evidence types only
+            envelopes.parse_core_frame(refused, limits=dict(HARD_LIMITS, max_value_nodes=1))
+
+    def test_evidence_collections_obey_their_limits(self) -> None:
+        refused = next(t for t in load_kit().transcripts if t["name"] == "refused-authority")["core_output"][-1]
+        core = refused["evidence"]["core"]
+        other = "f" * 64
+        effects = [*core["interface"]["effects"], other]
+        cases = {
+            "max_effects": {**core, "interface": {**core["interface"], "effects": effects},
+                            "capabilities": {**core["capabilities"], "effects": effects}},
+            "max_operations": {**core, "capabilities": {**core["capabilities"],
+                               "operations": [*core["capabilities"]["operations"], {**core["capabilities"]["operations"][0], "operation": other}]}},
+            "max_effect_requests": {**core, "effect_requests": [*core["effect_requests"], {**core["effect_requests"][0], "ordinal": 2}]},
+        }
+        for limit, changed in cases.items():
+            frame = {**refused, "evidence": {**refused["evidence"], "core": changed}}
+            envelopes.parse_core_frame(frame, limits=HARD_LIMITS)
+            with self.subTest(limit=limit), self.assertRaises(LimitExceeded):
+                envelopes.parse_core_frame(frame, limits=dict(HARD_LIMITS, **{limit: 1}))
+
     def test_malformed_evidence_types_are_refused(self) -> None:
         outcome = load_kit().transcripts[0]["core_output"][1]
         broken = {**outcome, "evidence": {**outcome["evidence"], "core": {**outcome["evidence"]["core"],

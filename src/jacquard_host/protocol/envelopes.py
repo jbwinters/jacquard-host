@@ -336,6 +336,8 @@ def _evidence(value: Any, budget: Budget) -> dict[str, Any]:
         if not isinstance(items, list):
             raise MalformedFrame(f"evidence {name} must be an array")
         hashes = [parse_hash(item, name) for item in items]
+        if len(hashes) > budget.limits["max_effects"]:
+            raise LimitExceeded(f"evidence {name} exceed max_effects")
         if hashes != sorted(set(hashes)):
             raise MalformedFrame(f"evidence {name} must be a strictly sorted set")
     if not isinstance(interface["parameters"], list) or not isinstance(interface["result"], dict):
@@ -346,6 +348,8 @@ def _evidence(value: Any, budget: Budget) -> dict[str, Any]:
     decode_type(interface["result"], budget)
     if not isinstance(capabilities["operations"], list):
         raise MalformedFrame("evidence capability operations must be an array")
+    if len(capabilities["operations"]) > budget.limits["max_operations"]:
+        raise LimitExceeded("evidence capability operations exceed max_operations")
     for item in capabilities["operations"]:
         entry = _exact(item, ("effect", "mode", "operation"), "an evidence operation entry")
         if entry["mode"] != "once":
@@ -355,6 +359,8 @@ def _evidence(value: Any, budget: Budget) -> dict[str, Any]:
     requests = core["effect_requests"]
     if not isinstance(requests, list):
         raise MalformedFrame("core evidence effect_requests must be an array")
+    if len(requests) > budget.limits["max_effect_requests"]:
+        raise LimitExceeded("core evidence effect_requests exceed max_effect_requests")
     for index, item in enumerate(requests, start=1):
         entry = _exact(item, ("effect", "operation", "ordinal"), "an effect_requests entry")
         if entry["ordinal"] != index or isinstance(entry["ordinal"], bool):

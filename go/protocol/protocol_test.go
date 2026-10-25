@@ -174,13 +174,25 @@ func TestFailurePairs(t *testing.T) {
 	}
 }
 
-func TestCountsAreCheckedBeforeIdentities(t *testing.T) {
+func TestDecodersFollowCoresCheckOrder(t *testing.T) {
 	many := make([]any, 65)
 	for i := range many {
 		many[i] = Object{"kind": "int", "value": "1"}
 	}
+	// Core: exact fields, one node, identity, then the count.
 	_, err := DecodeValue(Object{"kind": "constructor", "identity": "bad", "arguments": many}, NewBudget(HardLimits))
-	code(t, err, "E1602", "constructor count before identity")
+	code(t, err, "E1601", "constructor identity before count")
+	_, err = DecodeValue(Object{"kind": "constructor", "identity": strings.Repeat("a", 64), "arguments": many}, NewBudget(HardLimits))
+	code(t, err, "E1602", "constructor argument count")
+	// A malformed descriptor is refused as malformed even when the budget is spent.
+	spent := NewBudget(HardLimits)
+	spent.nodes = HardLimits.MaxValueNodes
+	_, err = DecodeType(Object{"kind": "nominal", "identity": strings.Repeat("a", 64)}, spent)
+	code(t, err, "E1601", "exact fields before the node")
+	_, err = DecodeValue(Object{"kind": "secret"}, spent)
+	code(t, err, "E1604", "kind before the node")
+	_, err = DecodeValue(Object{"value": "1"}, NewBudget(HardLimits))
+	code(t, err, "E1601", "missing kind")
 	wire := HardLimits.JSON()
 	wire["max_arguments"] = int64(1) << 60
 	_, err = DecodeLimits(wire)

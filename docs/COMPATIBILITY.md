@@ -48,6 +48,14 @@ target hash as a malformed scalar (E1601). The transcript is recorded as
 Diagnostic prose is not normative and is reported, never normalised. This is
 independent v0 evidence; it does not change the protocol version or declare v1.
 
+The adapters decode boundary descriptors in Core's order: the kind, then the
+exact fields, then one node of `max_value_nodes`, then any identity, then the
+list count. Malformed input therefore gets the same error code from every
+adapter and from Core. For recording comparisons, Python and Go sort object keys
+by code point, while TypeScript sorts them by UTF-16 code unit. The two orders
+differ only for keys outside the Basic Multilingual Plane. Every protocol key is
+ASCII, so the comparisons agree.
+
 ## Status of the pin
 
 Releases from `jacquard-core-0.3.0` publish checksummed binaries that include

@@ -62,15 +62,21 @@ export class Budget {
   }
   text(text: string): void { scalar(text); if (Buffer.byteLength(text) > this.limits.max_text_bytes) exceeded('Text exceeds max_text_bytes'); }
 }
+/** Core's order: kind, exact fields, one node, identity, then the count. */
+function kinded(value: Json): JsonObject {
+  const obj = object(value);
+  if (typeof obj.kind !== 'string') malformed('a boundary descriptor needs one kind string');
+  return obj;
+}
 export function decodeType(value: Json, budget = new Budget()): BoundaryType {
-  const obj = object(value); budget.consume();
+  const obj = kinded(value);
   if (obj.kind === 'nominal') {
-    exact(obj, ['arguments', 'identity', 'kind']);
-    const args = array(obj.arguments); budget.count(args.length);
-    return nominal(hash(obj.identity), ...args.map(item => decodeType(item, budget)));
+    exact(obj, ['arguments', 'identity', 'kind']); budget.consume();
+    const identity = hash(obj.identity); const args = array(obj.arguments); budget.count(args.length);
+    return nominal(identity, ...args.map(item => decodeType(item, budget)));
   }
   if (obj.kind === 'tuple') {
-    exact(obj, ['items', 'kind']); const items = array(obj.items); budget.count(items.length);
+    exact(obj, ['items', 'kind']); budget.consume(); const items = array(obj.items); budget.count(items.length);
     return tupleType(...items.map(item => decodeType(item, budget)));
   }
   throw new ProtocolError('E1604', 'unsupported boundary type kind');
@@ -88,24 +94,25 @@ export function encodeType(type: BoundaryType, budget = new Budget(), depth = 1)
   throw new ProtocolError('E1604', 'unsupported boundary type');
 }
 export function decodeValue(value: Json, budget = new Budget()): Value {
-  const obj = object(value); budget.consume();
+  const obj = kinded(value);
   switch (obj.kind) {
     case 'int': {
-      exact(obj, ['kind', 'value']); const text = string(obj.value);
+      exact(obj, ['kind', 'value']); budget.consume(); const text = string(obj.value);
       if (!/^(?:0|-[1-9][0-9]*|[1-9][0-9]*)$/.test(text) || text.length > 20) malformed('Int must use canonical 63-bit decimal text');
       const integer = BigInt(text); if (integer < INT_MIN || integer > INT_MAX) malformed('Int is outside the 63-bit range');
       return integer;
     }
-    case 'real': exact(obj, ['bits', 'kind']); return new Real(string(obj.bits));
-    case 'text': { exact(obj, ['kind', 'value']); const text = string(obj.value); budget.text(text); return text; }
-    case 'hash': exact(obj, ['kind', 'value']); return new Hash(hash(obj.value));
+    case 'real': exact(obj, ['bits', 'kind']); budget.consume(); return new Real(string(obj.bits));
+    case 'text': { exact(obj, ['kind', 'value']); budget.consume(); const text = string(obj.value); budget.text(text); return text; }
+    case 'hash': exact(obj, ['kind', 'value']); budget.consume(); return new Hash(hash(obj.value));
     case 'tuple': {
-      exact(obj, ['items', 'kind']); const items = array(obj.items); budget.count(items.length);
+      exact(obj, ['items', 'kind']); budget.consume(); const items = array(obj.items); budget.count(items.length);
       return new Tuple(...items.map(item => decodeValue(item, budget)));
     }
     case 'constructor': {
-      exact(obj, ['arguments', 'identity', 'kind']); const args = array(obj.arguments); budget.count(args.length, true);
-      return new Constructor(hash(obj.identity), ...args.map(item => decodeValue(item, budget)));
+      exact(obj, ['arguments', 'identity', 'kind']); budget.consume();
+      const identity = hash(obj.identity); const args = array(obj.arguments); budget.count(args.length, true);
+      return new Constructor(identity, ...args.map(item => decodeValue(item, budget)));
     }
     default: throw new ProtocolError('E1604', 'unsupported boundary value kind');
   }
@@ -200,7 +207,7 @@ export function invokeFrame(target: string | Hash, spec: Interface, args: readon
 function validateEvidence(value: Json, limits: Limits, budget: Budget): JsonObject {
   const evidence = exact(value, ['core', 'host_observations']);
   const core = exact(evidence.core, ['capabilities', 'effect_requests', 'interface', 'invocation_id', 'schema', 'target', 'terminal']);
-  if (core.schema !== 'jacquard-host-core-evidence-v0' || !TERMINALS.includes(String(core.terminal))) malformed('unknown core evidence schema or terminal');
+  if (core.schema !== 'jacquard-host-core-evidence-v0' || typeof core.terminal !== 'string' || !TERMINALS.includes(core.terminal)) malformed('unknown core evidence schema or terminal');
   if (core.invocation_id !== INVOCATION_ID) order('wrong evidence invocation');
   const target = exact(core.target, ['callable', 'kind']); hash(target.callable);
   if (target.kind !== 'store-term-v0') malformed('unknown target kind');
@@ -224,8 +231,8 @@ function validateEvidence(value: Json, limits: Limits, budget: Budget): JsonObje
   if (observations.schema !== 'jacquard-host-observations-v0') malformed('unknown host observations schema');
   for (const observation of array(observations.responses)) {
     const entry = exact(observation, ['category', 'completion', 'ordinal']);
-    if (!['ok', 'unsupported_operation', 'refused_authority', 'outside_failure', 'completion_unknown', 'cancelled', 'timeout', 'host_shutdown'].includes(String(entry.category))) malformed('unknown observation category');
-    if (!['completed', 'not_started', 'failed', 'unknown'].includes(String(entry.completion))) malformed('unknown observation completion');
+    if (typeof entry.category !== 'string' || !['ok', 'unsupported_operation', 'refused_authority', 'outside_failure', 'completion_unknown', 'cancelled', 'timeout', 'host_shutdown'].includes(entry.category)) malformed('unknown observation category');
+    if (typeof entry.completion !== 'string' || !['completed', 'not_started', 'failed', 'unknown'].includes(entry.completion)) malformed('unknown observation completion');
     if (typeof entry.ordinal !== 'number' || !Number.isInteger(entry.ordinal) || entry.ordinal < 1 || entry.ordinal > requests.length) malformed('invalid observation ordinal');
   }
   return evidence;

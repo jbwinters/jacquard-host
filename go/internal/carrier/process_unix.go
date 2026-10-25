@@ -13,10 +13,20 @@ import (
 // descendants that inherited its pipes, such as a launcher that does not exec.
 func isolate(cmd *exec.Cmd) { cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} }
 
+// killTree stops a worker and its process group. Callers exclude the Linux
+// reap; Signal(0) also reports a reaped leader through the process handle
+// (ErrProcessDone), which covers the platforms where Wait reaps unlocked. Only
+// an unreaped leader keeps the group id from being reused.
 func killTree(process *os.Process) {
-	_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
+	if process.Signal(syscall.Signal(0)) == nil {
+		_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
+	}
 	_ = process.Kill()
 }
+
+// killGroup stops the members left in an exited worker's process group. The
+// caller guarantees the leader has not been reaped (see waitExited).
+func killGroup(pgid int) { _ = syscall.Kill(-pgid, syscall.SIGKILL) }
 
 func signalName(state *os.ProcessState) string {
 	status, ok := state.Sys().(syscall.WaitStatus)
