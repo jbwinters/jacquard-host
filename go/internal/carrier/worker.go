@@ -243,7 +243,16 @@ func (w *Worker) reap() {
 	}
 	w.waited = true
 	w.mu.Unlock()
-	_ = w.cmd.Wait()
+	err := w.cmd.Wait()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The worker exited but a descendant still holds its output pipes.
+		killTree(w.cmd.Process)
+		w.mu.Lock()
+		if w.fault == nil {
+			w.fault = &Loss{Message: "worker descendants kept its pipes open after exit"}
+		}
+		w.mu.Unlock()
+	}
 	w.mu.Lock()
 	w.reaped = true
 	w.mu.Unlock()

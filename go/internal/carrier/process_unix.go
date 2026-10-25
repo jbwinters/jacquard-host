@@ -3,6 +3,7 @@
 package carrier
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -22,13 +23,20 @@ func signalName(state *os.ProcessState) string {
 	if !ok || !status.Signaled() {
 		return ""
 	}
-	names := map[syscall.Signal]string{
-		syscall.SIGKILL: "SIGKILL", syscall.SIGTERM: "SIGTERM", syscall.SIGINT: "SIGINT", syscall.SIGHUP: "SIGHUP",
-		syscall.SIGPIPE: "SIGPIPE", syscall.SIGSEGV: "SIGSEGV", syscall.SIGABRT: "SIGABRT", syscall.SIGBUS: "SIGBUS",
-		syscall.SIGILL: "SIGILL", syscall.SIGFPE: "SIGFPE", syscall.SIGQUIT: "SIGQUIT", syscall.SIGTRAP: "SIGTRAP",
-	}
-	if name, ok := names[status.Signal()]; ok {
+	if name, ok := signalNames[status.Signal()]; ok {
 		return name
 	}
-	return status.Signal().String()
+	return fmt.Sprintf("SIG%d", int(status.Signal()))
+}
+
+// signalNames covers the POSIX signals common to Linux and macOS.
+var signalNames = map[syscall.Signal]string{
+	syscall.SIGABRT: "SIGABRT", syscall.SIGALRM: "SIGALRM", syscall.SIGBUS: "SIGBUS", syscall.SIGCHLD: "SIGCHLD",
+	syscall.SIGCONT: "SIGCONT", syscall.SIGFPE: "SIGFPE", syscall.SIGHUP: "SIGHUP", syscall.SIGILL: "SIGILL",
+	syscall.SIGINT: "SIGINT", syscall.SIGIO: "SIGIO", syscall.SIGKILL: "SIGKILL", syscall.SIGPIPE: "SIGPIPE",
+	syscall.SIGPROF: "SIGPROF", syscall.SIGQUIT: "SIGQUIT", syscall.SIGSEGV: "SIGSEGV", syscall.SIGSTOP: "SIGSTOP",
+	syscall.SIGSYS: "SIGSYS", syscall.SIGTERM: "SIGTERM", syscall.SIGTRAP: "SIGTRAP", syscall.SIGTSTP: "SIGTSTP",
+	syscall.SIGTTIN: "SIGTTIN", syscall.SIGTTOU: "SIGTTOU", syscall.SIGURG: "SIGURG", syscall.SIGUSR1: "SIGUSR1",
+	syscall.SIGUSR2: "SIGUSR2", syscall.SIGVTALRM: "SIGVTALRM", syscall.SIGWINCH: "SIGWINCH", syscall.SIGXCPU: "SIGXCPU",
+	syscall.SIGXFSZ: "SIGXFSZ",
 }

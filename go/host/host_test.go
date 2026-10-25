@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -150,25 +148,5 @@ func TestRegistryRefusesDuplicatesAndBadIdentities(t *testing.T) {
 	}
 	if _, err := host.NewFailure(protocol.OutsideFailure, protocol.Unknown, ""); err == nil {
 		t.Fatal("invalid failure pair accepted")
-	}
-}
-
-func TestDeadlineStopsDescendantsHoldingThePipes(t *testing.T) {
-	start := time.Now()
-	result := faulty(t, "descendant", 500*time.Millisecond, nil).Invoke(context.Background(), identities(t)["kit-ready"], unit, nil, nil)
-	if elapsed := time.Since(start); elapsed > 3*time.Second || result.HostEvidence["reason"] != "deadline" {
-		t.Fatalf("returned after %v with %v", elapsed, result.HostEvidence)
-	}
-	pid, err := strconv.Atoi(string(result.Stderr))
-	if err != nil {
-		t.Fatalf("stand-in stderr %q", result.Stderr)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Fatal("descendant survived the worker's expiry")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }

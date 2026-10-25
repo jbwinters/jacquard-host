@@ -46,6 +46,19 @@ func MainIfRequested() {
 	case "truncated":
 		_, _ = os.Stdout.Write([]byte{0, 0, 0})
 		os.Exit(0)
+	case "stderr-descendant":
+		// Answer normally, but leave a descendant holding only stderr.
+		child := exec.Command("sleep", "30")
+		child.Stderr = os.Stderr
+		if child.Start() != nil {
+			os.Exit(3)
+		}
+		fmt.Fprintf(os.Stderr, "%d", child.Process.Pid)
+		loaded, err := kit.Load()
+		if err != nil {
+			os.Exit(3)
+		}
+		os.Exit(fault(loaded, "ok"))
 	case "descendant":
 		// Leave a descendant holding stdout, like a launcher that does not exec.
 		child := exec.Command("sleep", "30")
