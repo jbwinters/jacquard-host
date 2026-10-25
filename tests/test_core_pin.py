@@ -158,10 +158,28 @@ class InstallTest(unittest.TestCase):
     def test_escaping_members_and_links_are_refused_before_extraction(self) -> None:
         version = core_pin.load()["release"]["version"]
         for extra in ([("jacquard-x/link", None, "../../outside")], [("jacquard-x/abs", None, "/etc")],
-                      [("../escape", b"x", None)], [("jacquard-x/link", None, "../.."), ("jacquard-x/link/escaped", b"x", None)]):
+                      [("../escape", b"x", None)], [("/absolute", b"x", None)],
+                      [("jacquard-x/link", None, "../.."), ("jacquard-x/link/escaped", b"x", None)],
+                      [("jacquard-x/s", None, "."), ("jacquard-x/t", None, "s/s/s/../../../..")]):
             with self.subTest(extra=extra), self.assertRaisesRegex(core_pin.PinError, "refusing"):
                 self.install(release(version, extra))
         self.assertEqual(list(self.dest.iterdir()), [])
+
+    def test_sibling_links_are_kept_and_hardlinks_refused(self) -> None:
+        version = core_pin.load()["release"]["version"]
+        env = self.install(release(version, [("jacquard-x/libexec/jacquard/jac", None, "jacquard")]))
+        self.assertTrue(Path(env["JACQUARD_BIN"]).with_name("jac").is_symlink())
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=io.BytesIO(release(version))) as source, tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for member in source.getmembers():
+                tar.addfile(member, source.extractfile(member) if member.isfile() else None)
+            hard = tarfile.TarInfo("jacquard-x/hard")
+            hard.type, hard.linkname = tarfile.LNKTYPE, "jacquard-x/libexec/jacquard/jacquard"
+            tar.addfile(hard)
+        shutil.rmtree(self.dest)
+        self.dest.mkdir()
+        with self.assertRaisesRegex(core_pin.PinError, "refusing"):
+            self.install(buffer.getvalue())
 
     def test_missing_platform_asset_points_to_a_source_build(self) -> None:
         with self.assertRaisesRegex(core_pin.PinError, "from source"):
@@ -183,7 +201,7 @@ class UpdateTest(unittest.TestCase):
         files["kit/kit.json"] = json.dumps(manifest).encode()
         with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
              patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
-             patch.object(core_pin, "release_assets", return_value=assets):
+             patch.object(core_pin, "release_assets", return_value=assets) as self.fetched:
             return core_pin.update(self.pin, "jacquard-core-9.9.9", None, self.kit)
 
     def test_a_release_is_adopted_with_its_kit_and_assets(self) -> None:
@@ -195,15 +213,31 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(new["kit"]["digests"]["kit/kit.json"], core_pin.sha256(written))
         self.assertEqual([path.name for path in self.kit.rglob(".*.core-pin")], [])
 
+    def test_a_failed_replacement_restores_every_kit_file(self) -> None:
+        before = {name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}
+        real_replace, calls = Path.replace, []
+        def flaky(path, target):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("synthetic rename failure")
+            return real_replace(path, target)
+        with patch.object(Path, "replace", flaky), self.assertRaisesRegex(OSError, "synthetic"):
+            core_pin.write_kit({name: b"changed" for name in core_pin.KIT_FILES}, self.kit)
+        self.assertEqual({name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}, before)
+        self.assertEqual([path.name for path in self.kit.rglob(".*.core-pin")], [])
+
     def test_protocol_change_mismatched_version_or_missing_linux_asset_is_refused(self) -> None:
         linux = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
-        cases = [({"core_version": "9.9.9", "protocol": "jacquard-host-v1"}, linux, "protocol change"),
+        cases = [({"core_version": "9.9.9", "pending_decisions": [{"name": 'x"); import os; ("'}]}, linux, "plain lowercase"),
+                 ({"core_version": "9.9.9", "protocol": "jacquard-host-v1"}, linux, "protocol change"),
                  ({"core_version": "9.9.8"}, linux, "core_version"),
                  ({"core_version": "9.9.9"}, {}, "linux-x86_64")]
         before = {name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}
         for changes, assets, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(core_pin.PinError, message):
                 self.run_update(changes, assets)
+            if message == "protocol change":
+                self.fetched.assert_not_called()
         self.assertEqual({name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}, before)
 
 

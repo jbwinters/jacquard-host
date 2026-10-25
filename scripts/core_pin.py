@@ -51,9 +51,13 @@ class PinError(Exception):
 
 
 def load(path: Path = PIN) -> dict:
-    pin = json.loads(path.read_text(encoding="utf-8"))
+    return validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+def validate(pin: dict) -> dict:
+    """Refuse a pin whose values could not be rendered safely into generated source."""
     if pin.get("schema") != SCHEMA:
-        raise PinError(f"{path.name}: unknown schema {pin.get('schema')!r}")
+        raise PinError(f"core pin: unknown schema {pin.get('schema')!r}")
     release = pin["release"]
     if release["tag"] != TAG_PREFIX + release["version"]:
         raise PinError(f"release tag {release['tag']} does not name version {release['version']}")
@@ -253,10 +257,10 @@ def check_members(archive: tarfile.TarFile, root: Path, name: str) -> None:
         target = (base / member.name).resolve()
         if not target.is_relative_to(base) or not (member.isfile() or member.isdir() or member.issym()):
             raise PinError(f"{name}: refusing archive member {member.name}")
-        if member.issym():
-            link = (target.parent / member.linkname).resolve()
-            if Path(member.linkname).is_absolute() or not link.is_relative_to(base):
-                raise PinError(f"{name}: refusing link {member.name} -> {member.linkname}")
+        # Links may only name a sibling entry, so no chain of them can leave its
+        # directory; this does not depend on the tarfile data filter.
+        if member.issym() and not re.fullmatch(r"[0-9A-Za-z_][0-9A-Za-z._-]*", member.linkname):
+            raise PinError(f"{name}: refusing link {member.name} -> {member.linkname}")
 
 
 def release_env(prefix: Path) -> dict[str, str]:
@@ -380,24 +384,40 @@ def update(pin: dict, tag: str, checkout: Path | None, kit_dir: Path = KIT_DIR) 
     new["assets"] = release_assets(repository, tag)
     if "linux-x86_64" not in new["assets"]:
         raise PinError(f"{tag} has no linux-x86_64 asset, which CI installs")
+    validate(new)
     write_kit(files, kit_dir)
     return new
 
 
 def write_kit(files: dict[str, bytes], kit_dir: Path) -> None:
-    """Write every kit file to a sibling file first, then rename them all."""
+    """Replace every kit file through staged renames, restoring all on failure."""
+    write_files({kit_dir / name: data for name, data in files.items()})
+
+
+def write_files(contents: dict[Path, bytes]) -> None:
+    originals = {path: path.read_bytes() if path.exists() else None for path in contents}
     staged = []
     try:
-        for name, data in files.items():
-            path = kit_dir / name
+        for path, data in contents.items():
             temporary = path.with_name(f".{path.name}.core-pin")
             temporary.write_bytes(data)
             staged.append((temporary, path))
         for temporary, path in staged:
             temporary.replace(path)
+    except BaseException:
+        restore(originals)
+        raise
     finally:
         for temporary, _ in staged:
             temporary.unlink(missing_ok=True)
+
+
+def restore(originals: dict[Path, bytes | None]) -> None:
+    for path, data in originals.items():
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(data)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -452,15 +472,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"pinned {pin['release']['tag']}; Core's latest release is {latest}. "
                   f"Adopt it with: python3 scripts/core_pin.py update --tag {latest}")
             return 3
+        generated = [REPO / name for name in (*GENERATED, *BLOCKS)]
+        kit_paths = [KIT_DIR / name for name in (*KIT_FILES, *KIT_EXTRAS)]
+        originals = {path: path.read_bytes() if path.exists() else None for path in [PIN, *generated, *kit_paths]}
         new = update(pin, args.tag, args.core_checkout)
-        staged = PIN.with_name(".core-pin.json.tmp")
-        staged.write_text(dump(new), encoding="utf-8")
-        staged.replace(PIN)
-        for name in sync(new):
+        try:
+            write_files({PIN: dump(new).encode()})
+            changed = sync(new)
+        except BaseException:
+            restore(originals)
+            raise
+        for name in changed:
             print(f"updated {name}")
         print(f"pinned {args.tag}. Now run the offline and live suites for every adapter (CONTRIBUTING.md).")
         return 0
-    except (PinError, KeyError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
+    except (PinError, KeyError, OSError, tarfile.TarError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
         print(f"core_pin: {error}", file=sys.stderr)
         return 2
 
