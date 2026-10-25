@@ -67,6 +67,16 @@ Recorded against the same release asset with Go 1.24.13 on Linux 7.0.
 | Go SDK offline | 7 further tests pass: signature parsing and identity groups, review regressions (tuples in record fields and handler results, exact integer-to-Real conversion, atomic enum registration, nullary union records, pointers at non-optional types), one version check under concurrent preparation, native value mapping through checked types (records, full Int range, Real bits, integer-valued Reals, refused out-of-range and invalid text), options/enums/unions and nested options, dynamic values and depth refusal, service method adaptation (context, failures, arity, plain errors, operation maps), and embedded example files identical to `examples/` |
 | Go SDK live | 14 further tests pass: quickstart calls, invocation rendering and saved inspection files; triage records, enums, options, and 64 rows in explicit batches against an oracle; late invalid input and over-deep calls refused before any worker; binding completeness and pure calls without services; unknown completion once with raw evidence; 25 planning cases matching an independent exhaustive oracle with feasible assignments; warm cache reuse without Core commands, byte-exact source invalidation, corruption refusal; full Int range, Real bits, and nested options; spawn failure and cancellation; output overflow without adaptive batching; result-mapping failure retaining the raw result; prelude contents in the cache key and concurrent preparation publishing once; three fulfillment faults with explicit recovery across restart; and all four commands including duplicate fulfillment, `--inspect`, and explicit delivery |
 
+## Outcome frame node budget (2026-10-25)
+
+Core's `outcome` encodes the evidence's interface types and the result value
+against one boundary-node budget (`src/host_protocol_v0.ml` at the pinned
+release). Each adapter now does the same when it parses an outcome. A
+regression in each adapter parses the pinned `pure-success` outcome, which holds
+two nodes: it is accepted with `max_value_nodes` 2 and refused with E1602 at 1.
+The full Python, TypeScript, and Go suites and the 21-recording kit replay pass
+unchanged against the release.
+
 CI now installs this release asset rather than building Core from source. The
 results below were recorded against the earlier development pin and are kept as
 that pin's evidence.

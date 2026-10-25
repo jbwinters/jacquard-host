@@ -197,7 +197,7 @@ export function invokeFrame(target: string | Hash, spec: Interface, args: readon
     target: { callable: hash(String(target)), kind: 'store-term-v0' },
   };
 }
-function validateEvidence(value: Json, limits: Limits): JsonObject {
+function validateEvidence(value: Json, limits: Limits, budget: Budget): JsonObject {
   const evidence = exact(value, ['core', 'host_observations']);
   const core = exact(evidence.core, ['capabilities', 'effect_requests', 'interface', 'invocation_id', 'schema', 'target', 'terminal']);
   if (core.schema !== 'jacquard-host-core-evidence-v0' || !TERMINALS.includes(String(core.terminal))) malformed('unknown core evidence schema or terminal');
@@ -206,7 +206,7 @@ function validateEvidence(value: Json, limits: Limits): JsonObject {
   if (target.kind !== 'store-term-v0') malformed('unknown target kind');
   const spec = exact(core.interface, ['effects', 'parameters', 'result']);
   sortedHashes(spec.effects, limits.max_effects);
-  const budget = new Budget(limits); const parameters = array(spec.parameters); budget.count(parameters.length, true);
+  const parameters = array(spec.parameters); budget.count(parameters.length, true);
   parameters.forEach(item => decodeType(item, budget)); decodeType(spec.result, budget);
   const capabilities = exact(core.capabilities, ['effects', 'operations']); sortedHashes(capabilities.effects, limits.max_effects);
   const operations = array(capabilities.operations); if (operations.length > limits.max_operations) exceeded('too many evidence operations');
@@ -250,11 +250,13 @@ export function parseCoreFrame(frame: JsonObject, limits: Limits = HARD_LIMITS):
     return { kind: 'effect_request', ordinal: Number(ordinal), effect: hash(frame.effect), operation: hash(frame.operation), arguments: args.map(item => decodeValue(item, budget)), raw: frame };
   }
   exact(frame, ['evidence', 'invocation_id', 'kind', 'protocol', 'result']);
-  const evidence = validateEvidence(frame.evidence, limits); const terminal = String(object(evidence.core).terminal);
+  // Core encodes evidence types and the result value against one frame budget.
+  const budget = new Budget(limits);
+  const evidence = validateEvidence(frame.evidence, limits, budget); const terminal = String(object(evidence.core).terminal);
   const result = object(frame.result);
   if (result.kind === 'ok') {
     exact(result, ['kind', 'value']); if (terminal !== 'ok') malformed('ok result has a non-ok terminal');
-    return { kind: 'outcome', ok: true, value: decodeValue(result.value, new Budget(limits)), terminal, evidence, diagnostics: [], raw: frame };
+    return { kind: 'outcome', ok: true, value: decodeValue(result.value, budget), terminal, evidence, diagnostics: [], raw: frame };
   }
   if (result.kind !== 'error') malformed('unknown result kind');
   exact(result, ['diagnostics', 'kind']); if (terminal === 'ok') malformed('error result has an ok terminal');

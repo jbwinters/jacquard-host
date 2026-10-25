@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 from jacquard_host.compat import CARRIER, PROTOCOL
 from jacquard_host.protocol.errors import LimitExceeded, MalformedFrame, OrderViolation
 from jacquard_host.protocol.limits import HARD_LIMITS, validate_limits
-from jacquard_host.protocol.values import Budget, Hash, Type, decode_value, encode_type, encode_value, parse_hash
+from jacquard_host.protocol.values import Budget, Hash, Type, decode_type, decode_value, encode_type, encode_value, parse_hash
 
 INVOCATION_ID = "0000000000000000"
 TARGET_KIND = "store-term-v0"
@@ -312,7 +312,8 @@ def _diagnostics(value: Any, limits: Mapping[str, int]) -> tuple[Diagnostic, ...
     return tuple(parse_diagnostic(item) for item in value)
 
 
-def _evidence(value: Any) -> dict[str, Any]:
+def _evidence(value: Any, budget: Budget) -> dict[str, Any]:
+    """Validate evidence; its interface types share the outcome frame's node budget."""
     fields = _exact(value, ("core", "host_observations"), "outcome evidence")
     core = _exact(
         fields["core"],
@@ -339,6 +340,10 @@ def _evidence(value: Any) -> dict[str, Any]:
             raise MalformedFrame(f"evidence {name} must be a strictly sorted set")
     if not isinstance(interface["parameters"], list) or not isinstance(interface["result"], dict):
         raise MalformedFrame("evidence interface parameters and result are malformed")
+    budget.check_count(len(interface["parameters"]), arguments=True, context="evidence parameters")
+    for item in interface["parameters"]:
+        decode_type(item, budget)
+    decode_type(interface["result"], budget)
     if not isinstance(capabilities["operations"], list):
         raise MalformedFrame("evidence capability operations must be an array")
     for item in capabilities["operations"]:
@@ -411,7 +416,9 @@ def parse_core_frame(frame: Any, *, limits: Mapping[str, int]) -> CoreFrame:
         fields = _exact(frame, ("evidence", "invocation_id", "kind", "protocol", "result"), "outcome")
         _protocol(fields)
         _invocation(fields)
-        evidence = _evidence(fields["evidence"])
+        # Core encodes evidence types and the result value against one frame budget.
+        budget = Budget(limits)
+        evidence = _evidence(fields["evidence"], budget)
         result = fields["result"]
         if not isinstance(result, dict):
             raise MalformedFrame("outcome result must be an object")
@@ -420,7 +427,7 @@ def parse_core_frame(frame: Any, *, limits: Mapping[str, int]) -> CoreFrame:
             _exact(result, ("kind", "value"), "ok result")
             if terminal != "ok":
                 raise MalformedFrame("an ok result must carry terminal ok")
-            return Outcome(True, decode_value(result["value"], Budget(limits)), (), terminal, evidence, fields)
+            return Outcome(True, decode_value(result["value"], budget), (), terminal, evidence, fields)
         if result.get("kind") == "error":
             _exact(result, ("diagnostics", "kind"), "error result")
             if terminal == "ok":

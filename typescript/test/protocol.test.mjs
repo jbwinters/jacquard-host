@@ -59,6 +59,12 @@ test('request identity types, ordinal order, and one response slot fail with the
   session.respondOk('pong');
   assert.throws(() => session.respondOk('again'), code('E1608'));
 });
+test('outcome evidence types and the result value share one frame node budget', async () => {
+  const kit = await loadKit(); const outcome = kit.transcripts[0].core_output[1];
+  const { parseCoreFrame } = await import('../dist/protocol.js');
+  parseCoreFrame(outcome, { ...HARD_LIMITS, max_value_nodes: 2 });
+  assert.throws(() => parseCoreFrame(outcome, { ...HARD_LIMITS, max_value_nodes: 1 }), code('E1602'));
+});
 test('all 21 pinned recordings replay through the independent Node carrier', async () => {
   const kit = await loadKit();
   for (const transcript of kit.transcripts) {

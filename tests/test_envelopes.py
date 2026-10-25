@@ -73,6 +73,22 @@ class HostFrameTest(unittest.TestCase):
             envelopes.cancel(1, "timeout", "completed")
 
 
+class OutcomeBudgetTest(unittest.TestCase):
+    def test_evidence_types_and_result_share_one_frame_budget(self) -> None:
+        # pure-success: one evidence result type (unit) plus one result value (unit).
+        outcome = load_kit().transcripts[0]["core_output"][1]
+        envelopes.parse_core_frame(outcome, limits=dict(HARD_LIMITS, max_value_nodes=2))
+        with self.assertRaises(LimitExceeded):
+            envelopes.parse_core_frame(outcome, limits=dict(HARD_LIMITS, max_value_nodes=1))
+
+    def test_malformed_evidence_types_are_refused(self) -> None:
+        outcome = load_kit().transcripts[0]["core_output"][1]
+        broken = {**outcome, "evidence": {**outcome["evidence"], "core": {**outcome["evidence"]["core"],
+                  "interface": {**outcome["evidence"]["core"]["interface"], "result": {"kind": "nominal"}}}}}
+        with self.assertRaises(MalformedFrame):
+            envelopes.parse_core_frame(broken, limits=HARD_LIMITS)
+
+
 class CoreFrameTest(unittest.TestCase):
     def test_core_hello_must_advertise_the_hard_limits(self) -> None:
         hello = KIT.transcript("pure-success")["core_output"][0]

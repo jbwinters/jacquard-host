@@ -2,6 +2,10 @@
 
 ## 0.2.0 — unreleased
 
+- All three adapters now count an outcome frame's evidence types and result
+  value against one `max_value_nodes` budget, as Core encodes it; previously the
+  result started a fresh budget. The Python adapter also validates the evidence's
+  interface types, as the TypeScript and Go adapters already did.
 - Add the Go SDK (`go/jacquard`): cached, verified preparation; native Go type
   mapping with registered records, enums, and unions; reflection-bound
   services with context cancellation; explicit batching; raw evidence and

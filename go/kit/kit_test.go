@@ -52,6 +52,18 @@ func TestPinnedKitLoads(t *testing.T) {
 	}
 }
 
+func TestOutcomeEvidenceAndResultShareOneFrameBudget(t *testing.T) {
+	outcome := load(t).Transcripts[0].CoreOutput[1]
+	limits := protocol.HardLimits
+	limits.MaxValueNodes = 2
+	if _, err := protocol.ParseCoreFrame(outcome, limits); err != nil {
+		t.Fatal(err)
+	}
+	limits.MaxValueNodes = 1
+	_, err := protocol.ParseCoreFrame(outcome, limits)
+	code(t, err, "E1602")
+}
+
 func TestSessionEnforcesOneInvocationAndLocalTerminalRefusal(t *testing.T) {
 	loaded := load(t)
 	pure := loaded.Transcripts[0]
