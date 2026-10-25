@@ -251,10 +251,6 @@ func proseDrift(expected, actual any, path string) []string {
 	return nil
 }
 
-// canonical compares decoded frames. Frames are at most max_json_depth deep,
-// so the 256 bound never refuses one (kit.ts uses 64 and would throw); prose
-// drift paths are reported in sorted key order, which matches the kit's
-// canonical (sorted) JSON.
 // jsString mirrors JavaScript's String() for the JSON scalars kit.ts coerces.
 func jsString(value any) string {
 	switch v := value.(type) {
@@ -276,6 +272,10 @@ func jsString(value any) string {
 	return fmt.Sprint(value)
 }
 
+// canonical compares decoded frames. Frames are at most max_json_depth deep,
+// so the 256 bound never refuses one (kit.ts uses 64 and would throw); prose
+// drift paths are reported in sorted key order, which matches the kit's
+// canonical (sorted) JSON.
 func canonical(value any) string {
 	text, err := protocol.Stringify(value, 256)
 	if err != nil {

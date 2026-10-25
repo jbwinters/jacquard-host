@@ -352,38 +352,59 @@ type flight struct {
 	err    error
 }
 
-// once runs work once per key. Concurrent callers wait for the same result
-// but stop waiting when their own context ends; a failed flight is retried
-// by the next caller.
-func (r *Runtime) once(ctx context.Context, key string, work func() ([]group, error)) ([]group, error) {
-	r.mu.Lock()
-	if f, ok := r.flights[key]; ok {
+// once runs work once per key. Concurrent callers share one run, and a
+// successful result stays cached. A caller stops waiting when its own context
+// ends; if the run it waited for failed (for example because the leading
+// caller was cancelled) while its own context is live, it runs or joins the
+// next attempt itself.
+func (r *Runtime) once(ctx context.Context, key string, work func(context.Context) ([]group, error)) ([]group, error) {
+	for {
+		r.mu.Lock()
+		f, waiting := r.flights[key]
+		if !waiting {
+			f = &flight{done: make(chan struct{})}
+			r.flights[key] = f
+		}
 		r.mu.Unlock()
+		if !waiting {
+			f.groups, f.err = run(ctx, work)
+			if f.err != nil {
+				r.mu.Lock()
+				delete(r.flights, key) // before done closes, so waiters retry afresh
+				r.mu.Unlock()
+			}
+			close(f.done)
+			return f.groups, f.err
+		}
 		select {
 		case <-f.done:
-			return f.groups, f.err
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+		if f.err == nil {
+			return f.groups, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
-	f := &flight{done: make(chan struct{})}
-	r.flights[key] = f
-	r.mu.Unlock()
-	f.groups, f.err = work()
-	if f.err != nil {
-		r.mu.Lock()
-		delete(r.flights, key)
-		r.mu.Unlock()
-	}
-	close(f.done)
-	return f.groups, f.err
+}
+
+// run calls work, turning a panic into an error so waiters are released.
+func run(ctx context.Context, work func(context.Context) ([]group, error)) (groups []group, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			groups, err = nil, &PreparationError{Message: fmt.Sprintf("Core discovery panicked: %v", recovered)}
+		}
+	}()
+	return work(ctx)
 }
 
 // checkVersion runs `--version` once per executable digest, even when
 // preparations start concurrently. Like the Python SDK, it accepts output
 // whose last field is the pinned version (for example "jacquard 0.3.0").
 func (r *Runtime) checkVersion(ctx context.Context, binary, binaryHash string) error {
-	_, err := r.once(ctx, "version:"+binaryHash, func() ([]group, error) {
+	_, err := r.once(ctx, "version:"+binaryHash, func(ctx context.Context) ([]group, error) {
 		version, err := r.command(ctx, binary, "--version")
 		if err != nil {
 			return nil, err
@@ -397,7 +418,7 @@ func (r *Runtime) checkVersion(ctx context.Context, binary, binaryHash string) e
 }
 
 func (r *Runtime) preludeGroups(ctx context.Context, binary, key string) ([]group, error) {
-	return r.once(ctx, "prelude:"+key, func() ([]group, error) {
+	return r.once(ctx, "prelude:"+key, func(ctx context.Context) ([]group, error) {
 		var groups []group
 		for _, name := range []string{"01-prim.jqd", "02-data.jqd", "19-audit.jqd"} {
 			output, err := r.command(ctx, binary, "hash", filepath.Join(r.prelude, name))
@@ -589,7 +610,9 @@ func (p *Program) lookup(service any, operation string) (reflect.Value, string) 
 	if ops, ok := service.(Operations); ok {
 		for _, key := range []string{operation, goName(operation)} {
 			if f, ok := ops[key]; ok {
-				fn = reflect.ValueOf(f)
+				if fn = reflect.ValueOf(f); !fn.IsValid() || (fn.Kind() == reflect.Func && fn.IsNil()) {
+					return reflect.Value{}, "is nil"
+				}
 				break
 			}
 		}

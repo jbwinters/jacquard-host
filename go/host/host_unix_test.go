@@ -50,6 +50,8 @@ func TestDeadlineDuringTheExitGraceIsReportedAsTheDeadline(t *testing.T) {
 	}
 	if runtime.GOOS == "linux" { // elsewhere the exited worker may already be reaped
 		descendantDies(t, "stderr-descendant", result.Stderr)
+	} else {
+		_ = syscall.Kill(descendantPID(t, "stderr-descendant", result.Stderr), syscall.SIGKILL)
 	}
 }
 
