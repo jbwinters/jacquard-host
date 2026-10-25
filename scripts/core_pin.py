@@ -400,8 +400,8 @@ def write_files(contents: dict[Path, bytes]) -> None:
     try:
         for path, data in contents.items():
             temporary = path.with_name(f".{path.name}.core-pin")
-            temporary.write_bytes(data)
             staged.append((temporary, path))
+            temporary.write_bytes(data)
         for temporary, path in staged:
             temporary.replace(path)
     except BaseException:
@@ -413,11 +413,21 @@ def write_files(contents: dict[Path, bytes]) -> None:
 
 
 def restore(originals: dict[Path, bytes | None]) -> None:
+    """Restore every changed file; one failure does not stop the others."""
+    failures = []
     for path, data in originals.items():
-        if data is None:
-            path.unlink(missing_ok=True)
-        else:
-            path.write_bytes(data)
+        try:
+            current = path.read_bytes() if path.exists() else None
+            if current == data:
+                continue
+            if data is None:
+                path.unlink()
+            else:
+                path.write_bytes(data)
+        except OSError as error:
+            failures.append(f"{path}: {error}")
+    if failures:
+        raise PinError("could not restore after a failed update; run check and repair: " + "; ".join(failures))
 
 
 def main(argv: list[str] | None = None) -> int:

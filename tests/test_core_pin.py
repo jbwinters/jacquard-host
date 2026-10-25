@@ -226,6 +226,26 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual({name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}, before)
         self.assertEqual([path.name for path in self.kit.rglob(".*.core-pin")], [])
 
+    def test_restore_skips_unchanged_files_and_attempts_every_file(self) -> None:
+        unchanged, changed, created = self.kit / "vectors.json", self.kit / "kit/kit.json", self.kit / "new.txt"
+        originals = {unchanged: unchanged.read_bytes(), changed: changed.read_bytes(), created: None}
+        changed.write_bytes(b"changed")
+        created.write_bytes(b"created")
+        real_write = Path.write_bytes
+        def refuse_unchanged(path, data):
+            if path == unchanged:
+                raise PermissionError("read-only")
+            return real_write(path, data)
+        with patch.object(Path, "write_bytes", refuse_unchanged):
+            core_pin.restore(originals)
+        self.assertEqual(changed.read_bytes(), originals[changed])
+        self.assertFalse(created.exists())
+        changed.write_bytes(b"changed again")
+        unchanged.write_bytes(b"also changed")
+        with patch.object(Path, "write_bytes", refuse_unchanged), self.assertRaisesRegex(core_pin.PinError, "could not restore"):
+            core_pin.restore(originals)
+        self.assertEqual(changed.read_bytes(), originals[changed])
+
     def test_protocol_change_mismatched_version_or_missing_linux_asset_is_refused(self) -> None:
         linux = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
         cases = [({"core_version": "9.9.9", "pending_decisions": [{"name": 'x"); import os; ("'}]}, linux, "plain lowercase"),
