@@ -46,7 +46,7 @@ func MainIfRequested() {
 	case "truncated":
 		_, _ = os.Stdout.Write([]byte{0, 0, 0})
 		os.Exit(0)
-	case "stderr-descendant":
+	case "stderr-descendant", "stderr-descendant-nonzero":
 		// Answer normally, but leave a descendant holding only stderr.
 		child := exec.Command("sleep", "30")
 		child.Stderr = os.Stderr
@@ -57,6 +57,9 @@ func MainIfRequested() {
 		loaded, err := kit.Load()
 		if err != nil {
 			os.Exit(3)
+		}
+		if mode == "stderr-descendant-nonzero" {
+			os.Exit(fault(loaded, "nonzero"))
 		}
 		os.Exit(fault(loaded, "ok"))
 	case "descendant":

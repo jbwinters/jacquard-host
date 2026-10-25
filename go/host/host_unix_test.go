@@ -37,9 +37,14 @@ func TestDeadlineStopsDescendantsHoldingThePipes(t *testing.T) {
 }
 
 func TestDescendantHoldingStderrAfterExitFailsClosed(t *testing.T) {
-	result := faulty(t, "stderr-descendant", 5*time.Second, nil).Invoke(context.Background(), identities(t)["kit-ready"], unit, nil, nil)
-	if result.OK() || result.Kind != "carrier_loss" || result.Code() != "E1611" {
-		t.Fatalf("kind %s: %s", result.Kind, result.Message())
+	for mode, status := range map[string]int{"stderr-descendant": 0, "stderr-descendant-nonzero": 74} {
+		result := faulty(t, mode, 5*time.Second, nil).Invoke(context.Background(), identities(t)["kit-ready"], unit, nil, nil)
+		if result.OK() || result.Kind != "carrier_loss" || result.Code() != "E1611" {
+			t.Fatalf("%s: kind %s: %s", mode, result.Kind, result.Message())
+		}
+		if result.ExitStatus == nil || *result.ExitStatus != status {
+			t.Fatalf("%s: exit status %v", mode, result.ExitStatus)
+		}
+		descendantDies(t, result.Stderr)
 	}
-	descendantDies(t, result.Stderr)
 }

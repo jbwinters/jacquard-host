@@ -243,12 +243,16 @@ func (w *Worker) reap() {
 	}
 	w.waited = true
 	w.mu.Unlock()
+	started := time.Now()
 	err := w.cmd.Wait()
-	if errors.Is(err, exec.ErrWaitDelay) {
-		// The worker exited but a descendant still holds its output pipes.
+	// ErrWaitDelay means a descendant still held the output pipes after a
+	// successful exit: fail closed. An unsuccessful exit status masks that
+	// error (the run already fails), so a wait that lasted WaitDelay also
+	// stops any remaining group members.
+	if held := errors.Is(err, exec.ErrWaitDelay); held || time.Since(started) >= w.cmd.WaitDelay {
 		killTree(w.cmd.Process)
 		w.mu.Lock()
-		if w.fault == nil {
+		if held && w.fault == nil {
 			w.fault = &Loss{Message: "worker descendants kept its pipes open after exit"}
 		}
 		w.mu.Unlock()
