@@ -77,8 +77,8 @@ this entry covers the repository's whole history.
   router, and renderer written in Jacquard; one named, host-owned SQLite study
   persistence operation; the synthetic trial assembled end to end; and
   integration evidence, an authority inventory, measurements of serial
-  execution with the C4 concurrency requirements, and the Core requirements
-  report.
+  execution with the C4 concurrency requirements, the Core requirements report,
+  and the record of Core's published host-boundary evidence pack.
 
 The protocol remains experimental v0. Core is installed separately; automatic
 binding generation still awaits Core's structured host interface exporter.
