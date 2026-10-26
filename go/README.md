@@ -27,7 +27,9 @@ Order total 35: shipping 5
 Order total 75: shipping 0
 ```
 
-In another module, `go get github.com/jbwinters/jacquard-host/go@latest`.
+In another module, `go get github.com/jbwinters/jacquard-host/go@v0.2.0`. The
+module lives in the repository's `go/` directory, so its versions are the
+`go/vX.Y.Z` tags.
 
 ## Call a checked function
 

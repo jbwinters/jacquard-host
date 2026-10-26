@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-10-25
+
+The first jacquard-host release: Python, TypeScript, and Go adapters and SDKs
+for Core's experimental `jacquard-host-v0` protocol, pinned to
+`jacquard-core-0.3.0`. Tags: `jacquard-host-0.2.0` (repository and Python/npm
+assets) and `go/v0.2.0` (Go module). Packages are attached to the
+[GitHub release](https://github.com/jbwinters/jacquard-host/releases/tag/jacquard-host-0.2.0); nothing is published to a package registry.
 
 - `scripts/core_pin.py` validates the repository and kit paths in the pin,
   refuses malformed kit decisions and non-release tags before any network
