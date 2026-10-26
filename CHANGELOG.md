@@ -2,6 +2,12 @@
 
 ## 0.2.0 — unreleased
 
+- `scripts/core_pin.py` validates the repository and kit paths in the pin,
+  refuses malformed kit decisions and non-release tags before any network
+  fetch, and regenerates files through staged renames. A failed adoption
+  restores the pin, kit, and generated files and raises the original error; any
+  file it cannot restore or temporary file it cannot remove is reported as a
+  warning when it happens.
 - Go SDK: a constructor may map to a record or an enum, not both. `nil` at a
   checked non-optional data type, and a registered empty record at a unit
   position, are refused or kept distinct locally. An unsupported handler

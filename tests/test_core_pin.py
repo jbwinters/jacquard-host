@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
 import json
 from pathlib import Path
 import shlex
 import shutil
+import sys
 import subprocess
 import tarfile
 import tempfile
@@ -245,14 +247,17 @@ class UpdateTest(unittest.TestCase):
                 raise PermissionError("read-only")
             return real_write(path, data)
         with patch.object(Path, "write_bytes", refuse_unchanged):
-            core_pin.restore(originals)
+            self.assertTrue(core_pin.restore(originals))
         self.assertEqual(changed.read_bytes(), originals[changed])
         self.assertFalse(created.exists())
         changed.write_bytes(b"changed again")
         unchanged.write_bytes(b"also changed")
-        with patch.object(Path, "write_bytes", refuse_unchanged), self.assertRaisesRegex(core_pin.PinError, "could not restore"):
-            core_pin.restore(originals)
+        warnings = io.StringIO()
+        with patch.object(Path, "write_bytes", refuse_unchanged), contextlib.redirect_stderr(warnings):
+            self.assertFalse(core_pin.restore(originals))
         self.assertEqual(changed.read_bytes(), originals[changed])
+        self.assertIn(f"could not restore {unchanged}", warnings.getvalue())
+        self.assertIn("restore is incomplete", warnings.getvalue())
 
     def test_protocol_change_mismatched_version_or_missing_linux_asset_is_refused(self) -> None:
         linux = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
@@ -267,6 +272,240 @@ class UpdateTest(unittest.TestCase):
             if message == "protocol change":
                 self.fetched.assert_not_called()
         self.assertEqual({name: (self.kit / name).read_bytes() for name in core_pin.KIT_FILES}, before)
+
+
+class HardeningTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.pin = core_pin.load()
+
+    def test_maintainer_fields_are_validated(self) -> None:
+        for path, value in ((("repository",), "owner/../name"), (("repository",), "no-slash"),
+                            (("kit", "path"), "../outside"), (("kit", "path"), "/absolute"),
+                            (("kit", "evidence"), "docs/./release"), (("kit", "evidence"), "a b")):
+            broken = json.loads(json.dumps(self.pin))
+            target = broken
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            with self.subTest(field=path, value=value), self.assertRaises(core_pin.PinError):
+                core_pin.validate(broken)
+
+    def test_malformed_decisions_and_tags_are_refused_before_any_fetch(self) -> None:
+        for entries in ("x", ["name"], [{"name": 3}]):
+            with self.subTest(entries=entries), self.assertRaisesRegex(core_pin.PinError, "pending_decisions"):
+                core_pin.decision_names({"pending_decisions": entries})
+        with patch.object(core_pin, "tag_commit", side_effect=AssertionError("fetched")) as fetched:
+            for tag in ("jacquard-core-latest", "jacquard-core-1.2", "v1.2.3", "jacquard-core-1.2.3; rm"):
+                with self.subTest(tag=tag), self.assertRaisesRegex(core_pin.PinError, "release tags"):
+                    core_pin.update(self.pin, tag, None)
+            fetched.assert_not_called()
+
+    def copy(self) -> tuple[Path, Path, tuple[Path, ...]]:
+        root = Path(tempfile.mkdtemp(prefix="core-adopt-"))
+        self.addCleanup(shutil.rmtree, root)
+        for name in [*core_pin.GENERATED, *core_pin.BLOCKS]:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO / name, root / name)
+        kit_dirs = tuple(root / directory.relative_to(REPO) for directory in core_pin.KIT_DIRS)
+        for source, target in zip(core_pin.KIT_DIRS, kit_dirs):
+            shutil.copytree(source, target)
+        pin_path = root / "core-pin.json"
+        shutil.copyfile(core_pin.PIN, pin_path)
+        return root, pin_path, kit_dirs
+
+    def snapshot(self, root: Path) -> dict[str, bytes]:
+        return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+    def adopt(self, root: Path, pin_path: Path, kit_dirs: tuple[Path, ...]) -> None:
+        files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
+        manifest = json.loads(files["kit/kit.json"])
+        manifest["core_version"] = "9.9.9"
+        files["kit/kit.json"] = json.dumps(manifest).encode()
+        assets = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
+        with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
+             patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
+             patch.object(core_pin, "release_assets", return_value=assets):
+            core_pin.adopt(self.pin, "jacquard-core-9.9.9", None, root=root, pin_path=pin_path, kit_dirs=kit_dirs)
+
+    def test_adoption_succeeds_end_to_end(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        self.adopt(root, pin_path, kit_dirs)
+        adopted = core_pin.load(pin_path)
+        self.assertEqual(adopted["release"]["tag"], "jacquard-core-9.9.9")
+        self.assertEqual(core_pin.problems(adopted, root), [])
+
+    def test_a_failed_sync_restores_pin_kit_and_generated_files(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        with patch.object(core_pin, "sync", side_effect=OSError("synthetic sync failure")), \
+             self.assertRaisesRegex(OSError, "synthetic sync failure"):
+            self.adopt(root, pin_path, kit_dirs)
+        self.assertEqual(self.snapshot(root), before)
+
+    def test_a_failed_restore_still_raises_the_original_failure(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        warnings = io.StringIO()
+        with patch.object(core_pin, "sync", side_effect=OSError("synthetic sync failure")), \
+             patch.object(core_pin, "restore", return_value=False), contextlib.redirect_stderr(warnings), \
+             self.assertRaisesRegex(OSError, "synthetic sync failure"):
+            self.adopt(root, pin_path, kit_dirs)
+
+    def rename_fails(self, on_call: int):
+        real_replace, calls = Path.replace, []
+        def flaky(path, target):
+            calls.append(path)
+            if len(calls) == on_call:
+                raise OSError("original rename failure")
+            return real_replace(path, target)
+        return patch.object(Path, "replace", flaky)
+
+    def test_a_failed_rename_inside_sync_restores_everything(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        # Renames: 10 kit files (two copies), the pin, then generated files; fail the second generated one.
+        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
+             self.assertRaisesRegex(OSError, "original rename failure"):
+            self.adopt(root, pin_path, kit_dirs)
+        self.assertEqual(self.snapshot(root), before)
+        self.assertEqual([path for path in root.rglob("*.core-pin")], [])
+
+    def run_faults(self, rename_call: int, deny_restore: bool, deny_cleanup: bool, temp_write_call: int = 0):
+        """Run a real adopt() with injected faults; return the error and the warnings."""
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        # A file this fault's rollback must restore: compat.py has been renamed
+        # before the failing generated rename; a failed temporary write leaves
+        # no generated file renamed, but the pin and kit already are.
+        denied = root / "src/jacquard_host/compat.py" if temp_write_call == 0 else pin_path
+        real_write, real_unlink, real_replace = Path.write_bytes, Path.unlink, Path.replace
+        renames, temp_writes = [], []
+        def write(path, data):
+            if path.name.endswith(".core-pin"):
+                temp_writes.append(path)
+                if len(temp_writes) == temp_write_call:
+                    real_write(path, b"partial")
+                    raise OSError("original temp write failure")
+            elif deny_restore and path == denied:
+                raise PermissionError("restore denied")
+            return real_write(path, data)
+        def unlink(path, missing_ok=False):
+            if deny_cleanup and path.name.endswith(".core-pin") and path.exists():
+                raise PermissionError("temporary cleanup denied")
+            return real_unlink(path, missing_ok=missing_ok)
+        def replace(path, target):
+            renames.append(path)
+            if len(renames) == rename_call:
+                raise OSError("original rename failure")
+            return real_replace(path, target)
+        warnings = io.StringIO()
+        error = None
+        with patch.object(Path, "write_bytes", write), patch.object(Path, "unlink", unlink), \
+             patch.object(Path, "replace", replace), contextlib.redirect_stderr(warnings):
+            try:
+                self.adopt(root, pin_path, kit_dirs)
+            except BaseException as caught:
+                error = caught
+        after = self.snapshot(root)
+        leftovers = [key for key in after if key.endswith(".core-pin")]
+        restored = {key: value for key, value in after.items() if not key.endswith(".core-pin")} == before
+        return error, warnings.getvalue(), restored, leftovers
+
+    def test_every_rollback_fault_combination_reports_each_failure(self) -> None:
+        kit_renames = 2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS)
+        # Fail the third generated rename (compat.py and compat.ts are already
+        # in place), or the second generated temporary write.
+        faults = {"rename": dict(rename_call=kit_renames + 1 + 3), "temp write": dict(rename_call=0, temp_write_call=kit_renames + 1 + 2)}
+        for name, fault in faults.items():
+            for deny_restore in (False, True):
+                for deny_cleanup in (False, True):
+                    with self.subTest(fault=name, deny_restore=deny_restore, deny_cleanup=deny_cleanup):
+                        error, warnings, restored, leftovers = self.run_faults(deny_restore=deny_restore, deny_cleanup=deny_cleanup, **fault)
+                        self.assertIsInstance(error, OSError)
+                        self.assertEqual(str(error), f"original {name} failure")
+                        if deny_restore:
+                            self.assertIn("could not restore", warnings)
+                            self.assertIn("restore is incomplete", warnings)
+                            self.assertFalse(restored)
+                        else:
+                            self.assertTrue(restored, warnings)
+                            self.assertNotIn("could not restore", warnings)
+                        if deny_cleanup:
+                            self.assertIn("could not remove temporary file", warnings)
+                            self.assertTrue(leftovers)
+                        else:
+                            self.assertEqual(leftovers, [])
+                            self.assertNotIn("could not remove", warnings)
+
+    def test_a_failing_warning_stream_does_not_interrupt_the_rollback(self) -> None:
+        class FullLog(io.StringIO):
+            def write(self, text):
+                raise OSError("no space left on device")
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        real_write, denied = Path.write_bytes, []
+        def deny_pin_once(path, data):
+            if path == pin_path and not denied:
+                denied.append(path)
+                raise PermissionError("restore denied")
+            return real_write(path, data)
+        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
+             patch.object(Path, "write_bytes", deny_pin_once), patch.object(sys, "stderr", FullLog()), \
+             self.assertRaisesRegex(OSError, "original rename failure"):
+            self.adopt(root, pin_path, kit_dirs)
+        after = self.snapshot(root)
+        # Every file except the pin, whose restore was denied, is restored.
+        self.assertEqual({k: v for k, v in after.items() if k != "core-pin.json"},
+                         {k: v for k, v in before.items() if k != "core-pin.json"})
+
+    def test_leftover_temporaries_after_success_only_warn(self) -> None:
+        root, pin_path, kit_dirs = self.copy()
+        real_unlink = Path.unlink
+        def unlink(path, missing_ok=False):
+            if path.name.endswith(".core-pin"):
+                raise PermissionError("temporary cleanup denied")
+            return real_unlink(path, missing_ok=missing_ok)
+        warnings = io.StringIO()
+        with patch.object(Path, "unlink", unlink), contextlib.redirect_stderr(warnings):
+            self.adopt(root, pin_path, kit_dirs)
+        self.assertEqual(core_pin.load(pin_path)["release"]["tag"], "jacquard-core-9.9.9")
+        self.assertIn("could not remove temporary file", warnings.getvalue())
+
+    def test_an_interrupt_is_raised_unchanged_after_rollback(self) -> None:
+        target = Path(tempfile.mkdtemp(prefix="core-interrupt-"))
+        self.addCleanup(shutil.rmtree, target)
+        with patch.object(Path, "replace", side_effect=KeyboardInterrupt()), self.assertRaises(KeyboardInterrupt):
+            core_pin.write_files({target / "file": b"x"})
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_malformed_decisions_are_refused_by_their_callers(self) -> None:
+        with self.assertRaisesRegex(core_pin.PinError, "pending_decisions"):
+            core_pin.manifest_problems({"protocol": "p", "carrier": "c", "core_version": "v", "pending_decisions": "x"}, self.pin)
+        files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
+        manifest = json.loads(files["kit/kit.json"])
+        manifest.update(core_version="9.9.9", pending_decisions=[{"name": 3}])
+        files["kit/kit.json"] = json.dumps(manifest).encode()
+        with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
+             patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
+             patch.object(core_pin, "release_assets", side_effect=AssertionError("fetched")), \
+             self.assertRaisesRegex(core_pin.PinError, "pending_decisions"):
+            core_pin.update(self.pin, "jacquard-core-9.9.9", None, ())
+
+    def test_a_partial_staging_write_leaves_originals_and_no_temporaries(self) -> None:
+        root, _, kit_dirs = self.copy()
+        targets = {kit_dirs[0] / name: b"changed" for name in core_pin.KIT_FILES}
+        before = {path: path.read_bytes() for path in targets}
+        real_write, calls = Path.write_bytes, []
+        def flaky(path, data):
+            if path.name.endswith(".core-pin"):
+                calls.append(path)
+                if len(calls) == 2:
+                    path.write_text("partial")
+                    raise OSError("disk full")
+            return real_write(path, data)
+        with patch.object(Path, "write_bytes", flaky), self.assertRaisesRegex(OSError, "disk full"):
+            core_pin.write_files(targets)
+        self.assertEqual({path: path.read_bytes() for path in targets}, before)
+        self.assertEqual([path for path in root.rglob("*.core-pin")], [])
 
 
 if __name__ == "__main__":
