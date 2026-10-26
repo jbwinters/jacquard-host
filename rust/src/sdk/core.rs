@@ -5,11 +5,12 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::carrier::{exited_unreaped, isolate, kill_group, kill_tree};
+use crate::carrier::{Pipe, exited_unreaped, isolate, kill_group, kill_tree};
 use crate::json::{Json, stringify};
 use crate::sha256::hex_digest;
 
@@ -42,8 +43,11 @@ fn bounded_read(mut source: impl Read, limit: usize) -> (Vec<u8>, bool) {
 }
 
 /// Runs one Core subcommand with the prelude set, returning its stdout. The
-/// command runs in its own process group, which is killed when it exits or
-/// times out.
+/// command runs in its own process group, which is killed when it times out,
+/// and on Linux also when it exits. Output is read through stoppable pipes:
+/// once the command has exited and its output stays open for the grace
+/// period (a descendant that left the group still holds it), the readers stop
+/// and the pipes close.
 pub(crate) fn run(binary: &Path, prelude: &Path, arguments: &[&OsStr]) -> Result<String, Error> {
     let name = arguments.first().map_or_else(String::new, |argument| argument.to_string_lossy().into_owned());
     let failed = |detail: String| Error::preparation(format!("Core {name} failed: {detail}"));
@@ -51,11 +55,12 @@ pub(crate) fn run(binary: &Path, prelude: &Path, arguments: &[&OsStr]) -> Result
     command.args(arguments).env("JACQUARD_PRELUDE", prelude).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate(&mut command);
     let mut child = command.spawn().map_err(|error| failed(error.to_string()))?;
-    let (stdout, stderr) = (child.stdout.take().expect("piped stdout"), child.stderr.take().expect("piped stderr"));
-    let (out_tx, out_rx) = mpsc::channel();
-    let (err_tx, err_rx) = mpsc::channel();
-    thread::spawn(move || out_tx.send(bounded_read(stdout, STDOUT_LIMIT)));
-    thread::spawn(move || err_tx.send(bounded_read(stderr, STDERR_LIMIT)));
+    let stop = Arc::new(AtomicBool::new(false));
+    let readers = Readers {
+        stop: stop.clone(),
+        stdout: Some(spawn_reader(Pipe::new(child.stdout.take().expect("piped stdout"), &stop, &stop), STDOUT_LIMIT)),
+        stderr: Some(spawn_reader(Pipe::new(child.stderr.take().expect("piped stderr"), &stop, &stop), STDERR_LIMIT)),
+    };
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     let status = loop {
         match exited_unreaped(child.id()) {
@@ -79,12 +84,8 @@ pub(crate) fn run(binary: &Path, prelude: &Path, arguments: &[&OsStr]) -> Result
         thread::sleep(Duration::from_millis(10));
     };
     let status = status.map_err(|error| failed(error.to_string()))?;
-    // Output closes when the group is gone; elsewhere a descendant that kept
-    // a pipe open is abandoned after a grace period.
-    let grace = Duration::from_secs(1);
-    let ((stdout, overflow), (stderr, _)) = match (out_rx.recv_timeout(grace), err_rx.recv_timeout(grace)) {
-        (Ok(out), Ok(err)) => (out, err),
-        _ => return Err(failed("its output did not close".into())),
+    let Some(((stdout, overflow), (stderr, _))) = readers.finish(Instant::now() + OUTPUT_GRACE) else {
+        return Err(failed("its output did not close".into()));
     };
     if !status.success() {
         let detail = String::from_utf8_lossy(&stderr).trim().to_owned();
@@ -94,6 +95,53 @@ pub(crate) fn run(binary: &Path, prelude: &Path, arguments: &[&OsStr]) -> Result
         return Err(Error::preparation(format!("Core {name} output exceeds 8 MiB")));
     }
     String::from_utf8(stdout).map_err(|_| Error::preparation(format!("Core {name} output is not UTF-8")))
+}
+
+/// How long output may stay open after the command exits.
+const OUTPUT_GRACE: Duration = Duration::from_secs(1);
+
+type Output = (Vec<u8>, bool);
+
+fn spawn_reader<R: Send + 'static>(source: Pipe<R>, limit: usize) -> thread::JoinHandle<Output>
+where
+    Pipe<R>: Read,
+{
+    thread::spawn(move || bounded_read(source, limit))
+}
+
+/// The two output readers. Dropping them stops and joins them on Unix,
+/// where their reads are interruptible; elsewhere a reader blocked on a
+/// pipe a descendant holds is left to finish on its own.
+struct Readers {
+    stop: Arc<AtomicBool>,
+    stdout: Option<thread::JoinHandle<Output>>,
+    stderr: Option<thread::JoinHandle<Output>>,
+}
+
+impl Readers {
+    /// Both outputs, if both close before `deadline`.
+    fn finish(mut self, deadline: Instant) -> Option<(Output, Output)> {
+        let done = |reader: &Option<thread::JoinHandle<Output>>| reader.as_ref().is_none_or(thread::JoinHandle::is_finished);
+        while !(done(&self.stdout) && done(&self.stderr)) {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let join = |reader: Option<thread::JoinHandle<Output>>| reader.and_then(|reader| reader.join().ok());
+        Some((join(self.stdout.take())?, join(self.stderr.take())?))
+    }
+}
+
+impl Drop for Readers {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for reader in [self.stdout.take(), self.stderr.take()].into_iter().flatten() {
+            if cfg!(unix) || reader.is_finished() {
+                let _ = reader.join();
+            }
+        }
+    }
 }
 
 /// The SHA-256 digest of a file's bytes.
@@ -150,8 +198,14 @@ pub(crate) fn executable(binary: &str) -> Result<PathBuf, Error> {
     let candidate = if binary.contains(std::path::MAIN_SEPARATOR) || binary.contains('/') {
         Some(PathBuf::from(binary))
     } else {
-        std::env::var_os("PATH")
-            .and_then(|paths| std::env::split_paths(&paths).map(|directory| directory.join(binary)).find(|path| is_executable(path)))
+        // Like Go's exec.LookPath, relative entries (including empty ones,
+        // which mean the current directory) are not searched.
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .filter(|directory| directory.is_absolute())
+                .map(|directory| directory.join(binary))
+                .find(|path| is_executable(path))
+        })
     };
     let candidate = candidate.filter(|path| is_executable(path)).ok_or_else(missing)?;
     candidate.canonicalize().map_err(|error| Error::preparation(format!("cannot resolve Core executable {binary}: {error}")))

@@ -78,6 +78,9 @@ fn live_all_four_projects_run_as_commands() {
         other => panic!("publish failure: {other:?}"),
     }
     assert!(output.contains("\"pendingDeliveries\":1"), "{output}");
+    // A failed explicit delivery prints no count.
+    let (output, result) = command(&["--workdir", recovery, "--fault", "publish-failed", "--deliver-pending", "fulfillment"]);
+    assert!(matches!(result, Err(Failure::Other(_))) && !output.contains("delivered"), "{output}");
     for expected in ["{\"delivered\":1}", "{\"delivered\":0}"] {
         let (output, result) = command(&["--workdir", recovery, "--deliver-pending", "fulfillment"]);
         assert!(result.is_ok() && output.contains(expected), "deliver pending: {result:?} {output}");
@@ -108,4 +111,33 @@ fn live_partial_completion_faults_recover_explicitly_across_restart() {
         let summary = output.trim().lines().last().unwrap();
         assert_eq!(decode(summary.as_bytes(), 4).unwrap().as_object().unwrap()["deliveries"], Json::Int(1), "{fault}");
     }
+}
+
+/// The example binary `cargo test` builds beside this test's binary.
+fn example_binary() -> PathBuf {
+    let deps = std::env::current_exe().unwrap().parent().unwrap().to_owned();
+    deps.parent().unwrap().join("examples").join(format!("jacquard-examples{}", std::env::consts::EXE_SUFFIX))
+}
+
+#[test]
+fn the_command_exits_2_for_usage_errors() {
+    let binary = example_binary();
+    assert!(binary.exists(), "{} was not built", binary.display());
+    for arguments in [&["unknown"][..], &["--fault", "nope", "fulfillment"], &["--workdir"], &[]] {
+        let output = std::process::Command::new(&binary).args(arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(!output.stderr.is_empty(), "{arguments:?}: no message");
+    }
+}
+
+#[test]
+fn live_the_command_exits_1_for_a_jacquard_failure() {
+    let Some(root) = scratch() else { return };
+    let output = std::process::Command::new(example_binary())
+        .args(["--workdir", root.0.to_str().unwrap(), "--fault", "publish-failed", "fulfillment"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E1613"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"pendingDeliveries\":1"));
 }

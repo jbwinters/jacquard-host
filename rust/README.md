@@ -84,12 +84,18 @@ runs Core's `run` command, without service bindings, to populate the store.
 
 `RuntimeOptions` defaults to `$JACQUARD_BIN` and `$JACQUARD_PRELUDE`. The
 runtime refuses a Core whose `--version` differs from the pinned release. Each
-Core command must finish within 30 seconds; it runs in its own process group,
-which is stopped when the command exits or times out.
+Core command must finish within 30 seconds. It runs in its own process group,
+which is stopped when the command times out, and on Linux also when it exits.
+If its output stays open for a second after it exits (a descendant that left
+the group holds it), preparation fails, and the host stops reading and closes
+the pipes; the descendant keeps running.
 
 Arguments are a tuple, such as `(35,)` or `(&policy, &rows)`, or a slice of
 `&dyn Encode`. `call` decodes the result into the type you ask for; `invoke`
 keeps the whole `Invocation`. The `_with` variants take a `Cancel`.
+`Invocation::save` writes the frames and evidence, including argument and
+result values; a new file is created owner-only on Unix, and an existing
+file keeps its permissions.
 
 ## Data
 
@@ -218,8 +224,10 @@ retries nothing. Its `BatchError` names the failed batch and keeps the decoded
 values of the batches that completed.
 
 A request argument that does not decode into a closure's parameter type, or a
-wrong argument count, is reported as an outside failure, which means nothing
-was done. So is a result that cannot be encoded.
+wrong argument count, is reported as an outside failure, and that closure does
+not run. A result that cannot be encoded is also reported as an outside
+failure, but only after the closure returned, so any action it took has
+happened. Neither says anything about earlier operations in the invocation.
 
 ## Run the projects
 

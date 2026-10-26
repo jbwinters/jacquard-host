@@ -328,15 +328,20 @@ impl<'a> Encoder<'a> {
     }
 
     /// A constructor value by public name, such as `"Job"` or `"job"`.
+    /// Bool, List, and Option constructors are refused: use the native
+    /// `bool`, `Vec`, and `Option` forms.
     pub fn constructor(&self, name: &str, fields: Vec<Value>) -> Result<Value, InvalidArgument> {
+        if BUILTINS.contains(&display_to_store(name).as_str()) {
+            return Err(self.invalid(format!("use the native form of builtin constructor {name}")));
+        }
+        self.builtin(name, fields)
+    }
+
+    fn builtin(&self, name: &str, fields: Vec<Value>) -> Result<Value, InvalidArgument> {
         match self.data.constructor_id(name) {
             Some(id) => Ok(Value::Constructor(id.clone(), fields)),
             None => Err(self.invalid(format!("unknown constructor {name}"))),
         }
-    }
-
-    fn builtin(&self, name: &str, fields: Vec<Value>) -> Result<Value, InvalidArgument> {
-        self.constructor(name, fields)
     }
 
     fn list<T: Encode>(&self, items: &[T]) -> Result<Value, InvalidArgument> {
@@ -632,9 +637,6 @@ impl Encode for Dynamic {
             Dynamic::List(items) => cx.list(items),
             Dynamic::Option(inner) => cx.option(inner.as_deref()),
             Dynamic::Variant(name, fields) => {
-                if BUILTINS.contains(&display_to_store(name).as_str()) {
-                    return Err(cx.invalid(format!("use the native form of builtin constructor {name}")));
-                }
                 let fields = fields.iter().enumerate().map(|(index, field)| field.encode(&cx.child(format_args!(".{index}"), 2)?));
                 let fields = fields.collect::<Result<_, _>>()?;
                 cx.constructor(name, fields)

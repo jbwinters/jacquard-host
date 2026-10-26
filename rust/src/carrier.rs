@@ -576,7 +576,7 @@ fn read_frame(stdout: &mut impl Read, limits: &Limits) -> FrameResult {
 /// readiness with `poll` in short slices and gives up once the worker is
 /// disposed or this pipe is stopped, so a descendant holding the other end
 /// cannot pin the thread or keep receiving data.
-struct Pipe<T> {
+pub(crate) struct Pipe<T> {
     inner: T,
     #[cfg_attr(not(unix), allow(dead_code))]
     stops: [Arc<AtomicBool>; 2],
@@ -584,7 +584,7 @@ struct Pipe<T> {
 }
 
 impl<T> Pipe<T> {
-    fn new(inner: T, all: &Arc<AtomicBool>, own: &Arc<AtomicBool>) -> Pipe<T> {
+    pub(crate) fn new(inner: T, all: &Arc<AtomicBool>, own: &Arc<AtomicBool>) -> Pipe<T> {
         Pipe { inner, stops: [Arc::clone(all), Arc::clone(own)], gate: None }
     }
 

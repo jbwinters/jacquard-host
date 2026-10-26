@@ -349,8 +349,15 @@ impl Metadata {
 impl Runtime {
     /// Validates options; Core does not run yet.
     pub fn new(options: RuntimeOptions) -> Result<Runtime, Error> {
-        let binary = options.binary.or_else(|| std::env::var("JACQUARD_BIN").ok().filter(|value| !value.is_empty()));
-        let prelude = options.prelude.or_else(|| std::env::var_os("JACQUARD_PRELUDE").filter(|value| !value.is_empty()).map(PathBuf::from));
+        // Like the Go SDK, an empty option means unset.
+        let binary = options
+            .binary
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var("JACQUARD_BIN").ok().filter(|value| !value.is_empty()));
+        let prelude = options
+            .prelude
+            .filter(|value| !value.as_os_str().is_empty())
+            .or_else(|| std::env::var_os("JACQUARD_PRELUDE").filter(|value| !value.is_empty()).map(PathBuf::from));
         let Some(prelude) = prelude else {
             return Err(Error::binding(
                 "set JACQUARD_PRELUDE or RuntimeOptions::prelude; Core and prelude must match the compatibility pin",

@@ -17,7 +17,9 @@
   keeps each invocation's raw evidence. `map_batches` runs explicit batches.
   The four example projects run as `cargo run --example jacquard-examples`.
   The low-level host gains `From<E: Error> for HandlerError`, so `?` in a
-  handler reports completion unknown.
+  handler reports completion unknown. As a consequence `HandlerError` cannot
+  implement `std::error::Error`, and a downstream `From` impl for a type that
+  implements `Error` conflicts with it.
 
 ## 0.2.0 — 2026-10-25
 

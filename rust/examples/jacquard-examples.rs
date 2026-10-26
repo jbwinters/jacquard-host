@@ -78,6 +78,13 @@ fn int(object: &Object, key: &str) -> Result<i64, Failure> {
     field(object, key)?.as_int().ok_or_else(|| other(format!("input: {key} must be an integer")))
 }
 
+fn boolean(object: &Object, key: &str) -> Result<bool, Failure> {
+    match field(object, key)? {
+        Json::Bool(value) => Ok(*value),
+        _ => Err(other(format!("input: {key} must be true or false"))),
+    }
+}
+
 fn objects<'a>(object: &'a Object, key: &str) -> Result<Vec<&'a Object>, Failure> {
     let items = field(object, key)?.as_array().ok_or_else(|| other(format!("input: {key} must be a list")))?;
     items.iter().map(|item| item.as_object().ok_or_else(|| other(format!("input: {key} must hold objects")))).collect()
@@ -375,7 +382,7 @@ impl Inventory {
             outbox: list("outbox")?
                 .iter()
                 .map(|item| {
-                    let delivered = matches!(item.as_object()?.get("delivered")?, Json::Bool(true));
+                    let Json::Bool(delivered) = *item.as_object()?.get("delivered")? else { return None };
                     Some(Outbox { id: get(item, "id")?, receipt: get(item, "receipt")?, delivered })
                 })
                 .collect::<Option<_>>()?,
@@ -425,9 +432,22 @@ impl Warehouse {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let temporary = self.path.with_extension(format!("{}.tmp", std::process::id()));
         let text = stringify(&next.to_json(), 8).map_err(std::io::Error::other)?;
-        std::fs::write(&temporary, format!("{text}\n"))?;
+        // A fresh owner-only file, created exclusively, then renamed over the
+        // snapshot.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.subsec_nanos());
+        let suffix = format!("{}-{nanos:08x}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let temporary = self.path.with_extension(format!("{suffix}.tmp"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let written = options.open(&temporary).and_then(|mut file| file.write_all(format!("{text}\n").as_bytes()));
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
         let renamed = std::fs::rename(&temporary, &self.path);
         let _ = std::fs::remove_file(&temporary);
         renamed?;
@@ -620,7 +640,7 @@ pub fn run(arguments: &[String], out: &mut impl Write) -> Result<(), Failure> {
                         service: text(incident, "service")?,
                         severity: int(incident, "severity")?,
                         age: int(incident, "age")?,
-                        visible: matches!(field(incident, "visible")?, Json::Bool(true)),
+                        visible: boolean(incident, "visible")?,
                         owner,
                     })
                 })
@@ -651,13 +671,12 @@ pub fn run(arguments: &[String], out: &mut impl Write) -> Result<(), Failure> {
             let warehouse = Arc::new(Mutex::new(warehouse));
             let outcome = (|| {
                 if deliver_pending {
+                    // Like the Go command, a failed delivery prints no count.
                     let (delivered, result) = locked(&warehouse).deliver_pending();
-                    writeln!(
-                        out,
-                        "{}",
-                        stringify(&Json::Object(Object::from([("delivered".into(), Json::Int(delivered as i64))])), 2).expect("flat")
-                    )?;
-                    return result.map_err(|error| other(format!("delivery failed: {error:?}")));
+                    result.map_err(|error| other(format!("delivery failed: {error:?}")))?;
+                    let count = Json::Object(Object::from([("delivered".into(), Json::Int(delivered as i64))]));
+                    writeln!(out, "{}", stringify(&count, 2).expect("flat"))?;
+                    return Ok(());
                 }
                 let invocation = fulfillment(&program, &warehouse)?.invoke((&order,))?;
                 save(&invocation, inspect)?;

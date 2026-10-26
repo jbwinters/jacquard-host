@@ -160,6 +160,12 @@ fn native_values_roundtrip_and_conform_to_checked_types() {
     record!(Unknown = "Unknown" { field });
     let error = data.encode(&Unknown { field: 1 }).unwrap_err().to_string();
     assert_eq!(error, "value: unknown constructor Unknown");
+    // A record over a builtin constructor is refused, as Dynamic is.
+    struct Wrapped {
+        inner: i64,
+    }
+    record!(Wrapped = "Some" { inner });
+    assert!(data.encode(&Wrapped { inner: 1 }).unwrap_err().to_string().contains("native form of builtin constructor Some"));
 }
 
 #[test]
@@ -321,6 +327,16 @@ mod fake {
 
     impl Fake {
         pub fn new(name: &str, version: &str) -> Fake {
+            Fake::with(name, version, "check) echo 'boom' >&2; exit 3 ;;")
+        }
+
+        /// A fake whose `check` and `hash` succeed and whose `run` fails.
+        pub fn hashing(name: &str) -> Fake {
+            let hash = "0".repeat(64);
+            Fake::with(name, crate::compat::CORE_VERSION, &format!("check) ;;\nhash) echo '0:x {hash}' ;;\nrun) exit 4 ;;"))
+        }
+
+        fn with(name: &str, version: &str, cases: &str) -> Fake {
             let root = std::env::temp_dir().join(format!("jacquard-host-rust-fake-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(root.join("prelude")).unwrap();
@@ -328,7 +344,7 @@ mod fake {
             std::fs::write(root.join("rules.jac"), "rules\n").unwrap();
             let log = root.join("log");
             let script = format!(
-                "#!/bin/sh\necho \"$1\" >> '{}'\ncase \"$1\" in\n--version) echo 'jacquard {version}'; sleep 30 & ;;\ncheck) echo 'boom' >&2; exit 3 ;;\nesac\n",
+                "#!/bin/sh\necho \"$1\" >> '{}'\ncase \"$1\" in\n--version) echo 'jacquard {version}'; sleep 30 & ;;\n{cases}\nesac\n",
                 log.display()
             );
             let binary = root.join("jacquard");
@@ -340,9 +356,17 @@ mod fake {
         }
 
         pub fn prepare(&self) -> (Error, Duration) {
+            self.prepare_source("rules.jac")
+        }
+
+        pub fn prepare_source(&self, name: &str) -> (Error, Duration) {
+            let source = self.root.join(name);
+            if !source.exists() {
+                std::fs::write(&source, format!("{name}\n")).unwrap();
+            }
             let started = Instant::now();
             let options = PrepareOptions { cache_dir: Some(self.root.join("cache")) };
-            let error = self.runtime.prepare(&[self.root.join("rules.jac")], &options).expect_err("the fake Core fails");
+            let error = self.runtime.prepare(&[source], &options).expect_err("the fake Core fails");
             (error, started.elapsed())
         }
 
@@ -385,4 +409,26 @@ fn a_version_mismatch_is_refused_and_checked_again() {
     }
     assert_eq!(fake.calls("--version"), 2);
     assert_eq!(fake.calls("check"), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn prelude_discovery_runs_once_per_core_and_prelude() {
+    let fake = fake::Fake::hashing("prelude");
+    for source in ["rules.jac", "other.jac"] {
+        let (error, _) = fake.prepare_source(source);
+        assert!(error.to_string().starts_with("Core run failed"), "{error}");
+    }
+    // Three prelude files once, then one local hash per source.
+    assert_eq!(fake.calls("hash"), 5);
+    assert_eq!(fake.calls("--version"), 1);
+    assert_eq!(fake.calls("run"), 2);
+}
+
+#[test]
+fn empty_runtime_options_mean_unset() {
+    let options = RuntimeOptions { binary: Some(String::new()), prelude: Some(std::env::temp_dir()), ..Default::default() };
+    let runtime = Runtime::new(options).unwrap();
+    let expected = std::env::var("JACQUARD_BIN").ok().filter(|value| !value.is_empty()).unwrap_or_else(|| "jacquard".into());
+    assert!(format!("{runtime:?}").contains(&format!("{expected:?}")), "{runtime:?}");
 }
