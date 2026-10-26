@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import shlex
 import shutil
+import sys
 import subprocess
 import tarfile
 import tempfile
@@ -372,7 +373,10 @@ class HardeningTest(unittest.TestCase):
         """Run a real adopt() with injected faults; return the error and the warnings."""
         root, pin_path, kit_dirs = self.copy()
         before = self.snapshot(root)
-        generated = root / "src/jacquard_host/compat.py"
+        # A file this fault's rollback must restore: compat.py has been renamed
+        # before the failing generated rename; a failed temporary write leaves
+        # no generated file renamed, but the pin and kit already are.
+        denied = root / "src/jacquard_host/compat.py" if temp_write_call == 0 else pin_path
         real_write, real_unlink, real_replace = Path.write_bytes, Path.unlink, Path.replace
         renames, temp_writes = [], []
         def write(path, data):
@@ -381,7 +385,7 @@ class HardeningTest(unittest.TestCase):
                 if len(temp_writes) == temp_write_call:
                     real_write(path, b"partial")
                     raise OSError("original temp write failure")
-            elif deny_restore and path == generated:
+            elif deny_restore and path == denied:
                 raise PermissionError("restore denied")
             return real_write(path, data)
         def unlink(path, missing_ok=False):
@@ -401,9 +405,10 @@ class HardeningTest(unittest.TestCase):
                 self.adopt(root, pin_path, kit_dirs)
             except BaseException as caught:
                 error = caught
-        restored = self.snapshot(root) if not deny_cleanup else {
-            key: value for key, value in self.snapshot(root).items() if not key.endswith(".core-pin")}
-        return error, warnings.getvalue(), restored == before
+        after = self.snapshot(root)
+        leftovers = [key for key in after if key.endswith(".core-pin")]
+        restored = {key: value for key, value in after.items() if not key.endswith(".core-pin")} == before
+        return error, warnings.getvalue(), restored, leftovers
 
     def test_every_rollback_fault_combination_reports_each_failure(self) -> None:
         kit_renames = 2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS)
@@ -414,18 +419,43 @@ class HardeningTest(unittest.TestCase):
             for deny_restore in (False, True):
                 for deny_cleanup in (False, True):
                     with self.subTest(fault=name, deny_restore=deny_restore, deny_cleanup=deny_cleanup):
-                        error, warnings, restored = self.run_faults(deny_restore=deny_restore, deny_cleanup=deny_cleanup, **fault)
+                        error, warnings, restored, leftovers = self.run_faults(deny_restore=deny_restore, deny_cleanup=deny_cleanup, **fault)
                         self.assertIsInstance(error, OSError)
-                        self.assertIn("original", str(error))
-                        if deny_restore and name == "rename":
+                        self.assertEqual(str(error), f"original {name} failure")
+                        if deny_restore:
                             self.assertIn("could not restore", warnings)
                             self.assertIn("restore is incomplete", warnings)
-                        if not deny_restore:
+                            self.assertFalse(restored)
+                        else:
                             self.assertTrue(restored, warnings)
+                            self.assertNotIn("could not restore", warnings)
                         if deny_cleanup:
                             self.assertIn("could not remove temporary file", warnings)
-                        if not (deny_restore or deny_cleanup):
-                            self.assertEqual(warnings, "")
+                            self.assertTrue(leftovers)
+                        else:
+                            self.assertEqual(leftovers, [])
+                            self.assertNotIn("could not remove", warnings)
+
+    def test_a_failing_warning_stream_does_not_interrupt_the_rollback(self) -> None:
+        class FullLog(io.StringIO):
+            def write(self, text):
+                raise OSError("no space left on device")
+        root, pin_path, kit_dirs = self.copy()
+        before = self.snapshot(root)
+        real_write, denied = Path.write_bytes, []
+        def deny_pin_once(path, data):
+            if path == pin_path and not denied:
+                denied.append(path)
+                raise PermissionError("restore denied")
+            return real_write(path, data)
+        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
+             patch.object(Path, "write_bytes", deny_pin_once), patch.object(sys, "stderr", FullLog()), \
+             self.assertRaisesRegex(OSError, "original rename failure"):
+            self.adopt(root, pin_path, kit_dirs)
+        after = self.snapshot(root)
+        # Every file except the pin, whose restore was denied, is restored.
+        self.assertEqual({k: v for k, v in after.items() if k != "core-pin.json"},
+                         {k: v for k, v in before.items() if k != "core-pin.json"})
 
     def test_leftover_temporaries_after_success_only_warn(self) -> None:
         root, pin_path, kit_dirs = self.copy()

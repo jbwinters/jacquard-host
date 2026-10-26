@@ -56,8 +56,13 @@ class PinError(Exception):
 
 
 def warn(message: str) -> None:
-    """Report a secondary failure when it happens; the original error is raised."""
-    print(f"core_pin: warning: {message}", file=sys.stderr)
+    """Report a secondary failure when it happens; the original error is raised.
+    A warning that cannot be written (for example to a full log) is dropped so
+    that it never interrupts a rollback or replaces the original error."""
+    try:
+        print(f"core_pin: warning: {message}", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 def load(path: Path = PIN) -> dict:
