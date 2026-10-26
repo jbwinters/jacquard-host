@@ -95,7 +95,8 @@ A release is one commit on `main` with green CI. To cut one:
    references in the docs. Keep the Python (`src/jacquard_host/__init__.py`),
    npm (`typescript/package.json`, `typescript/src/version.ts`), and release
    versions equal.
-2. After it merges, tag the merge commit twice:
+2. After it merges, tag the merge commit twice, with annotated tags
+   (`git tag -a`):
    `jacquard-host-X.Y.Z` for the repository and its assets, and `go/vX.Y.Z`
    for the Go module.
 3. Build the assets from a clean checkout of the tag:
