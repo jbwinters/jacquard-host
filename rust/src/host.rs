@@ -48,18 +48,19 @@ impl HandlerError {
     }
 }
 
-/// What a handler sees: whether the invocation has expired or been cancelled.
+/// What a handler sees: whether the invocation is still live.
 #[derive(Clone, Debug)]
 pub struct HandlerContext {
     expired: Arc<AtomicBool>,
+    ended: Arc<AtomicBool>,
     cancel: Cancel,
 }
 
 impl HandlerContext {
-    /// Whether the worker expired or the caller cancelled. Handlers should
-    /// stop; the host no longer waits for them.
+    /// Whether the worker expired, the caller cancelled, or the invocation
+    /// ended. Handlers should stop; the host no longer waits for them.
     pub fn is_cancelled(&self) -> bool {
-        self.expired.load(Ordering::SeqCst) || self.cancel.is_cancelled()
+        self.expired.load(Ordering::SeqCst) || self.ended.load(Ordering::SeqCst) || self.cancel.is_cancelled()
     }
 }
 
@@ -111,6 +112,21 @@ pub enum ResultKind {
     CarrierLoss,
     ProtocolError,
     HostError,
+}
+
+impl ResultKind {
+    /// The kind's name, as the other adapters spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResultKind::Ok => "ok",
+            ResultKind::Error => "error",
+            ResultKind::Fatal => "fatal",
+            ResultKind::ShutdownAck => "shutdown_ack",
+            ResultKind::CarrierLoss => "carrier_loss",
+            ResultKind::ProtocolError => "protocol_error",
+            ResultKind::HostError => "host_error",
+        }
+    }
 }
 
 /// Core's frames and evidence beside the host's observations.
@@ -168,10 +184,10 @@ impl InvocationResult {
         }
         let detail = match self.diagnostics.first() {
             Some(diagnostic) => format!("{} {}", diagnostic.summary, diagnostic.cause),
-            None => self.host_evidence.get("detail").and_then(Json::as_str).map_or_else(|| format!("{:?}", self.kind), str::to_owned),
+            None => self.host_evidence.get("detail").and_then(Json::as_str).map_or_else(|| self.kind.as_str().to_owned(), str::to_owned),
         };
         let code = self.code();
-        format!("{}: {detail}", if code.is_empty() { format!("{:?}", self.kind) } else { code })
+        format!("{}: {detail}", if code.is_empty() { self.kind.as_str().to_owned() } else { code })
     }
 
     /// The value, or an [`InvocationError`] classifying the failure.
@@ -295,7 +311,8 @@ impl Host {
             }
         };
         let mut sending = false;
-        let outcome = self.drive(&mut worker, &mut session, &mut result, &mut sending, first, registry, cancel);
+        let ended = Arc::new(AtomicBool::new(false));
+        let outcome = self.drive(&mut worker, &mut session, &mut result, &mut sending, first, registry, cancel, &ended);
         if let Err(error) = outcome {
             let (kind, code, reason) = match &error {
                 CarrierError::Protocol(protocol) if sending => (ResultKind::HostError, protocol.code, "host_frame_refused"),
@@ -316,6 +333,7 @@ impl Host {
             ]);
         }
         worker.dispose();
+        ended.store(true, Ordering::SeqCst);
         result.requests = session.requests.clone();
         result.exit_status = worker.exit_status;
         result.signal = worker.signal.clone();
@@ -333,6 +351,7 @@ impl Host {
         first: F,
         registry: &OperationRegistry,
         cancel: &Cancel,
+        ended: &Arc<AtomicBool>,
     ) -> Result<(), CarrierError>
     where
         F: FnOnce(&mut Session) -> Result<Object, crate::ProtocolError>,
@@ -344,22 +363,20 @@ impl Host {
             *sending = false;
             Ok(())
         };
-        let hello = worker.read_frame()?.ok_or_else(|| loss("worker exited before core_hello"))?;
+        let hello = worker.read_frame(&HARD_LIMITS)?.ok_or_else(|| loss("worker exited before core_hello"))?;
         result.core_frames.push(hello.clone());
         session.receive(&hello)?;
         let selected = session.select(self.limits)?;
-        // Core sends nothing between hello and its reply to host_select, so
-        // every later frame is read under the selected limits.
-        worker.set_limits(self.limits);
         send(worker, selected, &HARD_LIMITS, result)?;
+        worker.set_stderr_limit(self.limits.max_stderr_bytes);
         let opening = first(session)?;
         send(worker, opening, &session.limits.clone(), result)?;
         while session.state != State::Closed {
-            let frame = worker.read_frame()?.ok_or_else(|| loss("worker exited before a terminal frame"))?;
+            let frame = worker.read_frame(&session.limits.clone())?.ok_or_else(|| loss("worker exited before a terminal frame"))?;
             result.core_frames.push(frame.clone());
             match session.receive(&frame)? {
                 Some(CoreFrame::Request(request)) => {
-                    let response = respond(worker, session, registry, &request, cancel)?;
+                    let response = respond(worker, session, registry, &request, cancel, ended)?;
                     send(worker, response, &session.limits.clone(), result)?;
                 }
                 Some(CoreFrame::Terminal(Terminal::Outcome { value, diagnostics, terminal, evidence, .. })) => {
@@ -378,7 +395,7 @@ impl Host {
             }
         }
         worker.close_input();
-        if let Some(extra) = worker.read_frame()? {
+        if let Some(extra) = worker.read_frame(&session.limits.clone())? {
             result.core_frames.push(extra.clone());
             session.receive(&extra)?;
         }
@@ -403,20 +420,25 @@ fn respond(
     registry: &OperationRegistry,
     request: &EffectRequest,
     cancel: &Cancel,
+    ended: &Arc<AtomicBool>,
 ) -> Result<Object, CarrierError> {
     let answer = match registry.handler(request) {
         None => Err(HandlerError::unsupported("operation is not configured")),
         Some(handler) => {
-            let context = HandlerContext { expired: worker.expired_flag(), cancel: cancel.clone() };
+            let context = HandlerContext { expired: worker.expired_flag(), ended: Arc::clone(ended), cancel: cancel.clone() };
             let arguments = request.arguments.clone();
             let (tx, rx) = mpsc::channel();
-            thread::spawn(move || {
+            let spawned = thread::Builder::new().name("jacquard-handler".into()).spawn(move || {
                 let outcome = catch_unwind(AssertUnwindSafe(|| handler(&context, &arguments)));
                 let _ = tx.send(outcome.unwrap_or_else(|_| Err(HandlerError::completion_unknown("handler panicked"))));
             });
-            match worker.wait_for(&rx)? {
-                Some(answer) => answer,
-                None => Err(HandlerError::completion_unknown("handler panicked")),
+            match spawned {
+                // The handler never ran.
+                Err(_) => Err(HandlerError::outside_failed("handler thread could not start")),
+                Ok(_) => match worker.wait_for(&rx)? {
+                    Some(answer) => answer,
+                    None => Err(HandlerError::completion_unknown("handler panicked")),
+                },
             }
         }
     };

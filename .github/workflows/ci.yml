@@ -133,3 +133,5 @@ jobs:
       - name: Run independent Rust adapter against Core
         run: cargo test --locked -- --nocapture
         working-directory: rust
+        env:
+          JACQUARD_REQUIRE_LIVE: "1"

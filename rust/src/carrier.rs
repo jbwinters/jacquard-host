@@ -1,17 +1,19 @@
 //! One bounded `stdio-u32-json-v0` worker lifetime.
 //!
-//! Background threads only read stdout frames, drain stderr, and perform
-//! writes. Every wait happens on the caller's thread with a timeout, so the
-//! lifetime deadline or a cancellation kills the worker's process group from
-//! that thread, which is also the only thread that reaps it: a group is never
-//! signalled after its leader has been reaped.
+//! Background threads only read stdout frames on request, drain stderr, and
+//! perform writes. Each waits on its pipe with `poll` and a short timeout, so
+//! disposal can stop and join every thread even while a descendant still
+//! holds a pipe. Every wait on the worker happens on the caller's thread with
+//! a timeout, so the lifetime deadline or a cancellation kills the worker's
+//! process group from that thread, which is also the only thread that reaps
+//! it: a group is never signalled after its leader has been reaped.
 
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::error::ProtocolError;
@@ -25,7 +27,7 @@ pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 const EXIT_GRACE: Duration = Duration::from_secs(1);
 /// The stderr wait once the invocation is cancelled or expired.
 const CANCELLED_GRACE: Duration = Duration::from_millis(100);
-/// How often a wait rechecks the cancellation token.
+/// How often a wait rechecks the deadline and the cancellation token.
 const POLL: Duration = Duration::from_millis(10);
 
 /// A cooperative cancellation token shared with the caller and handlers.
@@ -122,10 +124,14 @@ pub struct Worker {
     child: Option<Child>,
     stdin: Option<SyncSender<Vec<u8>>>,
     writes: Option<Receiver<std::io::Result<()>>>,
+    reads: Option<Sender<Limits>>,
     frames: Option<Receiver<FrameResult>>,
+    reading: bool,
     stderr_done: Option<Receiver<()>>,
     stderr: Arc<Stderr>,
-    frame_limits: Arc<Mutex<Limits>>,
+    /// Set at disposal; every pipe thread then stops and closes its pipe.
+    stop: Arc<AtomicBool>,
+    threads: Vec<JoinHandle<()>>,
     expires: Instant,
     cancel: Cancel,
     expired: Arc<AtomicBool>,
@@ -156,10 +162,13 @@ impl Worker {
             child: None,
             stdin: None,
             writes: None,
+            reads: None,
             frames: None,
+            reading: false,
             stderr_done: None,
             stderr: Arc::clone(&stderr),
-            frame_limits: Arc::new(Mutex::new(HARD_LIMITS)),
+            stop: Arc::new(AtomicBool::new(false)),
+            threads: Vec::new(),
             expires: Instant::now() + options.deadline.unwrap_or(DEFAULT_DEADLINE),
             cancel,
             expired: Arc::new(AtomicBool::new(false)),
@@ -179,14 +188,16 @@ impl Worker {
                 return Ok(worker);
             }
         };
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut err = child.stderr.take().expect("piped stderr");
-        let mut stdin: ChildStdin = child.stdin.take().expect("piped stdin");
-        // stdout: read at most one frame ahead.
-        let (frame_tx, frame_rx) = mpsc::sync_channel::<FrameResult>(1);
-        let limits = Arc::clone(&worker.frame_limits);
-        thread::spawn(move || {
-            loop {
+        let mut stdout = Pipe::new(child.stdout.take().expect("piped stdout"), &worker.stop);
+        let mut err = Pipe::new(child.stderr.take().expect("piped stderr"), &worker.stop);
+        let mut stdin = Pipe::new(child.stdin.take().expect("piped stdin"), &worker.stop);
+        // Stored first, so a failure below still kills and reaps the worker.
+        worker.child = Some(child);
+        // stdout: one frame per request, read under the requested limits.
+        let (read_tx, read_rx) = mpsc::channel::<Limits>();
+        let (frame_tx, frame_rx) = mpsc::channel::<FrameResult>();
+        worker.spawn("stdout", move || {
+            for limits in read_rx {
                 let frame = read_frame(&mut stdout, &limits);
                 let last = !matches!(frame, Ok(Some(_)));
                 if frame_tx.send(frame).is_err() || last {
@@ -194,9 +205,11 @@ impl Worker {
                 }
             }
         });
+        worker.reads = Some(read_tx);
+        worker.frames = Some(frame_rx);
         // stderr: always drained; a bounded prefix is kept.
         let (done_tx, done_rx) = mpsc::channel::<()>();
-        thread::spawn(move || {
+        worker.spawn("stderr", move || {
             let mut chunk = [0u8; 8192];
             while let Ok(n) = err.read(&mut chunk) {
                 if n == 0 {
@@ -208,10 +221,11 @@ impl Worker {
             }
             let _ = done_tx.send(());
         });
+        worker.stderr_done = Some(done_rx);
         // stdin: one writer thread, so a blocked write cannot hold the caller.
         let (write_tx, write_rx) = mpsc::sync_channel::<Vec<u8>>(0);
         let (result_tx, result_rx) = mpsc::channel::<std::io::Result<()>>();
-        thread::spawn(move || {
+        worker.spawn("stdin", move || {
             for bytes in write_rx {
                 let result = stdin.write_all(&bytes).and_then(|()| stdin.flush());
                 let failed = result.is_err();
@@ -220,12 +234,20 @@ impl Worker {
                 }
             }
         });
-        worker.child = Some(child);
         worker.stdin = Some(write_tx);
         worker.writes = Some(result_rx);
-        worker.frames = Some(frame_rx);
-        worker.stderr_done = Some(done_rx);
         Ok(worker)
+    }
+
+    /// Starts one pipe thread; a failure becomes the worker's fault.
+    fn spawn(&mut self, name: &str, body: impl FnOnce() + Send + 'static) {
+        if self.fault.is_some() {
+            return;
+        }
+        match thread::Builder::new().name(format!("jacquard-worker-{name}")).spawn(body) {
+            Ok(handle) => self.threads.push(handle),
+            Err(error) => self.fault = Some(CarrierError::loss(format!("could not start the worker's {name} thread ({error})"))),
+        }
     }
 
     /// Whether the worker's lifetime ended by expiry or cancellation.
@@ -285,12 +307,11 @@ impl Worker {
         }
     }
 
-    /// Selects the limits for reading later frames.
-    pub fn set_limits(&mut self, limits: Limits) {
-        *self.frame_limits.lock().expect("limits lock") = limits;
+    /// Selects how much stderr is retained.
+    pub fn set_stderr_limit(&mut self, limit: usize) {
         let mut data = self.stderr.data.lock().expect("stderr lock");
-        self.stderr.limit.store(limits.max_stderr_bytes, Ordering::SeqCst);
-        data.truncate(limits.max_stderr_bytes);
+        self.stderr.limit.store(limit, Ordering::SeqCst);
+        data.truncate(limit);
     }
 
     /// The retained stderr prefix.
@@ -298,10 +319,16 @@ impl Worker {
         self.stderr.data.lock().expect("stderr lock").clone()
     }
 
-    /// Reads one frame. Returns `None` at a clean end of stream.
-    pub fn read_frame(&mut self) -> Result<Option<Object>, CarrierError> {
+    /// Reads one frame under `limits`. Returns `None` at a clean end of stream.
+    pub fn read_frame(&mut self, limits: &Limits) -> Result<Option<Object>, CarrierError> {
         if let Some(fault) = self.fault() {
             return Err(fault);
+        }
+        if !self.reading {
+            match &self.reads {
+                Some(reads) if reads.send(*limits).is_ok() => self.reading = true,
+                _ => return Ok(None),
+            }
         }
         let Some(frames) = self.frames.take() else {
             return Ok(None);
@@ -309,7 +336,10 @@ impl Worker {
         let received = self.wait_for(&frames);
         self.frames = Some(frames);
         match received? {
-            Some(frame) => frame,
+            Some(frame) => {
+                self.reading = false;
+                frame
+            }
             None => Ok(None),
         }
     }
@@ -343,7 +373,7 @@ impl Worker {
         self.write_bytes(bytes)
     }
 
-    /// Closes the worker's stdin.
+    /// Closes the worker's stdin once any write in progress ends.
     pub fn close_input(&mut self) {
         self.stdin = None;
     }
@@ -381,15 +411,18 @@ impl Worker {
                 }
             }
         };
-        if exited {
+        let status = if exited {
             held = !self.stderr_drained(EXIT_GRACE, killing);
             if held {
                 kill_group(pid);
             }
-        }
-        let status = self.child.as_mut().map(Child::wait);
+            // The worker has exited, so this only reaps it.
+            self.child.as_mut().and_then(|child| child.wait().ok())
+        } else {
+            self.wait_reaping(killing)
+        };
         self.reaped = true;
-        if let Some(Ok(status)) = status {
+        if let Some(status) = status {
             self.record(status);
         }
         if !exited {
@@ -397,10 +430,28 @@ impl Worker {
         }
         if held && !self.stderr_drained(EXIT_GRACE, killing) {
             // A descendant outside the group still holds stderr; stop waiting.
+            // Disposal stops the stderr thread and closes the pipe.
             self.stderr_done = None;
         }
         if held && self.exit_status == Some(0) && self.fault.is_none() && !self.is_expired() {
             self.fault = Some(CarrierError::loss("worker descendants kept its pipes open after exit"));
+        }
+    }
+
+    /// Where the exit cannot be observed without reaping, polls `try_wait`,
+    /// so expiry and cancellation can still kill the unreaped worker.
+    fn wait_reaping(&mut self, killing: bool) -> Option<ExitStatus> {
+        loop {
+            match self.child.as_mut()?.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => {
+                    if !killing {
+                        let _ = self.fault();
+                    }
+                    thread::sleep(POLL);
+                }
+                Err(_) => return None,
+            }
         }
     }
 
@@ -447,7 +498,8 @@ impl Worker {
         drained
     }
 
-    /// Kills a live worker, reaps it, and releases its threads.
+    /// Kills a live worker, reaps it, stops its pipe threads, and closes its
+    /// pipes. Each thread notices the stop within one poll interval.
     pub fn dispose(&mut self) {
         self.close_input();
         if !self.reaped {
@@ -457,8 +509,14 @@ impl Worker {
             self.reap(true);
         }
         self.stderr_drained(EXIT_GRACE, true);
+        self.stop.store(true, Ordering::SeqCst);
+        self.reads = None;
         self.frames = None;
         self.writes = None;
+        self.stderr_done = None;
+        for handle in self.threads.drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -468,7 +526,7 @@ impl Drop for Worker {
     }
 }
 
-fn read_frame(stdout: &mut impl Read, limits: &Mutex<Limits>) -> FrameResult {
+fn read_frame(stdout: &mut impl Read, limits: &Limits) -> FrameResult {
     let mut prefix = [0u8; 4];
     let mut filled = 0;
     while filled < 4 {
@@ -480,7 +538,6 @@ fn read_frame(stdout: &mut impl Read, limits: &Mutex<Limits>) -> FrameResult {
             Err(_) => return Err(CarrierError::loss("worker closed stdout during a frame")),
         }
     }
-    let limits = *limits.lock().expect("limits lock");
     let length = u32::from_be_bytes(prefix) as usize;
     if length == 0 || length > limits.max_frame_bytes {
         return Err(ProtocolError::exceeded("frame length exceeds max_frame_bytes").into());
@@ -490,17 +547,110 @@ fn read_frame(stdout: &mut impl Read, limits: &Mutex<Limits>) -> FrameResult {
     Ok(Some(decode_object(&payload, limits.max_json_depth)?))
 }
 
+/// One end of a worker pipe. On Unix every read or write first waits for
+/// readiness with `poll` in short slices and gives up once the worker is
+/// disposed, so a descendant holding the other end cannot pin the thread.
+struct Pipe<T> {
+    inner: T,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    stop: Arc<AtomicBool>,
+}
+
+impl<T> Pipe<T> {
+    fn new(inner: T, stop: &Arc<AtomicBool>) -> Pipe<T> {
+        Pipe { inner, stop: Arc::clone(stop) }
+    }
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd> Pipe<T> {
+    fn ready(&self, events: i16) -> std::io::Result<()> {
+        let mut entry = sys::PollFd { fd: self.inner.as_raw_fd(), events, revents: 0 };
+        loop {
+            if self.stop.load(Ordering::SeqCst) {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "worker pipe closed by the host"));
+            }
+            // SAFETY: one valid pollfd entry for a descriptor this pipe owns.
+            match unsafe { sys::poll(&mut entry, 1, 20) } {
+                n if n > 0 => return Ok(()),
+                0 => {}
+                _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+                _ => return Err(std::io::Error::last_os_error()),
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl<T: Read + std::os::fd::AsRawFd> Read for Pipe<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // A readable pipe (data or end of stream) never blocks the read.
+        self.ready(sys::POLLIN)?;
+        self.inner.read(buf)
+    }
+}
+
+#[cfg(unix)]
+impl<T: Write + std::os::fd::AsRawFd> Write for Pipe<T> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // A writable pipe accepts at least PIPE_BUF bytes without blocking.
+        self.ready(sys::POLLOUT)?;
+        self.inner.write(&buf[..buf.len().min(sys::PIPE_BUF)])
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[cfg(not(unix))]
+impl<T: Read> Read for Pipe<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+#[cfg(not(unix))]
+impl<T: Write> Write for Pipe<T> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[cfg(unix)]
 mod sys {
-    use std::os::raw::{c_int, c_void};
+    use std::os::raw::{c_int, c_short};
+
+    #[repr(C)]
+    pub struct PollFd {
+        pub fd: c_int,
+        pub events: c_short,
+        pub revents: c_short,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "l4re"))]
+    pub type Nfds = std::os::raw::c_ulong;
+    #[cfg(not(any(target_os = "linux", target_os = "l4re")))]
+    pub type Nfds = std::os::raw::c_uint;
 
     unsafe extern "C" {
         pub fn kill(pid: c_int, signal: c_int) -> c_int;
+        pub fn poll(fds: *mut PollFd, nfds: Nfds, timeout: c_int) -> c_int;
         #[cfg(target_os = "linux")]
-        pub fn waitid(idtype: c_int, id: u32, infop: *mut c_void, options: c_int) -> c_int;
+        pub fn waitid(idtype: c_int, id: u32, infop: *mut std::os::raw::c_void, options: c_int) -> c_int;
     }
 
     pub const SIGKILL: c_int = 9;
+    pub const POLLIN: c_short = 0x1;
+    pub const POLLOUT: c_short = 0x4;
+    /// The pipe write size that never blocks once `poll` reports POLLOUT:
+    /// one page on Linux, POSIX's minimum `PIPE_BUF` elsewhere.
+    #[cfg(target_os = "linux")]
+    pub const PIPE_BUF: usize = 4096;
+    #[cfg(not(target_os = "linux"))]
+    pub const PIPE_BUF: usize = 512;
 }
 
 #[cfg(unix)]
@@ -540,14 +690,15 @@ fn exited_unreaped(pid: u32) -> Option<bool> {
     const WNOHANG: i32 = 1;
     const WNOWAIT: i32 = 0x0100_0000;
     loop {
-        let mut info = [0u8; 128]; // siginfo_t, zeroed before each call
+        // siginfo_t: 128 bytes, pointer-aligned; zeroed before each call.
+        let mut info = [0u64; 16];
         // SAFETY: waitid writes at most sizeof(siginfo_t) == 128 bytes.
         let result = unsafe { sys::waitid(P_PID, pid, info.as_mut_ptr().cast(), WEXITED | WNOWAIT | WNOHANG) };
         if result == 0 {
             // si_signo, the first int on every Linux architecture, stays zero
             // while the child still runs.
-            let si_signo = i32::from_ne_bytes([info[0], info[1], info[2], info[3]]);
-            return Some(si_signo != 0);
+            let si_signo = info[0].to_ne_bytes();
+            return Some(i32::from_ne_bytes([si_signo[0], si_signo[1], si_signo[2], si_signo[3]]) != 0);
         }
         if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
             return None;

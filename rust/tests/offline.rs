@@ -391,6 +391,13 @@ fn carrier_failures_retain_host_evidence() {
 }
 
 #[test]
+fn frames_after_selection_are_read_under_the_selected_limits() {
+    let limits = Limits { max_frame_bytes: 1024, ..HARD_LIMITS };
+    let result = invoke_ready(&faulty("oversized-early", Duration::from_secs(2), Some(limits)));
+    assert!(result.kind == ResultKind::ProtocolError && result.code() == "E1602", "{:?} {}", result.kind, result.message());
+}
+
+#[test]
 fn stderr_is_drained_and_retention_obeys_the_selected_ceiling() {
     let limits = Limits { max_stderr_bytes: 17, ..HARD_LIMITS };
     let result = invoke_ready(&faulty("stderr", Duration::from_secs(5), Some(limits)));

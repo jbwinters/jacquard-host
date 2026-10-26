@@ -33,6 +33,8 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 fn prepare() -> Option<Live> {
     let (Ok(binary), Ok(prelude)) = (std::env::var("JACQUARD_BIN"), std::env::var("JACQUARD_PRELUDE")) else {
+        // CI sets JACQUARD_REQUIRE_LIVE so a misconfigured live job fails.
+        assert!(std::env::var_os("JACQUARD_REQUIRE_LIVE").is_none(), "live tests need JACQUARD_BIN and JACQUARD_PRELUDE");
         eprintln!("skipped: live tests need JACQUARD_BIN and JACQUARD_PRELUDE");
         return None;
     };

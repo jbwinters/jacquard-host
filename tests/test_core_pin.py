@@ -373,7 +373,7 @@ class HardeningTest(unittest.TestCase):
     def test_a_failed_rename_inside_sync_restores_everything(self) -> None:
         root, pin_path, kit_dirs = self.copy()
         before = self.snapshot(root)
-        # Renames: 10 kit files (two copies), the pin, then generated files; fail the second generated one.
+        # Renames: the kit files (one set per copy), the pin, then generated files; fail the second generated one.
         with self.rename_fails(len(core_pin.KIT_DIRS) * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
              self.assertRaisesRegex(OSError, "original rename failure"):
             self.adopt(root, pin_path, kit_dirs)

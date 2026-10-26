@@ -95,9 +95,10 @@ cargo test -- --nocapture
 ```
 
 The live tests in `tests/live.rs` skip without `JACQUARD_BIN` and
-`JACQUARD_PRELUDE`. The offline tests drive `jacquard-host-standin`, a test
-fixture binary that replays recordings or simulates faulty workers. It is not
-part of the adapter's interface.
+`JACQUARD_PRELUDE` (set `JACQUARD_REQUIRE_LIVE` to make them fail instead).
+The offline tests drive `jacquard-host-standin`, a Unix-only test fixture
+binary that replays recordings or simulates faulty workers. It is not part of
+the adapter's interface.
 
 `src/compat.rs` is generated, and `kit/host-protocol-v0/` is a byte copy of the
 pinned kit. `scripts/core_pin.py` maintains both; do not edit them by hand.

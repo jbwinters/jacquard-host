@@ -99,7 +99,7 @@ cd rust
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-# With the pinned Core configured (eval "$(python3 scripts/core_pin.py install)"):
+# With the pinned Core configured (eval "$(python3 ../scripts/core_pin.py install)"):
 cargo test -- --nocapture
 ```
 

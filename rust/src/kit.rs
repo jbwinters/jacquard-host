@@ -248,7 +248,7 @@ struct Drive {
 
 impl Drive {
     fn read(&mut self, worker: &mut Worker) -> Result<bool, CarrierError> {
-        let Some(frame) = worker.read_frame()? else {
+        let Some(frame) = worker.read_frame(&HARD_LIMITS)? else {
             return Ok(false);
         };
         self.ended |= is_terminal(&frame);
