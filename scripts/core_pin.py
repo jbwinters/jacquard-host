@@ -55,8 +55,9 @@ class PinError(Exception):
     pass
 
 
-class RestoreError(PinError):
-    """Restoring originals failed; __cause__ is the failure that required it."""
+def warn(message: str) -> None:
+    """Report a secondary failure when it happens; the original error is raised."""
+    print(f"core_pin: warning: {message}", file=sys.stderr)
 
 
 def load(path: Path = PIN) -> dict:
@@ -452,6 +453,8 @@ def write_kit(files: dict[str, bytes], kit_dir: Path) -> None:
 
 
 def write_files(contents: dict[Path, bytes]) -> None:
+    """Replace files through staged renames. On failure, restore the originals
+    and raise the original error; secondary failures are warnings."""
     originals = {path: path.read_bytes() if path.exists() else None for path in contents}
     staged = []
     try:
@@ -461,36 +464,26 @@ def write_files(contents: dict[Path, bytes]) -> None:
             temporary.write_bytes(data)
         for temporary, path in staged:
             temporary.replace(path)
-    except BaseException as error:
-        leftovers = remove_temporaries(staged)
-        try:
-            restore(originals)
-        except RestoreError as failure:
-            raise RestoreError(f"{failure}; the write itself failed first: {describe(error)}{leftovers}") from error
+    except BaseException:
+        remove_temporaries(staged)
+        restore(originals)
         raise
-    leftovers = remove_temporaries(staged)
-    if leftovers:  # the writes succeeded; leftovers are only clutter
-        print(f"core_pin: files were written{leftovers}", file=sys.stderr)
+    remove_temporaries(staged)
 
 
-def describe(error: BaseException) -> str:
-    return str(error) or type(error).__name__
-
-
-def remove_temporaries(staged: list[tuple[Path, Path]]) -> str:
-    """Best-effort removal of staged files; never masks a failure in flight."""
-    left = []
+def remove_temporaries(staged: list[tuple[Path, Path]]) -> None:
+    """Best-effort removal of staged files, warning about each one left behind."""
     for temporary, _ in staged:
         try:
             temporary.unlink(missing_ok=True)
-        except OSError:
-            left.append(str(temporary))
-    return f"; remove leftover temporary files {', '.join(left)}" if left else ""
+        except OSError as error:
+            warn(f"could not remove temporary file {temporary}: {error}")
 
 
-def restore(originals: dict[Path, bytes | None]) -> None:
-    """Restore every changed file; one failure does not stop the others."""
-    failures = []
+def restore(originals: dict[Path, bytes | None]) -> bool:
+    """Restore every changed file, warning about each that cannot be restored.
+    One failure does not stop the others. Returns whether all were restored."""
+    complete = True
     for path, data in originals.items():
         try:
             current = path.read_bytes() if path.exists() else None
@@ -501,9 +494,11 @@ def restore(originals: dict[Path, bytes | None]) -> None:
             else:
                 path.write_bytes(data)
         except OSError as error:
-            failures.append(f"{path}: {error}")
-    if failures:
-        raise RestoreError("could not restore after a failed update; run check and repair: " + "; ".join(failures))
+            complete = False
+            warn(f"could not restore {path}: {error}")
+    if not complete:
+        warn("the restore is incomplete; run `python3 scripts/core_pin.py check` and repair the files named above")
+    return complete
 
 
 def adopt(pin: dict, tag: str, checkout: Path | None, *, root: Path = REPO,
@@ -511,7 +506,8 @@ def adopt(pin: dict, tag: str, checkout: Path | None, *, root: Path = REPO,
     """Adopt a release: vendor its kit, write the pin, regenerate files.
 
     Any failure after the kit is written restores the kit, the pin, and the
-    generated files; a restore failure is reported with the original error.
+    generated files and raises the original error; files that cannot be
+    restored are reported as warnings.
     """
     generated = [root / name for name in (*GENERATED, *BLOCKS)]
     kit_paths = [directory / name for directory in kit_dirs for name in (*KIT_FILES, *KIT_EXTRAS)]
@@ -520,15 +516,8 @@ def adopt(pin: dict, tag: str, checkout: Path | None, *, root: Path = REPO,
     try:
         write_files({pin_path: dump(new).encode()})
         return sync(new, root)
-    except BaseException as original:
-        try:
-            restore(originals)
-        except RestoreError as failure:
-            raise RestoreError(f"{failure}; the update itself failed first: {describe(original)}") from original
-        # The tree is restored. A RestoreError from an inner write no longer
-        # describes it, so report the failure that started the rollback.
-        if isinstance(original, RestoreError) and original.__cause__ is not None:
-            raise original.__cause__ from None
+    except BaseException:
+        restore(originals)
         raise
 
 
