@@ -133,6 +133,9 @@ pub struct Worker {
     stop: Arc<AtomicBool>,
     /// Set when input closes or the worker expires; stops a write in progress.
     input_stop: Arc<AtomicBool>,
+    /// Admits each stdin write only while input is open and the lifetime
+    /// has not ended.
+    input_gate: Arc<Gate>,
     /// Set when the worker expires; stops a read in progress.
     output_stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
@@ -162,6 +165,7 @@ impl Worker {
         process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         isolate(&mut process);
         let stderr = Arc::new(Stderr { data: Mutex::new(Vec::new()), limit: AtomicUsize::new(HARD_LIMITS.max_stderr_bytes) });
+        let expires = Instant::now() + options.deadline.unwrap_or(DEFAULT_DEADLINE);
         let mut worker = Worker {
             child: None,
             stdin: None,
@@ -173,9 +177,10 @@ impl Worker {
             stderr: Arc::clone(&stderr),
             stop: Arc::new(AtomicBool::new(false)),
             input_stop: Arc::new(AtomicBool::new(false)),
+            input_gate: Arc::new(Gate::new(expires, cancel.clone())),
             output_stop: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
-            expires: Instant::now() + options.deadline.unwrap_or(DEFAULT_DEADLINE),
+            expires,
             cancel,
             expired: Arc::new(AtomicBool::new(false)),
             fault: None,
@@ -197,6 +202,7 @@ impl Worker {
         let mut stdout = Pipe::new(child.stdout.take().expect("piped stdout"), &worker.stop, &worker.output_stop);
         let mut err = Pipe::new(child.stderr.take().expect("piped stderr"), &worker.stop, &worker.stop);
         let mut stdin = Pipe::new(child.stdin.take().expect("piped stdin"), &worker.stop, &worker.input_stop);
+        stdin.gate = Some(Arc::clone(&worker.input_gate));
         // Stored first, so a failure below still kills and reaps the worker.
         worker.child = Some(child);
         // stdout: one frame per request, read under the requested limits.
@@ -345,6 +351,10 @@ impl Worker {
         match received? {
             Some(frame) => {
                 self.reading = false;
+                // A frame that arrives in the final poll slice is not acted on.
+                if let Some(fault) = self.fault() {
+                    return Err(fault);
+                }
                 frame
             }
             None => Ok(None),
@@ -382,6 +392,9 @@ impl Worker {
 
     /// Closes the worker's stdin, stopping any write in progress.
     pub fn close_input(&mut self) {
+        // After the gate closes no further byte is written; a chunk already
+        // being written completes first.
+        self.input_gate.close();
         self.input_stop.store(true, Ordering::SeqCst);
         self.stdin = None;
     }
@@ -567,11 +580,45 @@ struct Pipe<T> {
     inner: T,
     #[cfg_attr(not(unix), allow(dead_code))]
     stops: [Arc<AtomicBool>; 2],
+    gate: Option<Arc<Gate>>,
 }
 
 impl<T> Pipe<T> {
     fn new(inner: T, all: &Arc<AtomicBool>, own: &Arc<AtomicBool>) -> Pipe<T> {
-        Pipe { inner, stops: [Arc::clone(all), Arc::clone(own)] }
+        Pipe { inner, stops: [Arc::clone(all), Arc::clone(own)], gate: None }
+    }
+
+    /// Runs one write while the gate, if any, admits it.
+    fn admitted<R>(&mut self, write: impl FnOnce(&mut T) -> std::io::Result<R>) -> std::io::Result<R> {
+        let Some(gate) = self.gate.clone() else {
+            return write(&mut self.inner);
+        };
+        let closed = gate.closed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *closed || Instant::now() >= gate.deadline || gate.cancel.is_cancelled() {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "worker input closed by the host"));
+        }
+        let result = write(&mut self.inner);
+        drop(closed);
+        result
+    }
+}
+
+/// Serializes the decision to write with closing: once [`Gate::close`]
+/// returns, no write starts, and none starts after the deadline or a
+/// cancellation request even before the host notices it.
+struct Gate {
+    closed: Mutex<bool>,
+    deadline: Instant,
+    cancel: Cancel,
+}
+
+impl Gate {
+    fn new(deadline: Instant, cancel: Cancel) -> Gate {
+        Gate { closed: Mutex::new(false), deadline, cancel }
+    }
+
+    fn close(&self) {
+        *self.closed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     }
 }
 
@@ -606,9 +653,11 @@ impl<T: Read + std::os::fd::AsRawFd> Read for Pipe<T> {
 #[cfg(unix)]
 impl<T: Write + std::os::fd::AsRawFd> Write for Pipe<T> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // A writable pipe accepts at least PIPE_BUF bytes without blocking.
+        // A writable pipe accepts at least PIPE_BUF bytes without blocking, so
+        // the gate is held only for one short, non-blocking write.
         self.ready(sys::POLLOUT)?;
-        self.inner.write(&buf[..buf.len().min(sys::PIPE_BUF)])
+        let chunk = &buf[..buf.len().min(sys::PIPE_BUF)];
+        self.admitted(|inner| inner.write(chunk))
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
@@ -625,7 +674,7 @@ impl<T: Read> Read for Pipe<T> {
 #[cfg(not(unix))]
 impl<T: Write> Write for Pipe<T> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write(buf)
+        self.admitted(|inner| inner.write(buf))
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
@@ -801,4 +850,59 @@ fn signal_name(signal: i32) -> String {
         .chain(PLATFORM)
         .find(|(number, _)| *number == signal)
         .map_or_else(|| format!("SIG{signal}"), |(_, name)| (*name).to_owned())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn gated(deadline: Instant) -> (Pipe<std::io::PipeWriter>, std::io::PipeReader, Arc<Gate>) {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(Gate::new(deadline, Cancel::new()));
+        let mut pipe = Pipe::new(writer, &stop, &stop);
+        pipe.gate = Some(Arc::clone(&gate));
+        (pipe, reader, gate)
+    }
+
+    fn received(pipe: Pipe<std::io::PipeWriter>, mut reader: std::io::PipeReader) -> Vec<u8> {
+        drop(pipe);
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).unwrap();
+        data
+    }
+
+    #[test]
+    fn a_closed_gate_admits_no_write() {
+        let (mut pipe, reader, gate) = gated(Instant::now() + Duration::from_secs(60));
+        pipe.write_all(b"before").unwrap();
+        gate.close();
+        assert!(pipe.write_all(b"after").is_err());
+        assert_eq!(received(pipe, reader), b"before");
+    }
+
+    #[test]
+    fn no_write_starts_after_the_deadline() {
+        let (mut pipe, reader, _gate) = gated(Instant::now());
+        assert!(pipe.write_all(b"late").is_err());
+        assert!(received(pipe, reader).is_empty());
+    }
+
+    #[test]
+    fn a_write_that_is_ready_when_the_gate_closes_is_refused() {
+        let (mut pipe, reader, gate) = gated(Instant::now() + Duration::from_secs(60));
+        // Hold the gate so the writer passes poll and then waits on it, as a
+        // write that became ready just before expiry does.
+        let mut closed = gate.closed.lock().unwrap();
+        let writer = thread::spawn(move || {
+            let result = pipe.write_all(b"raced");
+            (pipe, result)
+        });
+        thread::sleep(Duration::from_millis(100));
+        *closed = true;
+        drop(closed);
+        let (pipe, result) = writer.join().unwrap();
+        assert!(result.is_err());
+        assert!(received(pipe, reader).is_empty());
+    }
 }

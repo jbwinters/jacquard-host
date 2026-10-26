@@ -66,7 +66,9 @@ status, bounded stderr, and host evidence (`jacquard-host-rust-evidence-v0`).
 A handler returns a value or a `HandlerError`. The four structured categories
 are `unsupported`, `refused`, `outside_failed`, and `completion_unknown`.
 `HandlerError::Unknown` and a panic are both reported to Core as completion
-unknown, and their message is never sent. A value with no encoding within the
+unknown, and their message is never sent. Panics are caught only with the
+default `panic = "unwind"`; under `panic = "abort"` a panicking handler aborts
+the host process. A value with no encoding within the
 selected limits is reported as an outside failure.
 
 Each handler runs on its own thread, bounded by the worker's lifetime deadline.
