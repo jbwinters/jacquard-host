@@ -1,10 +1,12 @@
 # Example projects
 
-The same Jacquard rules run through all three SDKs. The commands below use
+The same Jacquard rules run through all four SDKs. The commands below use
 Python; the [TypeScript walkthrough](../typescript/README.md#run-the-projects)
-includes compiled Node.js front ends for all four projects, and the
+includes compiled Node.js front ends for all four projects, the
 [Go walkthrough](../go/README.md#run-the-projects) a Go command with the rules
-and inputs embedded. Both include an independent fulfillment recovery example.
+and inputs embedded, and the [Rust walkthrough](../rust/README.md#run-the-projects)
+a Cargo example that reads them from this directory. Each includes an
+independent fulfillment recovery example.
 
 Start with [setup](../docs/SETUP.md), then run these from the repository root.
 They use synthetic inputs, the installed Python SDK, and the pinned Core worker.

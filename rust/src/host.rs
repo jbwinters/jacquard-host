@@ -48,6 +48,14 @@ impl HandlerError {
     }
 }
 
+/// Any other error, such as an I/O error raised with `?`, is reported to
+/// Core as completion unknown, without its message.
+impl<E: std::error::Error> From<E> for HandlerError {
+    fn from(_: E) -> Self {
+        HandlerError::Unknown
+    }
+}
+
 /// What a handler sees: whether the invocation is still live.
 #[derive(Clone, Debug)]
 pub struct HandlerContext {
@@ -57,6 +65,11 @@ pub struct HandlerContext {
 }
 
 impl HandlerContext {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        HandlerContext { expired: Arc::default(), ended: Arc::default(), cancel: Cancel::new() }
+    }
+
     /// Whether the worker expired, the caller cancelled, or the invocation
     /// ended. Handlers should stop; the host no longer waits for them.
     pub fn is_cancelled(&self) -> bool {

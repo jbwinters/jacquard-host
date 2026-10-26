@@ -90,9 +90,9 @@ a file under `examples/`, copy it there too (a Go test fails if they differ).
 
 ## Rust
 
-The independent Rust adapter lives in `rust/` as crate `jacquard-host`. It is
-protocol-level only, with no SDK layer. It uses only the standard library and
-does not call Python, Node.js, or Go. Rust 1.88+ is required.
+The independent Rust adapter and SDK live in `rust/` as crate `jacquard-host`.
+It uses only the standard library and does not call Python, Node.js, or Go.
+Rust 1.88+ is required.
 
 ```sh
 cd rust
@@ -107,7 +107,9 @@ CI runs fmt, clippy, and the offline tests on Rust 1.88 and the current stable
 release. It runs the live tests in the shared pinned-Core job.
 `rust/src/compat.rs` is generated and `rust/kit/` is a byte copy of the pinned
 kit. `scripts/core_pin.py` maintains both; do not edit them by hand. The
-`jacquard-host-standin` binary is a test fixture for the offline tests.
+`jacquard-host-standin` binary is a test fixture for the offline tests. The
+`jacquard-examples` Cargo example reads the rules and inputs from `examples/`
+directly, so there is no copy to keep in sync.
 
 ## Releasing
 
