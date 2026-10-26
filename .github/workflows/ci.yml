@@ -50,6 +50,27 @@ jobs:
         run: go test -race -count=1 ./...
         working-directory: go
 
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ["1.88", "stable"]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install ${{ matrix.rust }} --profile minimal --component rustfmt,clippy
+          rustup override set ${{ matrix.rust }}
+      - name: Check formatting
+        run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Offline tests
+        run: cargo test --locked
+
   bootstrap:
     runs-on: ubuntu-latest
     strategy:
@@ -109,3 +130,6 @@ jobs:
       - name: Run independent Go adapter against Core
         run: go test -count=1 -v ./...
         working-directory: go
+      - name: Run independent Rust adapter against Core
+        run: cargo test --locked -- --nocapture
+        working-directory: rust

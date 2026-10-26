@@ -11,3 +11,6 @@ prune typescript/dist
 prune typescript/data
 include go/go.mod go/NOTICE
 recursive-include go *.go *.md *.json *.jac
+include rust/Cargo.toml rust/Cargo.lock rust/rustfmt.toml rust/LICENSE rust/NOTICE
+recursive-include rust *.rs *.md *.json *.jac
+prune rust/target

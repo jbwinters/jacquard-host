@@ -17,7 +17,8 @@ Contributions are licensed under [Apache 2.0](LICENSE), matching this repository
 
 `core-pin.json` names the one Core release all adapters target. Do not edit
 `src/jacquard_host/compat.py`, `typescript/src/compat.ts`, `go/protocol/compat.go`,
-the Go kit copy under `go/kit/data/`, or the generated block
+`rust/src/compat.rs`, the Go and Rust kit copies under `go/kit/data/` and
+`rust/kit/`, or the generated block
 in `docs/COMPATIBILITY.md` by hand: change the pin with
 `python3 scripts/core_pin.py update --tag ...`, which also vendors the kit, and
 `python3 scripts/core_pin.py check` (run in CI) reports any drift.
@@ -87,14 +88,35 @@ pinned kit, both maintained by `scripts/core_pin.py`; do not edit them by hand.
 `go/examples/data/` embeds copies of the example rules and inputs: after changing
 a file under `examples/`, copy it there too (a Go test fails if they differ).
 
+## Rust
+
+The independent Rust adapter lives in `rust/` as crate `jacquard-host`. It is
+protocol-level only, with no SDK layer. It uses only the standard library and
+does not call Python, Node.js, or Go. Rust 1.88+ is required.
+
+```sh
+cd rust
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+# With the pinned Core configured (eval "$(python3 scripts/core_pin.py install)"):
+cargo test -- --nocapture
+```
+
+CI runs fmt, clippy, and the offline tests on Rust 1.88 and the current stable
+release. It runs the live tests in the shared pinned-Core job.
+`rust/src/compat.rs` is generated and `rust/kit/` is a byte copy of the pinned
+kit. `scripts/core_pin.py` maintains both; do not edit them by hand. The
+`jacquard-host-standin` binary is a test fixture for the offline tests.
+
 ## Releasing
 
 A release is one commit on `main` with green CI. To cut one:
 
 1. Open a pull request that dates the CHANGELOG entry and updates any version
    references in the docs. Keep the Python (`src/jacquard_host/__init__.py`),
-   npm (`typescript/package.json`, `typescript/src/version.ts`), and release
-   versions equal.
+   npm (`typescript/package.json`, `typescript/src/version.ts`), Rust
+   (`rust/Cargo.toml`), and release versions equal.
 2. After it merges, tag the merge commit twice, with annotated tags
    (`git tag -a`):
    `jacquard-host-X.Y.Z` for the repository and its assets, and `go/vX.Y.Z`
@@ -107,7 +129,8 @@ A release is one commit on `main` with green CI. To cut one:
 4. Publish a GitHub release for `jacquard-host-X.Y.Z` with the CHANGELOG
    entry as its notes and the assets attached.
 
-Nothing is published to PyPI or npm.
+Nothing is published to PyPI, npm, or crates.io. The Rust crate is used from
+the repository tag.
 
 ## TypeScript
 

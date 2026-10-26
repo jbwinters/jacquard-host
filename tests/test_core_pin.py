@@ -60,6 +60,13 @@ class CorePinTest(unittest.TestCase):
         go_readme = root / core_pin.KIT_DIRS[1].relative_to(REPO) / "kit/README.md"
         go_readme.write_text("drifted")
         self.assertTrue(any("go/kit/data" in item and "README.md" in item for item in core_pin.problems(self.pin, root)))
+        rust_kit = root / core_pin.KIT_DIRS[2].relative_to(REPO) / "vectors.json"
+        rust_kit.write_bytes(rust_kit.read_bytes() + b" ")
+        compat_rs = root / "rust/src/compat.rs"
+        compat_rs.write_text(compat_rs.read_text().replace(self.pin["release"]["commit"], "f" * 40))
+        found = core_pin.problems(self.pin, root)
+        self.assertTrue(any("rust/kit" in item and "vectors.json" in item for item in found), found)
+        self.assertTrue(any("compat.rs" in item for item in found), found)
 
     def test_sync_rewrites_only_generated_regions(self) -> None:
         root = self.copy()
@@ -201,6 +208,9 @@ class UpdateTest(unittest.TestCase):
         self.go_kit = Path(tempfile.mkdtemp(prefix="core-go-kit-"))
         self.addCleanup(shutil.rmtree, self.go_kit)
         shutil.copytree(core_pin.KIT_DIR, self.go_kit, dirs_exist_ok=True)
+        self.rust_kit = Path(tempfile.mkdtemp(prefix="core-rust-kit-"))
+        self.addCleanup(shutil.rmtree, self.rust_kit)
+        shutil.copytree(core_pin.KIT_DIR, self.rust_kit, dirs_exist_ok=True)
         self.files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
 
     def run_update(self, manifest_changes: dict, assets: dict) -> dict:
@@ -211,7 +221,7 @@ class UpdateTest(unittest.TestCase):
         with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
              patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
              patch.object(core_pin, "release_assets", return_value=assets) as self.fetched:
-            return core_pin.update(self.pin, "jacquard-core-9.9.9", None, (self.kit, self.go_kit))
+            return core_pin.update(self.pin, "jacquard-core-9.9.9", None, (self.kit, self.go_kit, self.rust_kit))
 
     def test_a_release_is_adopted_with_its_kit_and_assets(self) -> None:
         assets = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
@@ -221,6 +231,7 @@ class UpdateTest(unittest.TestCase):
         written = (self.kit / "kit/kit.json").read_bytes()
         self.assertEqual(new["kit"]["digests"]["kit/kit.json"], core_pin.sha256(written))
         self.assertEqual((self.go_kit / "kit/kit.json").read_bytes(), written)
+        self.assertEqual((self.rust_kit / "kit/kit.json").read_bytes(), written)
         self.assertEqual([path.name for path in self.kit.rglob(".*.core-pin")], [])
 
     def test_a_failed_replacement_restores_every_kit_file(self) -> None:
@@ -363,7 +374,7 @@ class HardeningTest(unittest.TestCase):
         root, pin_path, kit_dirs = self.copy()
         before = self.snapshot(root)
         # Renames: 10 kit files (two copies), the pin, then generated files; fail the second generated one.
-        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
+        with self.rename_fails(len(core_pin.KIT_DIRS) * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
              self.assertRaisesRegex(OSError, "original rename failure"):
             self.adopt(root, pin_path, kit_dirs)
         self.assertEqual(self.snapshot(root), before)
@@ -411,7 +422,7 @@ class HardeningTest(unittest.TestCase):
         return error, warnings.getvalue(), restored, leftovers
 
     def test_every_rollback_fault_combination_reports_each_failure(self) -> None:
-        kit_renames = 2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS)
+        kit_renames = len(core_pin.KIT_DIRS) * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS)
         # Fail the third generated rename (compat.py and compat.ts are already
         # in place), or the second generated temporary write.
         faults = {"rename": dict(rename_call=kit_renames + 1 + 3), "temp write": dict(rename_call=0, temp_write_call=kit_renames + 1 + 2)}
@@ -448,7 +459,7 @@ class HardeningTest(unittest.TestCase):
                 denied.append(path)
                 raise PermissionError("restore denied")
             return real_write(path, data)
-        with self.rename_fails(2 * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
+        with self.rename_fails(len(core_pin.KIT_DIRS) * len(core_pin.KIT_FILES + core_pin.KIT_EXTRAS) + 1 + 2), \
              patch.object(Path, "write_bytes", deny_pin_once), patch.object(sys, "stderr", FullLog()), \
              self.assertRaisesRegex(OSError, "original rename failure"):
             self.adopt(root, pin_path, kit_dirs)

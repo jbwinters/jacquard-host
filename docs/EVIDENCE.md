@@ -67,6 +67,18 @@ Recorded against the same release asset with Go 1.24.13 on Linux 7.0.
 | Go SDK offline | 7 further tests pass: signature parsing and identity groups, review regressions (tuples in record fields and handler results, exact integer-to-Real conversion, atomic enum registration, nullary union records, pointers at non-optional types), one version check under concurrent preparation, native value mapping through checked types (records, full Int range, Real bits, integer-valued Reals, refused out-of-range and invalid text), options/enums/unions and nested options, dynamic values and depth refusal, service method adaptation (context, failures, arity, plain errors, operation maps), and embedded example files identical to `examples/` |
 | Go SDK live | 14 further tests pass: quickstart calls, invocation rendering and saved inspection files; triage records, enums, options, and 64 rows in explicit batches against an oracle; late invalid input and over-deep calls refused before any worker; binding completeness and pure calls without services; unknown completion once with raw evidence; 25 planning cases matching an independent exhaustive oracle with feasible assignments; warm cache reuse without Core commands, byte-exact source invalidation, corruption refusal; full Int range, Real bits, and nested options; spawn failure and cancellation; output overflow without adaptive batching; result-mapping failure retaining the raw result; prelude contents in the cache key and concurrent preparation publishing once; three fulfillment faults with explicit recovery across restart; and all four commands including duplicate fulfillment, `--inspect`, and explicit delivery |
 
+## Independent Rust adapter (2026-10-25)
+
+Recorded against the same `jacquard-core-0.3.0` release asset, with Rust 1.99.1
+on Linux 7.0. The crate uses only the standard library.
+
+| Lane | Result |
+|---|---|
+| Rust offline (`cargo test` without Core) | 26 integration tests, 1 descriptor test, 1 SHA-256 unit test, and the README doctest pass. Coverage: strict JSON, Unicode, and duplicate keys; exact Int and Real codecs; limits; Core-order descriptor checks; hello and selection; invoke-frame validation; session ordering and one response slot; the shared outcome node budget. Fault cases: malformed, extra, and noncanonical Core frames; EOF, truncated, silent, stalled, and nonzero workers; a descendant holding the pipes, stopped at the deadline with its process group; a descendant holding stderr after a successful or failed exit, stopped and reported as carrier loss with the exit status kept; a deadline during the exit grace reported as the deadline; a slow clean exit; an escaped descendant that does not hold the host; bounded stderr; write backpressure; cancellation; local refusal before spawn; registry ordering; and no descriptor growth across invocations. Kit: all 21 recordings replay through a stand-in, and prose drift is reported without normalization |
+| Rust live (`cargo test` with Core configured) | 4 further tests pass: all 21 recordings match against Core with no prose drift; pure and effectful invocations with exact evidence and shutdown; the four failure pairs, handler errors, and panics reported without retry or private detail; cooperative and abandoned handlers at the deadline send no late response |
+| Lint | `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean |
+| Pin consistency | `rust/src/compat.rs` is generated, and `rust/kit/` matches the pinned digests and the Python copy (`scripts/core_pin.py check`) |
+
 ## Outcome frame node budget (2026-10-25)
 
 Core's `outcome` encodes the evidence's interface types and the result value
@@ -154,6 +166,7 @@ reaches persistence has request ordinal 1 and one accepted `ok` observation.
 | Linux, Python 3.14 | exercised | the live suite, kit replay, and trial were run locally on 3.14.7 (Linux 7.0) |
 | Linux, Node.js 22 and 24 | CI lanes | Offline TypeScript tests and npm packaging on both; real-worker TypeScript tests and installed examples on Node 24 in the shared pinned-Core job |
 | Linux, Go 1.24 and stable | CI lanes | Offline Go tests with the race detector on both; live Go tests in the shared pinned-Core job |
+| Linux, Rust 1.88 and stable | CI lanes | fmt, clippy, and offline Rust tests on both; live Rust tests in the shared pinned-Core job |
 | Linux, Node.js 26.7 | exercised | TypeScript offline/live suites and tarball installation exercised locally; no broader runtime or OS claim |
 | macOS | development only | no CI; the descriptor-count assertions are skipped without `/proc` (the socket host tests skip, the kit and adapter tests skip only the count); SQLite WAL mode is recorded, not assumed |
 | Windows and others | no claim | see LIMITS.md |

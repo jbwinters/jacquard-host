@@ -1,0 +1,581 @@
+//! One bounded `stdio-u32-json-v0` worker lifetime.
+//!
+//! Background threads only read stdout frames, drain stderr, and perform
+//! writes. Every wait happens on the caller's thread with a timeout, so the
+//! lifetime deadline or a cancellation kills the worker's process group from
+//! that thread, which is also the only thread that reaps it: a group is never
+//! signalled after its leader has been reaped.
+
+use std::io::{Read, Write};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::error::ProtocolError;
+use crate::json::{Object, decode_object, frame_bytes};
+use crate::protocol::{HARD_LIMITS, Limits};
+
+/// The worker lifetime when `Options::deadline` is `None`.
+pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
+/// How long stderr may stay open after the worker exits before the remaining
+/// process group is treated as holding its pipes.
+const EXIT_GRACE: Duration = Duration::from_secs(1);
+/// The stderr wait once the invocation is cancelled or expired.
+const CANCELLED_GRACE: Duration = Duration::from_millis(100);
+/// How often a wait rechecks the cancellation token.
+const POLL: Duration = Duration::from_millis(10);
+
+/// A cooperative cancellation token shared with the caller and handlers.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    /// A token that is not cancelled.
+    pub fn new() -> Cancel {
+        Cancel::default()
+    }
+    /// Requests cancellation.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    /// Whether cancellation was requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Options for one worker lifetime.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    /// The Core executable and leading arguments; `host worker --store DIR` is
+    /// appended. Defaults to `$JACQUARD_BIN`, then `jacquard`.
+    pub command: Vec<String>,
+    /// Replaces the inherited environment when set.
+    pub env: Option<Vec<(String, String)>>,
+    /// Bounds the whole lifetime: spawn, pipes, handlers, and exit.
+    pub deadline: Option<Duration>,
+}
+
+impl Options {
+    /// Refuses an empty command element or a zero deadline.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.command.iter().any(String::is_empty) {
+            return Err("command must be a nonempty executable argument list".into());
+        }
+        if self.deadline == Some(Duration::ZERO) {
+            return Err("deadline must be positive".into());
+        }
+        Ok(())
+    }
+
+    fn command(&self) -> Vec<String> {
+        if !self.command.is_empty() {
+            return self.command.clone();
+        }
+        vec![std::env::var("JACQUARD_BIN").ok().filter(|bin| !bin.is_empty()).unwrap_or_else(|| "jacquard".into())]
+    }
+}
+
+/// A carrier failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CarrierError {
+    /// The worker could not start, closed a pipe, exited unsuccessfully, was
+    /// aborted, or outlived its deadline.
+    Loss { message: String, timeout: bool, aborted: bool },
+    /// A frame violated the protocol.
+    Protocol(ProtocolError),
+}
+
+impl CarrierError {
+    fn loss(message: impl Into<String>) -> CarrierError {
+        CarrierError::Loss { message: message.into(), timeout: false, aborted: false }
+    }
+}
+
+impl std::fmt::Display for CarrierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CarrierError::Loss { message, .. } => f.write_str(message),
+            CarrierError::Protocol(error) => error.fmt(f),
+        }
+    }
+}
+
+impl From<ProtocolError> for CarrierError {
+    fn from(error: ProtocolError) -> Self {
+        CarrierError::Protocol(error)
+    }
+}
+
+type FrameResult = Result<Option<Object>, CarrierError>;
+
+struct Stderr {
+    data: Mutex<Vec<u8>>,
+    limit: AtomicUsize,
+}
+
+/// One worker process.
+pub struct Worker {
+    child: Option<Child>,
+    stdin: Option<SyncSender<Vec<u8>>>,
+    writes: Option<Receiver<std::io::Result<()>>>,
+    frames: Option<Receiver<FrameResult>>,
+    stderr_done: Option<Receiver<()>>,
+    stderr: Arc<Stderr>,
+    frame_limits: Arc<Mutex<Limits>>,
+    expires: Instant,
+    cancel: Cancel,
+    expired: Arc<AtomicBool>,
+    fault: Option<CarrierError>,
+    reaped: bool,
+    /// The spawn error, when the worker never started.
+    pub spawn_error: Option<String>,
+    /// The exit status once reaped, unless a signal ended the worker.
+    pub exit_status: Option<i32>,
+    /// The signal that ended the worker, by name.
+    pub signal: Option<String>,
+}
+
+impl Worker {
+    /// Spawns the worker. A spawn failure is reported by the first operation.
+    pub fn start(store: &str, options: &Options, cancel: Cancel) -> Result<Worker, String> {
+        options.validate()?;
+        let command = options.command();
+        let mut process = Command::new(&command[0]);
+        process.args(&command[1..]).args(["host", "worker", "--store", store]);
+        if let Some(env) = &options.env {
+            process.env_clear().envs(env.iter().cloned());
+        }
+        process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        isolate(&mut process);
+        let stderr = Arc::new(Stderr { data: Mutex::new(Vec::new()), limit: AtomicUsize::new(HARD_LIMITS.max_stderr_bytes) });
+        let mut worker = Worker {
+            child: None,
+            stdin: None,
+            writes: None,
+            frames: None,
+            stderr_done: None,
+            stderr: Arc::clone(&stderr),
+            frame_limits: Arc::new(Mutex::new(HARD_LIMITS)),
+            expires: Instant::now() + options.deadline.unwrap_or(DEFAULT_DEADLINE),
+            cancel,
+            expired: Arc::new(AtomicBool::new(false)),
+            fault: None,
+            reaped: false,
+            spawn_error: None,
+            exit_status: None,
+            signal: None,
+        };
+        let mut child = match process.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                worker.spawn_error = Some(error.to_string());
+                worker.fault =
+                    Some(CarrierError::loss(format!("could not start {} ({error}); check the configured Core installation", command[0])));
+                worker.reaped = true;
+                return Ok(worker);
+            }
+        };
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut err = child.stderr.take().expect("piped stderr");
+        let mut stdin: ChildStdin = child.stdin.take().expect("piped stdin");
+        // stdout: read at most one frame ahead.
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<FrameResult>(1);
+        let limits = Arc::clone(&worker.frame_limits);
+        thread::spawn(move || {
+            loop {
+                let frame = read_frame(&mut stdout, &limits);
+                let last = !matches!(frame, Ok(Some(_)));
+                if frame_tx.send(frame).is_err() || last {
+                    return;
+                }
+            }
+        });
+        // stderr: always drained; a bounded prefix is kept.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = err.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                let mut data = stderr.data.lock().expect("stderr lock");
+                let room = stderr.limit.load(Ordering::SeqCst).saturating_sub(data.len());
+                data.extend_from_slice(&chunk[..n.min(room)]);
+            }
+            let _ = done_tx.send(());
+        });
+        // stdin: one writer thread, so a blocked write cannot hold the caller.
+        let (write_tx, write_rx) = mpsc::sync_channel::<Vec<u8>>(0);
+        let (result_tx, result_rx) = mpsc::channel::<std::io::Result<()>>();
+        thread::spawn(move || {
+            for bytes in write_rx {
+                let result = stdin.write_all(&bytes).and_then(|()| stdin.flush());
+                let failed = result.is_err();
+                if result_tx.send(result).is_err() || failed {
+                    return;
+                }
+            }
+        });
+        worker.child = Some(child);
+        worker.stdin = Some(write_tx);
+        worker.writes = Some(result_rx);
+        worker.frames = Some(frame_rx);
+        worker.stderr_done = Some(done_rx);
+        Ok(worker)
+    }
+
+    /// Whether the worker's lifetime ended by expiry or cancellation.
+    pub fn is_expired(&self) -> bool {
+        self.expired.load(Ordering::SeqCst)
+    }
+
+    /// A flag handlers can observe; set when the worker expires or is cancelled.
+    pub fn expired_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.expired)
+    }
+
+    /// The carrier failure that ended the worker, if any.
+    pub fn fault(&mut self) -> Option<CarrierError> {
+        if self.fault.is_none() {
+            if self.cancel.is_cancelled() {
+                self.expire();
+                self.fault = Some(CarrierError::Loss {
+                    message: "invocation aborted; outside completion is unknown".into(),
+                    timeout: false,
+                    aborted: true,
+                });
+            } else if Instant::now() >= self.expires {
+                self.expire();
+                self.fault =
+                    Some(CarrierError::Loss { message: "worker lifetime deadline exceeded".into(), timeout: true, aborted: false });
+            }
+        }
+        self.fault.clone()
+    }
+
+    /// Kills the worker's process group (its leader is unreaped) and stops
+    /// accepting pipe traffic.
+    fn expire(&mut self) {
+        self.expired.store(true, Ordering::SeqCst);
+        if !self.reaped
+            && let Some(child) = self.child.as_mut()
+        {
+            kill_tree(child);
+        }
+        self.stdin = None;
+    }
+
+    /// Waits on `receive` until it yields, the deadline passes, or the
+    /// invocation is cancelled.
+    pub(crate) fn wait_for<T>(&mut self, receiver: &Receiver<T>) -> Result<Option<T>, CarrierError> {
+        loop {
+            if let Some(fault) = self.fault() {
+                return Err(fault);
+            }
+            let slice = self.expires.saturating_duration_since(Instant::now()).min(POLL);
+            match receiver.recv_timeout(slice) {
+                Ok(value) => return Ok(Some(value)),
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+            }
+        }
+    }
+
+    /// Selects the limits for reading later frames.
+    pub fn set_limits(&mut self, limits: Limits) {
+        *self.frame_limits.lock().expect("limits lock") = limits;
+        let mut data = self.stderr.data.lock().expect("stderr lock");
+        self.stderr.limit.store(limits.max_stderr_bytes, Ordering::SeqCst);
+        data.truncate(limits.max_stderr_bytes);
+    }
+
+    /// The retained stderr prefix.
+    pub fn stderr(&self) -> Vec<u8> {
+        self.stderr.data.lock().expect("stderr lock").clone()
+    }
+
+    /// Reads one frame. Returns `None` at a clean end of stream.
+    pub fn read_frame(&mut self) -> Result<Option<Object>, CarrierError> {
+        if let Some(fault) = self.fault() {
+            return Err(fault);
+        }
+        let Some(frames) = self.frames.take() else {
+            return Ok(None);
+        };
+        let received = self.wait_for(&frames);
+        self.frames = Some(frames);
+        match received? {
+            Some(frame) => frame,
+            None => Ok(None),
+        }
+    }
+
+    /// Writes raw carrier bytes.
+    pub fn write_bytes(&mut self, bytes: Vec<u8>) -> Result<(), CarrierError> {
+        if let Some(fault) = self.fault() {
+            return Err(fault);
+        }
+        let Some(stdin) = self.stdin.clone() else {
+            return Err(CarrierError::loss("worker write failed (worker input is closed)"));
+        };
+        if stdin.send(bytes).is_err() {
+            return Err(self.fault().unwrap_or_else(|| CarrierError::loss("worker write failed (worker input is closed)")));
+        }
+        let Some(writes) = self.writes.take() else {
+            return Err(CarrierError::loss("worker write failed (worker input is closed)"));
+        };
+        let result = self.wait_for(&writes);
+        self.writes = Some(writes);
+        match result? {
+            Some(Ok(())) => self.fault().map_or(Ok(()), Err),
+            Some(Err(error)) => Err(self.fault().unwrap_or_else(|| CarrierError::loss(format!("worker write failed ({error})")))),
+            None => Err(self.fault().unwrap_or_else(|| CarrierError::loss("worker write failed (worker input is closed)"))),
+        }
+    }
+
+    /// Encodes and writes one frame under the given limits.
+    pub fn write_frame(&mut self, frame: &Object, limits: &Limits) -> Result<(), CarrierError> {
+        let bytes = frame_bytes(frame, limits.max_frame_bytes, limits.max_json_depth)?;
+        self.write_bytes(bytes)
+    }
+
+    /// Closes the worker's stdin.
+    pub fn close_input(&mut self) {
+        self.stdin = None;
+    }
+
+    /// Closes stdin and waits for the worker to exit, bounded by the deadline,
+    /// then reaps it. Call only after stdout reached end of stream.
+    pub fn wait(&mut self) -> Result<(), CarrierError> {
+        self.close_input();
+        self.reap(false);
+        self.fault().map_or(Ok(()), Err)
+    }
+
+    fn reap(&mut self, killing: bool) {
+        if self.reaped {
+            return;
+        }
+        let Some(pid) = self.child.as_ref().map(Child::id) else {
+            self.reaped = true;
+            return;
+        };
+        // Wait for the exit without reaping where possible: the unreaped
+        // leader keeps its process group id reserved through the grace.
+        let mut held = false;
+        let exited = loop {
+            match exited_unreaped(pid) {
+                Some(true) => break true,
+                None => break false,
+                Some(false) => {
+                    // At expiry or cancellation, fault() kills the group, so
+                    // this loop is bounded by the lifetime deadline.
+                    if !killing {
+                        let _ = self.fault();
+                    }
+                    thread::sleep(POLL);
+                }
+            }
+        };
+        if exited {
+            held = !self.stderr_drained(EXIT_GRACE, killing);
+            if held {
+                kill_group(pid);
+            }
+        }
+        let status = self.child.as_mut().map(Child::wait);
+        self.reaped = true;
+        if let Some(Ok(status)) = status {
+            self.record(status);
+        }
+        if !exited {
+            held = !self.stderr_drained(EXIT_GRACE, killing);
+        }
+        if held && !self.stderr_drained(EXIT_GRACE, killing) {
+            // A descendant outside the group still holds stderr; stop waiting.
+            self.stderr_done = None;
+        }
+        if held && self.exit_status == Some(0) && self.fault.is_none() && !self.is_expired() {
+            self.fault = Some(CarrierError::loss("worker descendants kept its pipes open after exit"));
+        }
+    }
+
+    fn record(&mut self, status: ExitStatus) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                self.signal = Some(signal_name(signal));
+                return;
+            }
+        }
+        self.exit_status = status.code();
+    }
+
+    /// Whether stderr reached end of stream within `limit`. The wait also ends
+    /// at expiry or cancellation (checked unless `killing`), after which it
+    /// waits only briefly: the process group has already been signalled.
+    fn stderr_drained(&mut self, limit: Duration, killing: bool) -> bool {
+        let Some(done) = self.stderr_done.take() else {
+            return true;
+        };
+        let start = Instant::now();
+        let mut ended: Option<Instant> = None;
+        let drained = loop {
+            if ended.is_none() && (self.is_expired() || self.cancel.is_cancelled() || (!killing && self.fault().is_some())) {
+                ended = Some(Instant::now());
+            }
+            let left = match ended {
+                Some(at) => CANCELLED_GRACE.saturating_sub(at.elapsed()),
+                None => limit.saturating_sub(start.elapsed()),
+            };
+            if left.is_zero() {
+                break false;
+            }
+            match done.recv_timeout(left.min(POLL)) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => break true,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        };
+        if !drained {
+            self.stderr_done = Some(done);
+        }
+        drained
+    }
+
+    /// Kills a live worker, reaps it, and releases its threads.
+    pub fn dispose(&mut self) {
+        self.close_input();
+        if !self.reaped {
+            if let Some(child) = self.child.as_mut() {
+                kill_tree(child);
+            }
+            self.reap(true);
+        }
+        self.stderr_drained(EXIT_GRACE, true);
+        self.frames = None;
+        self.writes = None;
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.dispose();
+    }
+}
+
+fn read_frame(stdout: &mut impl Read, limits: &Mutex<Limits>) -> FrameResult {
+    let mut prefix = [0u8; 4];
+    let mut filled = 0;
+    while filled < 4 {
+        match stdout.read(&mut prefix[filled..]) {
+            Ok(0) if filled == 0 => return Ok(None),
+            Ok(0) => return Err(CarrierError::loss("worker closed stdout during a frame")),
+            Ok(n) => filled += n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(CarrierError::loss("worker closed stdout during a frame")),
+        }
+    }
+    let limits = *limits.lock().expect("limits lock");
+    let length = u32::from_be_bytes(prefix) as usize;
+    if length == 0 || length > limits.max_frame_bytes {
+        return Err(ProtocolError::exceeded("frame length exceeds max_frame_bytes").into());
+    }
+    let mut payload = vec![0u8; length];
+    stdout.read_exact(&mut payload).map_err(|_| CarrierError::loss("worker closed stdout during a frame"))?;
+    Ok(Some(decode_object(&payload, limits.max_json_depth)?))
+}
+
+#[cfg(unix)]
+mod sys {
+    use std::os::raw::{c_int, c_void};
+
+    unsafe extern "C" {
+        pub fn kill(pid: c_int, signal: c_int) -> c_int;
+        #[cfg(target_os = "linux")]
+        pub fn waitid(idtype: c_int, id: u32, infop: *mut c_void, options: c_int) -> c_int;
+    }
+
+    pub const SIGKILL: c_int = 9;
+}
+
+#[cfg(unix)]
+fn isolate(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn isolate(_: &mut Command) {}
+
+/// Kills an unreaped worker and its process group.
+fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
+    kill_group(child.id());
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    // SAFETY: kill(2) with a negative pid signals a process group; the caller
+    // guarantees the leader is unreaped, so the group id cannot be reused.
+    unsafe {
+        sys::kill(-(pid as i32), sys::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_: u32) {}
+
+/// Whether the worker has exited, without reaping it: `Some(true)` once it
+/// has, `Some(false)` while it runs, `None` where the platform cannot tell.
+#[cfg(target_os = "linux")]
+fn exited_unreaped(pid: u32) -> Option<bool> {
+    const P_PID: i32 = 1;
+    const WEXITED: i32 = 4;
+    const WNOHANG: i32 = 1;
+    const WNOWAIT: i32 = 0x0100_0000;
+    loop {
+        let mut info = [0u8; 128]; // siginfo_t, zeroed before each call
+        // SAFETY: waitid writes at most sizeof(siginfo_t) == 128 bytes.
+        let result = unsafe { sys::waitid(P_PID, pid, info.as_mut_ptr().cast(), WEXITED | WNOWAIT | WNOHANG) };
+        if result == 0 {
+            // si_signo, the first int on every Linux architecture, stays zero
+            // while the child still runs.
+            let si_signo = i32::from_ne_bytes([info[0], info[1], info[2], info[3]]);
+            return Some(si_signo != 0);
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exited_unreaped(_: u32) -> Option<bool> {
+    None
+}
+
+#[cfg(unix)]
+fn signal_name(signal: i32) -> String {
+    let name = match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return format!("SIG{signal}"),
+    };
+    name.to_owned()
+}
