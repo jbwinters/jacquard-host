@@ -36,7 +36,7 @@ def main() -> None:
             # Only our freshly built archive is extracted, never an external input.
             archive.extractall(root / "source", filter="data")
         source = next((root / "source").iterdir())
-        for relative in ("LICENSE", "NOTICE", "CONTRIBUTING.md", "CHANGELOG.md", "docs/SETUP.md", "scripts/check_examples.py",
+        for relative in ("LICENSE", "NOTICE", "go/NOTICE", "CONTRIBUTING.md", "CHANGELOG.md", "docs/SETUP.md", "scripts/check_examples.py",
                          "examples/python_sdk/app.py", "examples/python_sdk/exercise.py"):
             assert (source / relative).is_file(), f"sdist missing {relative}"
         for project in ("quickstart", "triage", "planner", "fulfillment"):

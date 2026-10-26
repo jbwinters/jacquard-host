@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-10-25
+
+The first jacquard-host release: Python, TypeScript, and Go adapters and SDKs
+for Core's experimental `jacquard-host-v0` protocol, pinned to
+`jacquard-core-0.3.0`. Tags: `jacquard-host-0.2.0` (repository and Python/npm
+assets) and `go/v0.2.0` (Go module). Packages are attached to the
+[GitHub release](https://github.com/jbwinters/jacquard-host/releases/tag/jacquard-host-0.2.0);
+nothing is published to a package registry. Earlier work was never tagged, so
+this entry covers the repository's whole history.
 
 - `scripts/core_pin.py` validates the repository and kit paths in the pin,
   refuses malformed kit decisions and non-release tags before any network
@@ -47,11 +55,9 @@
   Python and TypeScript constants and the compatibility table, checks for drift
   in CI, installs the checksum-verified release binary, reports newer releases,
   and adopts a new release tag. CI installs the release instead of building Core.
-
 - Add an independent TypeScript/Node.js adapter and SDK, async services, explicit
   record/union codecs, lossless bigints, cached preparation, and npm tarball
   installation checks. Both adapters replay the same 21 pinned recordings.
-
 - Add `Runtime.prepare`, cached checked programs, scoped service binding, and
   native Python calls with explicit dataclass and enum mappings.
 - Validate arguments and required handlers before starting a worker. Provide
@@ -61,13 +67,18 @@
   Fulfillment demonstrates a transactional outbox and explicit reconciliation.
 - Validate outgoing frame depth and bounds; preserve low-level protocol access
   and the existing pinned v0 fixtures.
+- Package the Python adapter, typing marker, application sources, conformance
+  kit, and installed command entry points; bound worker writes and stderr
+  collection, enforce carrier deadlines, and verify wheel and source-archive
+  installations outside the checkout.
+- Earlier, unversioned groundwork: the Python adapter, which pins Core's v0
+  conformance kit and replays it, invokes checked terms, and serves their
+  operations; a bounded serial loopback socket host; an HTTP/1.1 subset parser,
+  router, and renderer written in Jacquard; one named, host-owned SQLite study
+  persistence operation; the synthetic trial assembled end to end; and
+  integration evidence, an authority inventory, measurements of serial
+  execution with the C4 concurrency requirements, the Core requirements report,
+  and the record of Core's published host-boundary evidence pack.
 
 The protocol remains experimental v0. Core is installed separately; automatic
 binding generation still awaits Core's structured host interface exporter.
-
-## 0.1.0
-
-- Package the Python adapter, typing marker, application sources, conformance
-  kit, and installed command entry points.
-- Bound worker writes and stderr collection, enforce carrier deadlines, and
-  verify wheel and source-distribution installations outside the checkout.

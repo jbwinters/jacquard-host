@@ -14,8 +14,10 @@ python3 -m venv .venv
 python -m pip install .
 ```
 
-These instructions install from source. A PyPI release is not required or
-assumed. The source archive includes the examples; the wheel includes the
+These instructions install from source. Each release also attaches its wheel
+and source archive to the [GitHub release](https://github.com/jbwinters/jacquard-host/releases/tag/jacquard-host-0.2.0)
+(`python -m pip install jacquard_host-0.2.0-py3-none-any.whl`); nothing is
+published to PyPI. The source archive includes the examples; the wheel includes the
 library, its typing marker, application resources, and the pinned conformance kit.
 
 ## Install the pinned Core release

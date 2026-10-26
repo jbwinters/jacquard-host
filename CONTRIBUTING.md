@@ -87,6 +87,28 @@ pinned kit, both maintained by `scripts/core_pin.py`; do not edit them by hand.
 `go/examples/data/` embeds copies of the example rules and inputs: after changing
 a file under `examples/`, copy it there too (a Go test fails if they differ).
 
+## Releasing
+
+A release is one commit on `main` with green CI. To cut one:
+
+1. Open a pull request that dates the CHANGELOG entry and updates any version
+   references in the docs. Keep the Python (`src/jacquard_host/__init__.py`),
+   npm (`typescript/package.json`, `typescript/src/version.ts`), and release
+   versions equal.
+2. After it merges, tag the merge commit twice, with annotated tags
+   (`git tag -a`):
+   `jacquard-host-X.Y.Z` for the repository and its assets, and `go/vX.Y.Z`
+   for the Go module.
+3. Build the assets from a clean checkout of the tag:
+   - the sdist and wheel, through `setuptools.build_meta`, as
+     `scripts/check_distribution.py` does;
+   - the npm tarball (`npm pack` in `typescript/`);
+   - a `SHA256SUMS` file.
+4. Publish a GitHub release for `jacquard-host-X.Y.Z` with the CHANGELOG
+   entry as its notes and the assets attached.
+
+Nothing is published to PyPI or npm.
+
 ## TypeScript
 
 The independent Node.js adapter lives in `typescript/`; it does not call Python.

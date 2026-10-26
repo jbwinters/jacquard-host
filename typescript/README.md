@@ -35,6 +35,8 @@ npm pack
 # In your application: npm install /absolute/path/to/jacquard-host-0.2.0.tgz
 ```
 
+Each release also attaches the tarball to its
+[GitHub release](https://github.com/jbwinters/jacquard-host/releases/tag/jacquard-host-0.2.0).
 These commands do not assume an npm registry release. TypeScript applications
 need their usual development tools, `typescript` and `@types/node`, with Node's
 declarations enabled (for example `"types": ["node"]` in `tsconfig.json`). Runtime

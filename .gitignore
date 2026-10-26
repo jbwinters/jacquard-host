@@ -29,3 +29,4 @@ typescript/data/
 typescript/LICENSE
 typescript/NOTICE
 *.tgz
+sdist/
