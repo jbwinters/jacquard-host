@@ -304,7 +304,7 @@ fn encode_type_at(t: &BoundaryType, budget: &mut Budget, depth: usize) -> Result
     Ok(Json::Object(fields))
 }
 
-fn canonical_int(text: &str) -> Option<i64> {
+fn canonical_int(text: &str) -> Result<i64> {
     let digits = text.strip_prefix('-').unwrap_or(text);
     let canonical = !digits.is_empty()
         && digits.bytes().all(|byte| byte.is_ascii_digit())
@@ -312,9 +312,12 @@ fn canonical_int(text: &str) -> Option<i64> {
         && text != "-0"
         && text.len() <= 20;
     if !canonical {
-        return None;
+        return Err(ProtocolError::malformed("Int must use canonical 63-bit decimal text"));
     }
-    text.parse::<i64>().ok().filter(|value| (INT_MIN..=INT_MAX).contains(value))
+    text.parse::<i64>()
+        .ok()
+        .filter(|value| (INT_MIN..=INT_MAX).contains(value))
+        .ok_or_else(|| ProtocolError::malformed("Int is outside the 63-bit range"))
 }
 
 /// Parses one wire boundary value.
@@ -327,9 +330,7 @@ pub fn decode_value(value: &Json, budget: &mut Budget) -> Result<Value> {
             match kind {
                 "int" => {
                     let text = as_str(&fields["value"])?;
-                    canonical_int(text)
-                        .map(Value::Int)
-                        .ok_or_else(|| ProtocolError::malformed("Int must use canonical 63-bit decimal text"))
+                    canonical_int(text).map(Value::Int)
                 }
                 "text" => {
                     let text = as_str(&fields["value"])?;
@@ -912,7 +913,7 @@ impl Session {
 
     fn require(&self, states: &[State]) -> Result<()> {
         if !states.contains(&self.state) {
-            return Err(ProtocolError::order(format!("message is not permitted in state {:?}", self.state)));
+            return Err(ProtocolError::order(format!("message is not permitted in state {}", self.state.as_str())));
         }
         Ok(())
     }

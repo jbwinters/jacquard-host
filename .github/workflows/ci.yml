@@ -130,6 +130,8 @@ jobs:
       - name: Run independent Go adapter against Core
         run: go test -count=1 -v ./...
         working-directory: go
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Run independent Rust adapter against Core
         run: cargo test --locked -- --nocapture
         working-directory: rust

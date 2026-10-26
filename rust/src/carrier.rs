@@ -131,6 +131,10 @@ pub struct Worker {
     stderr: Arc<Stderr>,
     /// Set at disposal; every pipe thread then stops and closes its pipe.
     stop: Arc<AtomicBool>,
+    /// Set when input closes or the worker expires; stops a write in progress.
+    input_stop: Arc<AtomicBool>,
+    /// Set when the worker expires; stops a read in progress.
+    output_stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
     expires: Instant,
     cancel: Cancel,
@@ -168,6 +172,8 @@ impl Worker {
             stderr_done: None,
             stderr: Arc::clone(&stderr),
             stop: Arc::new(AtomicBool::new(false)),
+            input_stop: Arc::new(AtomicBool::new(false)),
+            output_stop: Arc::new(AtomicBool::new(false)),
             threads: Vec::new(),
             expires: Instant::now() + options.deadline.unwrap_or(DEFAULT_DEADLINE),
             cancel,
@@ -188,9 +194,9 @@ impl Worker {
                 return Ok(worker);
             }
         };
-        let mut stdout = Pipe::new(child.stdout.take().expect("piped stdout"), &worker.stop);
-        let mut err = Pipe::new(child.stderr.take().expect("piped stderr"), &worker.stop);
-        let mut stdin = Pipe::new(child.stdin.take().expect("piped stdin"), &worker.stop);
+        let mut stdout = Pipe::new(child.stdout.take().expect("piped stdout"), &worker.stop, &worker.output_stop);
+        let mut err = Pipe::new(child.stderr.take().expect("piped stderr"), &worker.stop, &worker.stop);
+        let mut stdin = Pipe::new(child.stdin.take().expect("piped stdin"), &worker.stop, &worker.input_stop);
         // Stored first, so a failure below still kills and reaps the worker.
         worker.child = Some(child);
         // stdout: one frame per request, read under the requested limits.
@@ -280,7 +286,7 @@ impl Worker {
     }
 
     /// Kills the worker's process group (its leader is unreaped) and stops
-    /// accepting pipe traffic.
+    /// pipe traffic, including a read or write in progress.
     fn expire(&mut self) {
         self.expired.store(true, Ordering::SeqCst);
         if !self.reaped
@@ -288,7 +294,8 @@ impl Worker {
         {
             kill_tree(child);
         }
-        self.stdin = None;
+        self.output_stop.store(true, Ordering::SeqCst);
+        self.close_input();
     }
 
     /// Waits on `receive` until it yields, the deadline passes, or the
@@ -373,8 +380,9 @@ impl Worker {
         self.write_bytes(bytes)
     }
 
-    /// Closes the worker's stdin once any write in progress ends.
+    /// Closes the worker's stdin, stopping any write in progress.
     pub fn close_input(&mut self) {
+        self.input_stop.store(true, Ordering::SeqCst);
         self.stdin = None;
     }
 
@@ -468,8 +476,9 @@ impl Worker {
     }
 
     /// Whether stderr reached end of stream within `limit`. The wait also ends
-    /// at expiry or cancellation (checked unless `killing`), after which it
-    /// waits only briefly: the process group has already been signalled.
+    /// at the lifetime deadline, expiry, or cancellation (expiry is enforced
+    /// unless `killing`), after which it waits only briefly: the process group
+    /// has already been signalled.
     fn stderr_drained(&mut self, limit: Duration, killing: bool) -> bool {
         let Some(done) = self.stderr_done.take() else {
             return true;
@@ -477,7 +486,10 @@ impl Worker {
         let start = Instant::now();
         let mut ended: Option<Instant> = None;
         let drained = loop {
-            if ended.is_none() && (self.is_expired() || self.cancel.is_cancelled() || (!killing && self.fault().is_some())) {
+            // fault() first, so expiry during the grace is recorded as the fault.
+            let faulted = !killing && self.fault().is_some();
+            let late = self.is_expired() || self.cancel.is_cancelled() || Instant::now() >= self.expires;
+            if ended.is_none() && (faulted || late) {
                 ended = Some(Instant::now());
             }
             let left = match ended {
@@ -549,16 +561,17 @@ fn read_frame(stdout: &mut impl Read, limits: &Limits) -> FrameResult {
 
 /// One end of a worker pipe. On Unix every read or write first waits for
 /// readiness with `poll` in short slices and gives up once the worker is
-/// disposed, so a descendant holding the other end cannot pin the thread.
+/// disposed or this pipe is stopped, so a descendant holding the other end
+/// cannot pin the thread or keep receiving data.
 struct Pipe<T> {
     inner: T,
     #[cfg_attr(not(unix), allow(dead_code))]
-    stop: Arc<AtomicBool>,
+    stops: [Arc<AtomicBool>; 2],
 }
 
 impl<T> Pipe<T> {
-    fn new(inner: T, stop: &Arc<AtomicBool>) -> Pipe<T> {
-        Pipe { inner, stop: Arc::clone(stop) }
+    fn new(inner: T, all: &Arc<AtomicBool>, own: &Arc<AtomicBool>) -> Pipe<T> {
+        Pipe { inner, stops: [Arc::clone(all), Arc::clone(own)] }
     }
 }
 
@@ -567,7 +580,7 @@ impl<T: std::os::fd::AsRawFd> Pipe<T> {
     fn ready(&self, events: i16) -> std::io::Result<()> {
         let mut entry = sys::PollFd { fd: self.inner.as_raw_fd(), events, revents: 0 };
         loop {
-            if self.stop.load(Ordering::SeqCst) {
+            if self.stops.iter().any(|stop| stop.load(Ordering::SeqCst)) {
                 return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "worker pipe closed by the host"));
             }
             // SAFETY: one valid pollfd entry for a descriptor this pipe owns.
@@ -681,10 +694,18 @@ fn kill_group(pid: u32) {
 #[cfg(not(unix))]
 fn kill_group(_: u32) {}
 
+/// Test-only: makes Linux take the exit wait used where `waitid` is
+/// unavailable. Not part of the adapter's interface.
+#[doc(hidden)]
+pub static TEST_WITHOUT_WAITID: AtomicBool = AtomicBool::new(false);
+
 /// Whether the worker has exited, without reaping it: `Some(true)` once it
 /// has, `Some(false)` while it runs, `None` where the platform cannot tell.
 #[cfg(target_os = "linux")]
 fn exited_unreaped(pid: u32) -> Option<bool> {
+    if TEST_WITHOUT_WAITID.load(Ordering::SeqCst) {
+        return None;
+    }
     const P_PID: i32 = 1;
     const WEXITED: i32 = 4;
     const WNOHANG: i32 = 1;
@@ -711,22 +732,73 @@ fn exited_unreaped(_: u32) -> Option<bool> {
     None
 }
 
+/// Names the POSIX signals common to Linux and macOS, with each platform's
+/// numbering; other signals are reported by number.
 #[cfg(unix)]
 fn signal_name(signal: i32) -> String {
-    let name = match signal {
-        1 => "SIGHUP",
-        2 => "SIGINT",
-        3 => "SIGQUIT",
-        4 => "SIGILL",
-        5 => "SIGTRAP",
-        6 => "SIGABRT",
-        8 => "SIGFPE",
-        9 => "SIGKILL",
-        11 => "SIGSEGV",
-        13 => "SIGPIPE",
-        14 => "SIGALRM",
-        15 => "SIGTERM",
-        _ => return format!("SIG{signal}"),
-    };
-    name.to_owned()
+    #[cfg(all(target_os = "linux", not(any(target_arch = "mips", target_arch = "mips64", target_arch = "sparc64"))))]
+    const PLATFORM: &[(i32, &str)] = &[
+        (7, "SIGBUS"),
+        (10, "SIGUSR1"),
+        (12, "SIGUSR2"),
+        (17, "SIGCHLD"),
+        (18, "SIGCONT"),
+        (19, "SIGSTOP"),
+        (20, "SIGTSTP"),
+        (21, "SIGTTIN"),
+        (22, "SIGTTOU"),
+        (23, "SIGURG"),
+        (24, "SIGXCPU"),
+        (25, "SIGXFSZ"),
+        (26, "SIGVTALRM"),
+        (27, "SIGPROF"),
+        (28, "SIGWINCH"),
+        (29, "SIGIO"),
+        (31, "SIGSYS"),
+    ];
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    const PLATFORM: &[(i32, &str)] = &[
+        (10, "SIGBUS"),
+        (12, "SIGSYS"),
+        (16, "SIGURG"),
+        (17, "SIGSTOP"),
+        (18, "SIGTSTP"),
+        (19, "SIGCONT"),
+        (20, "SIGCHLD"),
+        (21, "SIGTTIN"),
+        (22, "SIGTTOU"),
+        (23, "SIGIO"),
+        (24, "SIGXCPU"),
+        (25, "SIGXFSZ"),
+        (26, "SIGVTALRM"),
+        (27, "SIGPROF"),
+        (28, "SIGWINCH"),
+        (30, "SIGUSR1"),
+        (31, "SIGUSR2"),
+    ];
+    #[cfg(not(any(
+        all(target_os = "linux", not(any(target_arch = "mips", target_arch = "mips64", target_arch = "sparc64"))),
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    const PLATFORM: &[(i32, &str)] = &[];
+    const COMMON: &[(i32, &str)] = &[
+        (1, "SIGHUP"),
+        (2, "SIGINT"),
+        (3, "SIGQUIT"),
+        (4, "SIGILL"),
+        (5, "SIGTRAP"),
+        (6, "SIGABRT"),
+        (8, "SIGFPE"),
+        (9, "SIGKILL"),
+        (11, "SIGSEGV"),
+        (13, "SIGPIPE"),
+        (14, "SIGALRM"),
+        (15, "SIGTERM"),
+    ];
+    COMMON
+        .iter()
+        .chain(PLATFORM)
+        .find(|(number, _)| *number == signal)
+        .map_or_else(|| format!("SIG{signal}"), |(_, name)| (*name).to_owned())
 }

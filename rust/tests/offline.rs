@@ -538,6 +538,18 @@ mod unix {
     }
 
     #[test]
+    fn cleanup_after_an_early_error_is_bounded_by_the_deadline() {
+        // The worker sends a malformed hello and exits; its escaped descendant
+        // keeps stderr open, so cleanup can end only at the deadline.
+        let start = Instant::now();
+        let result = invoke_ready(&faulty("escaped-descendant-unknown-field", Duration::from_millis(300), None));
+        let elapsed = start.elapsed();
+        sigkill(descendant("escaped-descendant-unknown-field", &result.stderr));
+        assert!(result.kind == ResultKind::ProtocolError && result.code() == "E1601", "{:?} {}", result.kind, result.message());
+        assert!(elapsed < Duration::from_millis(1000), "cleanup took {elapsed:?}");
+    }
+
+    #[test]
     fn escaped_descendant_does_not_hold_the_host() {
         let start = Instant::now();
         let result = invoke_ready(&faulty("escaped-descendant", Duration::from_secs(10), None));

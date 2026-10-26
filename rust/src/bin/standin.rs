@@ -37,7 +37,7 @@ mod standin {
                 let _ = std::io::stdout().write_all(&[0, 0, 0]);
                 exit(0)
             }
-            "escaped-descendant" => {
+            "escaped-descendant" | "escaped-descendant-unknown-field" => {
                 // A descendant in its own process group holds stderr; killing the
                 // worker's group misses it.
                 let mut child = Command::new("sleep");
@@ -45,7 +45,7 @@ mod standin {
                 std::os::unix::process::CommandExt::process_group(&mut child, 0);
                 let pid = child.spawn().map(|child| child.id()).unwrap_or_else(|_| exit(3));
                 eprint!("{pid}");
-                exit(fault(&kit(), "ok"))
+                exit(fault(&kit(), if mode == "escaped-descendant" { "ok" } else { "unknown-field" }))
             }
             "stderr-descendant" | "stderr-descendant-nonzero" => {
                 // Answer normally, but leave a descendant holding only stderr.
@@ -152,6 +152,9 @@ mod standin {
                 close_stdout();
                 if mode == "slow-exit" {
                     sleep(Duration::from_millis(1500));
+                }
+                if mode == "hang-after-close" {
+                    block();
                 }
                 return if mode == "nonzero" { 74 } else { 0 };
             }
