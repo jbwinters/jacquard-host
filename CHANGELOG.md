@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Rust adapter: an independent, standard-library-only crate in `rust/`
+  (`jacquard-host`, Rust 1.88+). It provides strict codecs, the session state
+  machine, a bounded process carrier for `jacquard host worker`, and a `Host`
+  with a closed operation registry. It also embeds the pinned kit and replays
+  all 21 recordings. It is protocol-level only, with no SDK layer.
+  `scripts/core_pin.py` now generates `rust/src/compat.rs` and keeps
+  `rust/kit/` in sync, and CI runs the crate's offline and live tests.
+
 ## 0.2.0 — 2026-10-25
 
 The first jacquard-host release: Python, TypeScript, and Go adapters and SDKs
