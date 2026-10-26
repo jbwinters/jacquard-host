@@ -54,31 +54,43 @@ pub(crate) fn run(binary: &Path, prelude: &Path, arguments: &[&OsStr]) -> Result
     let mut command = Command::new(binary);
     command.args(arguments).env("JACQUARD_PRELUDE", prelude).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate(&mut command);
-    let mut child = command.spawn().map_err(|error| failed(error.to_string()))?;
+    let mut running = Running { child: command.spawn().map_err(|error| failed(error.to_string()))?, reaped: false };
     let stop = Arc::new(AtomicBool::new(false));
-    let readers = Readers {
-        stop: stop.clone(),
-        stdout: Some(spawn_reader(Pipe::new(child.stdout.take().expect("piped stdout"), &stop, &stop), STDOUT_LIMIT)),
-        stderr: Some(spawn_reader(Pipe::new(child.stderr.take().expect("piped stderr"), &stop, &stop), STDERR_LIMIT)),
-    };
+    // Declared after `running`, so on any early return the readers stop
+    // first and the command's group is then killed and reaped.
+    let mut readers = Readers { stop: stop.clone(), stdout: None, stderr: None };
+    let stdout = Pipe::new(running.child.stdout.take().expect("piped stdout"), &stop, &stop);
+    readers.stdout = Some(spawn_reader(stdout, STDOUT_LIMIT).map_err(|error| failed(format!("cannot start a reader: {error}")))?);
+    let stderr = Pipe::new(running.child.stderr.take().expect("piped stderr"), &stop, &stop);
+    readers.stderr = Some(spawn_reader(stderr, STDERR_LIMIT).map_err(|error| failed(format!("cannot start a reader: {error}")))?);
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     let status = loop {
+        let child = &mut running.child;
         match exited_unreaped(child.id()) {
             Some(true) => {
                 // The leader is unreaped, so its group id is still ours.
                 kill_group(child.id());
+                running.reaped = true;
                 break child.wait();
             }
             Some(false) => {}
             None => match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
+                Ok(Some(status)) => {
+                    running.reaped = true;
+                    break Ok(status);
+                }
                 Ok(None) => {}
-                Err(error) => break Err(error),
+                Err(error) => {
+                    // The state is unknown; never signal a group that may
+                    // no longer be ours.
+                    running.reaped = true;
+                    break Err(error);
+                }
             },
         }
         if Instant::now() >= deadline {
-            kill_tree(&mut child);
-            let _ = child.wait();
+            drop(readers);
+            drop(running);
             return Err(failed(format!("no exit within {} seconds", COMMAND_TIMEOUT.as_secs())));
         }
         thread::sleep(Duration::from_millis(10));
@@ -102,11 +114,41 @@ const OUTPUT_GRACE: Duration = Duration::from_secs(1);
 
 type Output = (Vec<u8>, bool);
 
-fn spawn_reader<R: Send + 'static>(source: Pipe<R>, limit: usize) -> thread::JoinHandle<Output>
+/// The running command; dropping it before it is reaped kills its process
+/// group and reaps it.
+struct Running {
+    child: std::process::Child,
+    reaped: bool,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if !self.reaped {
+            kill_tree(&mut self.child);
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: the reader start (0 for stdout, 1 for stderr) that fails.
+    static FAIL_READER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static READERS_STARTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn spawn_reader<R: Send + 'static>(source: Pipe<R>, limit: usize) -> std::io::Result<thread::JoinHandle<Output>>
 where
     Pipe<R>: Read,
 {
-    thread::spawn(move || bounded_read(source, limit))
+    #[cfg(test)]
+    {
+        let index = READERS_STARTED.with(|started| started.replace(started.get() + 1));
+        if FAIL_READER.with(std::cell::Cell::get) == Some(index) {
+            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "injected"));
+        }
+    }
+    thread::Builder::new().name("jacquard-core-output".into()).spawn(move || bounded_read(source, limit))
 }
 
 /// The two output readers. Dropping them stops and joins them on Unix,
@@ -234,6 +276,32 @@ pub(crate) fn base64(data: &[u8]) -> String {
         }
     }
     out
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::{FAIL_READER, READERS_STARTED, run};
+    use std::ffi::OsStr;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_reader_that_cannot_start_stops_the_other_and_the_command() {
+        for position in [0, 1] {
+            let marker = std::env::temp_dir().join(format!("jacquard-host-rust-reader-{}-{position}", std::process::id()));
+            let _ = std::fs::remove_file(&marker);
+            READERS_STARTED.with(|started| started.set(0));
+            FAIL_READER.with(|fail| fail.set(Some(position)));
+            let script = format!("sleep 0.3; touch '{}'", marker.display());
+            let started = Instant::now();
+            let error = run(Path::new("/bin/sh"), Path::new("/"), &[OsStr::new("-c"), OsStr::new(&script)]).unwrap_err();
+            FAIL_READER.with(|fail| fail.set(None));
+            assert!(error.to_string().contains("cannot start a reader: injected"), "{error}");
+            assert!(started.elapsed() < Duration::from_millis(250), "cleanup waited for the command");
+            std::thread::sleep(Duration::from_millis(600));
+            assert!(!marker.exists(), "the command kept running after reader {position} failed to start");
+        }
+    }
 }
 
 #[cfg(test)]

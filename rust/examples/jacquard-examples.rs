@@ -546,6 +546,13 @@ impl Warehouse {
     }
 }
 
+fn describe(error: &HandlerError) -> String {
+    match error {
+        HandlerError::Failure(category, message) => format!("{}: {message}", category.as_str()),
+        HandlerError::Unknown => "completion unknown".into(),
+    }
+}
+
 fn locked(warehouse: &Mutex<Warehouse>) -> MutexGuard<'_, Warehouse> {
     warehouse.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -631,7 +638,8 @@ pub fn run(arguments: &[String], out: &mut impl Write) -> Result<(), Failure> {
             let incidents = objects(input, "incidents")?
                 .into_iter()
                 .map(|incident| {
-                    let owner = match field(incident, "owner")? {
+                    // A missing owner is null, as in the Go command.
+                    let owner = match incident.get("owner").unwrap_or(&Json::Null) {
                         Json::Null => None,
                         owner => Some(owner.as_str().ok_or_else(|| other("input: owner must be text or null"))?.to_owned()),
                     };
@@ -673,7 +681,7 @@ pub fn run(arguments: &[String], out: &mut impl Write) -> Result<(), Failure> {
                 if deliver_pending {
                     // Like the Go command, a failed delivery prints no count.
                     let (delivered, result) = locked(&warehouse).deliver_pending();
-                    result.map_err(|error| other(format!("delivery failed: {error:?}")))?;
+                    result.map_err(|error| other(format!("delivery failed: {}", describe(&error))))?;
                     let count = Json::Object(Object::from([("delivered".into(), Json::Int(delivered as i64))]));
                     writeln!(out, "{}", stringify(&count, 2).expect("flat"))?;
                     return Ok(());

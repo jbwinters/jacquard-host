@@ -565,6 +565,7 @@ impl Program {
         let constructors = metadata.constructors.into_iter().collect();
         let prelude = runtime.inner.prelude.to_str().expect("checked UTF-8").to_owned();
         let env = std::env::vars_os()
+            // The carrier takes UTF-8 pairs; other variables are not passed.
             .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
             .filter(|(key, _)| key != "JACQUARD_PRELUDE")
             .chain([("JACQUARD_PRELUDE".to_owned(), prelude)])
@@ -912,7 +913,12 @@ impl Invocation {
         if let Some(error) = self.error() {
             return Err(error.into());
         }
-        let value = self.raw.value.as_ref().expect("an ok result has a value");
+        let Some(value) = self.raw.value.as_ref() else {
+            return Err(Error::Binding {
+                message: format!("{}: Core completed without a value", self.function.name),
+                result: Some(Box::new(self.raw.clone())),
+            });
+        };
         self.function.data.decode(value).map_err(|error| Error::Binding {
             message: format!("{}: Core completed, but result mapping failed: {error}", self.function.name),
             result: Some(Box::new(self.raw.clone())),
@@ -936,8 +942,9 @@ impl Invocation {
     }
 
     /// Writes the invocation's frames and host evidence. The record contains
-    /// argument and result values; it is written only when called, with
-    /// owner-only permissions where the platform has them.
+    /// argument and result values; it is written only when called. A new
+    /// file is created owner-only on Unix; an existing file keeps its
+    /// permissions.
     pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let raw = &self.raw;
         let frames = |list: &[Object]| Json::Array(list.iter().cloned().map(Json::Object).collect());

@@ -90,8 +90,8 @@ If its output stays open for a second after it exits (a descendant that left
 the group holds it), preparation fails, and the host stops reading and closes
 the pipes; the descendant keeps running.
 
-Arguments are a tuple, such as `(35,)` or `(&policy, &rows)`, or a slice of
-`&dyn Encode`. `call` decodes the result into the type you ask for; `invoke`
+Arguments are a tuple of up to six values, such as `(35,)` or
+`(&policy, &rows)`, or a slice of `&dyn Encode` for more. `call` decodes the result into the type you ask for; `invoke`
 keeps the whole `Invocation`. The `_with` variants take a `Cancel`.
 `Invocation::save` writes the frames and evidence, including argument and
 result values; a new file is created owner-only on Unix, and an existing
@@ -186,7 +186,8 @@ An `Operations` value maps operation names (store spelling such as
 `Operations` may serve several effects.
 
 - **Parameters:** a closure may take a leading `&HandlerContext`. The
-  remaining parameters decode from the request into their Rust types.
+  remaining parameters, up to six, decode from the request into their Rust
+  types.
 - **Results:** a closure returns `Result<T, HandlerError>`, where `T` encodes
   the result (`()` for unit).
 - **Failures:** return `HandlerError::unsupported`, `refused`,
@@ -348,7 +349,9 @@ cargo test
 cargo test -- --nocapture
 ```
 
-The live tests in `tests/live.rs`, `tests/sdk_live.rs`, and
+`tests/sdk_examples.rs` also runs the built example binary, so run it as part
+of a plain `cargo test`, which builds the examples, rather than alone with
+`--test`. The live tests in `tests/live.rs`, `tests/sdk_live.rs`, and
 `tests/sdk_examples.rs` skip without `JACQUARD_BIN` and
 `JACQUARD_PRELUDE` (set `JACQUARD_REQUIRE_LIVE` to make them fail instead).
 The offline tests drive `jacquard-host-standin`, a Unix-only test fixture

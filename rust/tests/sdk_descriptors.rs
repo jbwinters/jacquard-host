@@ -44,6 +44,18 @@ fn an_escaped_descendant_holding_core_output_leaks_nothing() {
         let error = runtime.prepare(&[root.join("rules.jac")], &options).expect_err("output stays open");
         (error, started.elapsed())
     };
+    // Kills the escaped sleepers and removes the scratch directory even when
+    // an assertion fails.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for pid in std::fs::read_to_string(self.0.join("pids")).unwrap_or_default().split_whitespace() {
+                let _ = std::process::Command::new("kill").arg("-9").arg(pid).status();
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
     // Warm up thread-local and allocator state before counting.
     let _ = attempt();
     let (threads, descriptors) = (count("/proc/self/task"), count("/proc/self/fd"));
@@ -53,9 +65,5 @@ fn an_escaped_descendant_holding_core_output_leaks_nothing() {
         assert!(elapsed < Duration::from_millis(1800), "the grace period took {elapsed:?}");
     }
     let after = (count("/proc/self/task"), count("/proc/self/fd"));
-    for pid in std::fs::read_to_string(&pids).unwrap_or_default().split_whitespace() {
-        let _ = std::process::Command::new("kill").arg("-9").arg(pid).status();
-    }
-    let _ = std::fs::remove_dir_all(&root);
     assert_eq!(after, (threads, descriptors), "threads and descriptors grew");
 }
