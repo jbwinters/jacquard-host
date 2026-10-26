@@ -3,11 +3,11 @@ name = "jacquard-host"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Independent Rust adapter for Jacquard Core's experimental jacquard-host-v0 protocol"
+description = "Independent Rust adapter and SDK for Jacquard Core's experimental jacquard-host-v0 protocol"
 license = "Apache-2.0"
 repository = "https://github.com/jbwinters/jacquard-host"
 readme = "README.md"
-include = ["src/**", "tests/**", "kit/**", "README.md", "LICENSE", "NOTICE", "Cargo.toml"]
+include = ["src/**", "tests/**", "examples/**", "kit/**", "README.md", "LICENSE", "NOTICE", "Cargo.toml"]
 
 [dependencies]
 

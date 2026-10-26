@@ -79,6 +79,19 @@ on Linux 7.0. The crate uses only the standard library.
 | Lint | `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean; clippy is also clean for `aarch64-apple-darwin` and `x86_64-pc-windows-gnu` (type-checked only, not run) |
 | Pin consistency | `rust/src/compat.rs` is generated, and `rust/kit/` matches the pinned digests and the Python copy (`scripts/core_pin.py check`) |
 
+## Rust SDK and projects (2026-10-26)
+
+Recorded against the same `jacquard-core-0.3.0` release asset, with Rust 1.99.1
+on Linux 7.0. Offline tests and clippy also pass on Rust 1.88. The crate still
+uses only the standard library.
+
+| Lane | Result |
+|---|---|
+| Rust SDK offline | 10 further unit tests and 7 further doctests pass: signature parsing, identity groups, and name spellings; native values through checked types (records with optional fields in lists, Real bits, the full Int range, refused out-of-range integers, integers at a `Real` parameter, and mismatched types reported at their argument path); `variants!` enums and unions, wrong constructors and field counts, nested options, `Dynamic` values, refused builtin constructors by name, and depth refusal; selected text and collection limits on encode and decode; tuple and `&dyn Encode` arguments; closure handlers (context, structured failures, arity, unmappable arguments that never run the handler, plain errors as completion unknown, unrepresentable results, replacement); runtime option and source validation before Core runs; and, with a fake Core, one version check across four concurrent preparations, a failing `check` reported promptly although a descendant holds Core's output, no staging directory left behind, and a version mismatch refused and checked again |
+| Rust SDK live | 12 further tests pass: quickstart calls, rendering, and a saved owner-only inspection file; triage records, enums, and options over 64 rows in explicit batches against an oracle; late invalid input, over-deep calls, wrong argument types, and wrong argument counts refused before any worker; binding completeness, refused unknown operation names, and pure calls without services; unknown completion once with raw evidence; 25 planning cases matching an independent exhaustive oracle with feasible assignments; warm cache reuse without Core commands, byte-exact source invalidation, corruption refusal; full Int range, Real bits, nested options, and decode overflow retaining the result; spawn failure and cancellation; output overflow without adaptive batching; result-mapping failure retaining the raw result; prelude contents in the cache key and concurrent preparation publishing once |
+| Rust projects live | 2 further tests pass: all four `jacquard-examples` commands, including duplicate fulfillment, `--inspect`, explicit delivery, and usage errors; and the three fulfillment faults (E1612 after commit, E1613 on publish, E1612 after delivery) recovered explicitly across restart, each receipt delivered once |
+| Unchanged lanes | The adapter's 28 offline, descriptor, fallback, NOTICE, and 4 live tests, the 21-recording kit replay, `scripts/core_pin.py check`, the offline Python suite, and `scripts/check_distribution.py` pass |
+
 ## Outcome frame node budget (2026-10-25)
 
 Core's `outcome` encodes the evidence's interface types and the result value

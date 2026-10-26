@@ -716,23 +716,23 @@ mod sys {
 }
 
 #[cfg(unix)]
-fn isolate(command: &mut Command) {
+pub(crate) fn isolate(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn isolate(_: &mut Command) {}
+pub(crate) fn isolate(_: &mut Command) {}
 
 /// Kills an unreaped worker and its process group.
-fn kill_tree(child: &mut Child) {
+pub(crate) fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     kill_group(child.id());
     let _ = child.kill();
 }
 
 #[cfg(unix)]
-fn kill_group(pid: u32) {
+pub(crate) fn kill_group(pid: u32) {
     // SAFETY: kill(2) with a negative pid signals a process group; the caller
     // guarantees the leader is unreaped, so the group id cannot be reused.
     unsafe {
@@ -741,7 +741,7 @@ fn kill_group(pid: u32) {
 }
 
 #[cfg(not(unix))]
-fn kill_group(_: u32) {}
+pub(crate) fn kill_group(_: u32) {}
 
 /// Test-only: makes Linux take the exit wait used where `waitid` is
 /// unavailable. Not part of the adapter's interface.
@@ -751,7 +751,7 @@ pub static TEST_WITHOUT_WAITID: AtomicBool = AtomicBool::new(false);
 /// Whether the worker has exited, without reaping it: `Some(true)` once it
 /// has, `Some(false)` while it runs, `None` where the platform cannot tell.
 #[cfg(target_os = "linux")]
-fn exited_unreaped(pid: u32) -> Option<bool> {
+pub(crate) fn exited_unreaped(pid: u32) -> Option<bool> {
     if TEST_WITHOUT_WAITID.load(Ordering::SeqCst) {
         return None;
     }
@@ -777,7 +777,7 @@ fn exited_unreaped(pid: u32) -> Option<bool> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn exited_unreaped(_: u32) -> Option<bool> {
+pub(crate) fn exited_unreaped(_: u32) -> Option<bool> {
     None
 }
 

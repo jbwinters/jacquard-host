@@ -6,9 +6,18 @@
   (`jacquard-host`, Rust 1.88+). It provides strict codecs, the session state
   machine, a bounded process carrier for `jacquard host worker`, and a `Host`
   with a closed operation registry. It also embeds the pinned kit and replays
-  all 21 recordings. It is protocol-level only, with no SDK layer.
-  `scripts/core_pin.py` now generates `rust/src/compat.rs` and keeps
-  `rust/kit/` in sync, and CI runs the crate's offline and live tests.
+  all 21 recordings. `scripts/core_pin.py` now generates `rust/src/compat.rs`
+  and keeps `rust/kit/` in sync, and CI runs the crate's offline and live
+  tests.
+- Rust SDK (`jacquard_host::sdk`): prepares and caches checked programs with
+  Core's public commands, maps native Rust values through the `Encode` and
+  `Decode` traits (with `record!` and `variants!` for application types, and
+  `Dynamic` for untyped code), binds closures to exact operation identities,
+  checks arguments against the checked signature before a worker starts, and
+  keeps each invocation's raw evidence. `map_batches` runs explicit batches.
+  The four example projects run as `cargo run --example jacquard-examples`.
+  The low-level host gains `From<E: Error> for HandlerError`, so `?` in a
+  handler reports completion unknown.
 
 ## 0.2.0 — 2026-10-25
 
