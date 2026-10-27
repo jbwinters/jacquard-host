@@ -262,6 +262,9 @@ public final class Host {
 
     private record Failed(FailureCategory category, String message) implements Answer {}
 
+    /** The call stopped before the handler began; the fault check after the wait reports why. */
+    private static final Answer NOT_STARTED = new Failed(FailureCategory.OUTSIDE_FAILURE, "handler was not started");
+
     /**
      * Runs the handler on its own thread, bounded by the worker lifetime, and
      * renders the response. A handler still running at the deadline is
@@ -274,10 +277,18 @@ public final class Host {
         if (handler == null) {
             answer = new Failed(FailureCategory.UNSUPPORTED_OPERATION, "operation is not configured");
         } else {
+            // Decoding the request takes time; an outside action must not
+            // begin once the call is cancelled, interrupted, or past its
+            // lifetime, so check here and again as the handler thread starts.
+            CarrierException early = worker.fault();
+            if (early != null) {
+                throw early;
+            }
             HandlerContext context = new HandlerContext(worker.expiredFlag(), ended::get, cancel);
             List<Value> arguments = request.arguments();
             CompletableFuture<Answer> done = new CompletableFuture<>();
-            Thread thread = new Thread(() -> done.complete(call(handler, context, arguments)), "jacquard-handler");
+            Thread thread = new Thread(() -> done.complete(worker.stopping() ? NOT_STARTED : call(handler, context, arguments)),
+                    "jacquard-handler");
             thread.setDaemon(true);
             boolean started;
             try {

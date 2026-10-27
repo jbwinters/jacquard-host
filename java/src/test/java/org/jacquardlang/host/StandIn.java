@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -109,6 +110,30 @@ public final class StandIn {
                 block();
             }
             case "replay" -> System.exit(replay(kit(), env(CASE_VAR)));
+            case "large-request" -> {
+                // An effect request whose one argument is a text at the text
+                // ceiling, so the host spends a while decoding it.
+                Transcript effect = transcript(kit(), "one-once-effect-success");
+                send(effect.coreOutput().get(0));
+                readFrame();
+                readFrame();
+                Map<String, Json> request = new TreeMap<>(effect.coreOutput().get(1));
+                request.put("arguments", Json.of(List.of(Json.of(Json.object("kind", Json.of("text"), "value", Json.of("x".repeat(262_144)))))));
+                send(request);
+                block();
+            }
+            case "flood-after-terminal" -> {
+                // The pure recording, then valid frames of about 600 KB each.
+                replay(kit(), kit().transcripts().get(0).name());
+                List<Json> numbers = new ArrayList<>();
+                for (int i = 0; i < 100_000; i++) {
+                    numbers.add(Json.of(i));
+                }
+                Map<String, Json> padding = Json.object("padding", Json.of(numbers));
+                for (int i = 0; i < 300; i++) {
+                    send(padding);
+                }
+            }
             case "" -> System.exit(2);
             default -> System.exit(fault(kit(), mode));
         }
@@ -189,13 +214,19 @@ public final class StandIn {
         }
     }
 
-    private static int replay(Kit kit, String name) {
+    /** The named recording, or null. */
+    private static Transcript transcript(Kit kit, String name) {
         Transcript transcript = null;
         for (Transcript candidate : kit.transcripts()) {
             if (candidate.name().equals(name)) {
                 transcript = candidate;
             }
         }
+        return transcript;
+    }
+
+    private static int replay(Kit kit, String name) {
+        Transcript transcript = transcript(kit, name);
         if (transcript == null) {
             return 3;
         }

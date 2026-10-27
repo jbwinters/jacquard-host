@@ -147,11 +147,25 @@ public final class Replayer {
 
     private static final class Drive {
         final List<Map<String, Json>> observed = new ArrayList<>();
+        /** The most frames kept: one past the recording's, enough to show a divergence. */
+        final int limit;
         boolean ended;
         long skipped;
         Json refusal = Json.NULL;
 
-        boolean read(Worker worker) throws CarrierException {
+        Drive(int limit) {
+            this.limit = limit;
+        }
+
+        /**
+         * Reads one frame. A worker that keeps sending past the recording is
+         * not read further, so it cannot fill memory before the deadline;
+         * disposal then kills it.
+         */
+        boolean read(Worker worker) throws CarrierException, ReplayFailure {
+            if (observed.size() >= limit) {
+                throw new ReplayFailure("Core sent more frames than the recording");
+            }
             Map<String, Json> frame = worker.readFrame(Limits.HARD);
             if (frame == null) {
                 return false;
@@ -214,7 +228,7 @@ public final class Replayer {
             differences.add(error.getMessage());
             return new Replay(transcript.name(), false, "diverges", differences, List.of(), Map.of(), List.of(), null, null, new byte[0]);
         }
-        Drive drive = new Drive();
+        Drive drive = new Drive(transcript.coreOutput().size() + 1);
         try {
             drive.run(worker, transcript);
         } catch (ReplayFailure error) {

@@ -571,15 +571,102 @@ class OfflineTest {
         Interface spec = new Interface(List.of(text), text, List.of(kit.identity("kit-world")));
         Cancel cancel = new Cancel();
         OperationRegistry registry = new OperationRegistry().bind(kit.identity("kit-world"), kit.identity("send"), (context, args) -> {
-            cancel.cancel();
+            // Cancel from elsewhere once the result is being encoded. A
+            // bounded encoder has finished by then; an unbounded one is still
+            // encoding seconds later, and only then sees the cancellation.
+            Thread.ofPlatform().daemon().start(() -> {
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException ignored) {
+                    return;
+                }
+                cancel.cancel();
+            });
             return hugeResult();
         });
         Host host = new Host("unused", new HostOptions(standin("replay", "one-once-effect-success", Duration.ofSeconds(20)), null));
         long start = System.nanoTime();
         InvocationResult result = host.invoke(kit.identity("kit-echo"), spec, List.of(new Value.Text("ping")), registry, cancel);
         long elapsed = (System.nanoTime() - start) / 1_000_000;
-        assertEquals("aborted", reason(result), result.toString());
+        assertTrue(result.ok() || "aborted".equals(reason(result)), result.toString());
         assertTrue(elapsed < 3000, "returned after " + elapsed + " ms");
+    }
+
+    /**
+     * Cancels the call, or interrupts the caller, while it decodes a 256 KiB
+     * effect request, and reports whether the handler then started. Retries
+     * until the stop lands during decoding.
+     */
+    private static void noHandlerAfterAStopDuringDecoding(boolean interrupt) throws Exception {
+        Kit kit = kit();
+        BoundaryType text = new BoundaryType.Nominal(kit.identity("text"), List.of());
+        Interface spec = new Interface(List.of(text), text, List.of(kit.identity("kit-world")));
+        for (int attempt = 0; attempt < 5; attempt++) {
+            Cancel cancel = new Cancel();
+            java.util.concurrent.atomic.AtomicLong stoppedAt = new java.util.concurrent.atomic.AtomicLong();
+            java.util.concurrent.atomic.AtomicLong startedAt = new java.util.concurrent.atomic.AtomicLong();
+            OperationRegistry registry = new OperationRegistry().bind(kit.identity("kit-world"), kit.identity("send"), (context, args) -> {
+                startedAt.set(System.nanoTime());
+                return Value.UNIT;
+            });
+            Thread caller = Thread.currentThread();
+            java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
+            Thread watcher = Thread.ofPlatform().daemon().start(() -> {
+                while (!done.get()) {
+                    for (StackTraceElement frame : caller.getStackTrace()) {
+                        if (frame.getClassName().equals(JsonCodec.class.getName() + "$Decoder") && frame.getMethodName().equals("quoted")) {
+                            stoppedAt.set(System.nanoTime());
+                            if (interrupt) {
+                                caller.interrupt();
+                            } else {
+                                cancel.cancel();
+                            }
+                            return;
+                        }
+                    }
+                }
+            });
+            Host host = new Host("unused", new HostOptions(standin("large-request", "", Duration.ofSeconds(20)), null));
+            InvocationResult result = host.invoke(kit.identity("kit-echo"), spec, List.of(new Value.Text("ping")), registry, cancel);
+            done.set(true);
+            watcher.join();
+            boolean interrupted = Thread.interrupted();
+            if (stoppedAt.get() == 0) {
+                continue;
+            }
+            assertEquals(0, startedAt.get(), "the handler started " + (startedAt.get() - stoppedAt.get()) / 1_000_000 + " ms after the stop");
+            assertEquals("aborted", reason(result), result.toString());
+            assertEquals(interrupt, interrupted);
+            return;
+        }
+        throw new AssertionError("the stop never landed while the request was decoded");
+    }
+
+    @Test
+    void cancellationWhileTheRequestIsDecodedStartsNoHandler() throws Exception {
+        noHandlerAfterAStopDuringDecoding(false);
+    }
+
+    @Test
+    void interruptionWhileTheRequestIsDecodedStartsNoHandler() throws Exception {
+        noHandlerAfterAStopDuringDecoding(true);
+    }
+
+    @Test
+    void replayStopsReadingAWorkerThatSendsPastTheRecording() {
+        Transcript pure = kit().transcripts().get(0);
+        Runtime runtime = Runtime.getRuntime();
+        System.gc();
+        long heapBefore = runtime.totalMemory() - runtime.freeMemory();
+        long start = System.nanoTime();
+        Replay replay = Replayer.replayOne(pure, "unused", standin("flood-after-terminal", "", Duration.ofSeconds(10)), new Cancel());
+        long elapsed = (System.nanoTime() - start) / 1_000_000;
+        System.gc();
+        long heapAfter = runtime.totalMemory() - runtime.freeMemory();
+        assertFalse(replay.matchesRecording(), replay.toString());
+        assertTrue(replay.differences().contains("Core sent more frames than the recording"), replay.differences().toString());
+        assertTrue(elapsed < 3000, "returned after " + elapsed + " ms");
+        assertTrue(heapAfter - heapBefore < 64L << 20, "the heap grew by " + ((heapAfter - heapBefore) >> 20) + " MiB");
     }
 
     @Test

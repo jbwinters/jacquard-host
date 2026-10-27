@@ -341,6 +341,15 @@ public final class Worker implements AutoCloseable {
         return expired.get();
     }
 
+    /**
+     * Whether the call is cancelled, the worker has expired, or its lifetime
+     * has passed. Safe from any thread; it does not see the caller's
+     * interrupt, which {@link #fault()} reports on the caller's thread.
+     */
+    public boolean stopping() {
+        return expired.get() || cancel.isCancelled() || System.nanoTime() - expires >= 0;
+    }
+
     /** A flag handlers can observe; true once the worker expires or is cancelled. */
     public BooleanSupplier expiredFlag() {
         return expired::get;

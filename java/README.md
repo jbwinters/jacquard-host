@@ -98,7 +98,9 @@ an outside failure. A message longer than `max_host_message_bytes` is cut at a
 code point, and a lone surrogate in it becomes U+FFFD.
 
 Each handler runs on its own daemon thread, bounded by the worker's lifetime
-deadline. At the deadline, when the caller's `Cancel` is triggered, or when the
+deadline. No handler starts once the call is cancelled, interrupted, or past
+its lifetime: the host checks after decoding the request and again as the
+handler thread begins. At the deadline, when the caller's `Cancel` is triggered, or when the
 calling thread is interrupted, the host kills the worker's process tree and
 sends no late response. An interrupt is reported as an abort, and the caller's
 interrupt status is restored before `invoke` returns. Cancellation is
