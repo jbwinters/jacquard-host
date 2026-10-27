@@ -1,5 +1,5 @@
-//! Runs alone in its own test process so descriptor and thread counts are
-//! exact.
+//! Runs alone in its own test process so descriptor counts are exact and
+//! thread counts settle to the baseline.
 
 #![cfg(target_os = "linux")]
 
@@ -30,6 +30,21 @@ fn count(directory: &str) -> usize {
     std::fs::read_dir(directory).unwrap().count()
 }
 
+/// The thread count once it is at most `limit`, or after two seconds. A
+/// joined thread can stay listed in `/proc/self/task` briefly after it exits,
+/// so an exact count taken at once can see one more; a leak persists.
+/// Descriptors need no wait: a joined thread has already closed its pipe.
+fn settled_threads(limit: usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let current = count("/proc/self/task");
+        if current <= limit || Instant::now() >= deadline {
+            return current;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn invocations_release_their_pipes_and_threads() {
     assert!(invoke("ok").ok()); // warm up lazily opened files
@@ -38,25 +53,23 @@ fn invocations_release_their_pipes_and_threads() {
         let result = invoke("ok");
         assert!(result.ok(), "{}", result.message());
     }
-    assert!(count("/proc/self/fd") <= descriptors, "descriptors grew from {descriptors} to {}", count("/proc/self/fd"));
-    assert!(count("/proc/self/task") <= threads, "threads grew from {threads} to {}", count("/proc/self/task"));
+    let grown = count("/proc/self/fd");
+    assert!(grown <= descriptors, "descriptors grew from {descriptors} to {grown}");
+    let grown = settled_threads(threads);
+    assert!(grown <= threads, "threads grew from {threads} to {grown}");
     // A descendant outside the process group keeps holding stderr after the
     // invocation returns; the host must still stop its threads and close its
     // pipes rather than wait for the descendant.
     let start = Instant::now();
     let result = invoke("escaped-descendant");
+    let elapsed = start.elapsed();
     let pid: i32 = String::from_utf8_lossy(&result.stderr).parse().expect("descendant pid");
-    let (after_descriptors, after_threads) = (count("/proc/self/fd"), count("/proc/self/task"));
+    let (after_descriptors, after_threads) = (count("/proc/self/fd"), settled_threads(threads));
     // SAFETY: the pid names the stand-in's own descendant.
     unsafe {
         kill(pid, 9);
     }
-    assert!(
-        result.kind == ResultKind::CarrierLoss && start.elapsed() < Duration::from_secs(5),
-        "{:?} after {:?}",
-        result.kind,
-        start.elapsed()
-    );
+    assert!(result.kind == ResultKind::CarrierLoss && elapsed < Duration::from_secs(5), "{:?} after {elapsed:?}", result.kind);
     assert!(after_descriptors <= descriptors, "escaped descendant: descriptors grew from {descriptors} to {after_descriptors}");
     assert!(after_threads <= threads, "escaped descendant: threads grew from {threads} to {after_threads}");
 }
