@@ -1,0 +1,182 @@
+# Jacquard Host for Java
+
+An independent Java adapter for Jacquard Core's experimental `jacquard-host-v0`
+protocol. It implements the pinned protocol on its own, without calling Python,
+Node.js, Go, or Rust, and has no runtime dependencies beyond the JDK. Java 21+
+is required.
+
+This is the protocol-level adapter, comparable to the Go `host` package and the
+Rust `host` module. It includes strict codecs, the host session state machine,
+and a bounded process carrier for `jacquard host worker`. It also provides a
+`Host` with a closed operation registry and a replayer for Core's pinned
+conformance kit. There is no SDK layer yet. It does not compile programs, map
+native types, or cache stores. You prepare a store with the Core CLI and pass
+exact identities and boundary types.
+
+**Experimental:** the protocol is Core's pinned `jacquard-host-v0`, and Core is
+installed separately. Each invocation runs one fresh, serial worker. The host
+and operating system are trusted. Linux is exercised; macOS should work but has
+no CI; Windows is not claimed. See [limits](../docs/LIMITS.md).
+
+## Use
+
+The artifact is not published to a package registry. Build and install it from
+a clone (`mvn -B install` in this directory), then depend on it:
+
+```xml
+<dependency>
+  <groupId>org.jacquardlang</groupId>
+  <artifactId>jacquard-host</artifactId>
+  <version>0.2.0</version>
+</dependency>
+```
+
+The example below invokes a checked function whose single operation is served
+by a Java handler:
+
+```java
+import java.time.Duration;
+import java.util.List;
+
+import org.jacquardlang.host.HandlerException;
+import org.jacquardlang.host.Host;
+import org.jacquardlang.host.HostOptions;
+import org.jacquardlang.host.InvocationException;
+import org.jacquardlang.host.OperationRegistry;
+import org.jacquardlang.host.carrier.Cancel;
+import org.jacquardlang.host.carrier.Options;
+import org.jacquardlang.host.protocol.BoundaryType;
+import org.jacquardlang.host.protocol.Hash;
+import org.jacquardlang.host.protocol.Interface;
+import org.jacquardlang.host.protocol.Value;
+
+public final class Echo {
+    public static Value echo(String store, Hash target, Hash text, Hash world, Hash send) throws InvocationException {
+        // The command defaults to $JACQUARD_BIN, then `jacquard`.
+        Options carrier = Options.defaults().withDeadline(Duration.ofSeconds(5));
+        Host host = new Host(store, new HostOptions(carrier, null));
+        OperationRegistry registry = new OperationRegistry().bind(world, send, (context, args) -> {
+            if (context.isCancelled()) {
+                throw HandlerException.completionUnknown("cancelled");
+            }
+            if (args.size() == 1 && args.get(0) instanceof Value.Text input) {
+                return new Value.Text(input.value() + "!");
+            }
+            throw HandlerException.outsideFailed("expected one text argument");
+        });
+        BoundaryType textType = new BoundaryType.Nominal(text, List.of());
+        Interface spec = new Interface(List.of(textType), textType, List.of(world));
+        return host.invoke(target, spec, List.of(new Value.Text("ping")), registry, new Cancel()).valueOrThrow();
+    }
+}
+```
+
+`invoke` returns an `InvocationResult` in every case. The result keeps Core's
+frames, diagnostics, and evidence. It also keeps the host's frames, exit
+status, bounded stderr, and host evidence (`jacquard-host-java-evidence-v0`).
+`valueOrThrow` returns the value, or throws an `InvocationException`. The
+exception's `failure()` is one of `DEADLINE_EXCEEDED`, `WORKER_LOST`,
+`OPERATION_FAILED`, or `OTHER`.
+
+Values are `Value.Int` (Core's signed 63-bit integer, held in a `long`),
+`Value.Text`, `Value.Real` (the exact binary64 bits, so NaN payloads and signed
+zero survive), `Value.HashValue`, `Value.Tuple` (`Value.UNIT` is the empty
+tuple), and `Value.Constructor`. A `long` outside `-2^62..2^62-1` has no
+encoding and is refused with E1604; a string with a lone surrogate, which Java
+strings can hold, is refused with E1601, as in the TypeScript adapter.
+
+## Handlers and cancellation
+
+A handler returns a value or throws a `HandlerException`. The four structured
+categories are `unsupported`, `refused`, `outsideFailed`, and
+`completionUnknown`. Any other exception or error a handler throws is reported
+to Core as completion unknown, and its message is never sent. A returned value
+with no encoding within the selected limits, including `null`, is reported as
+an outside failure. A message longer than `max_host_message_bytes` is cut at a
+code point, and a lone surrogate in it becomes U+FFFD.
+
+Each handler runs on its own daemon thread, bounded by the worker's lifetime
+deadline. At the deadline, when the caller's `Cancel` is triggered, or when the
+calling thread is interrupted, the host kills the worker's process tree and
+sends no late response. An interrupt is reported as an abort, and the caller's
+interrupt status is restored before `invoke` returns. Cancellation is
+cooperative. `HandlerContext.isCancelled` turns true, and stays true once the
+invocation ends, but a handler that ignores it keeps running on its thread
+until it returns. Nothing is retried.
+
+## Process carrier
+
+Java cannot start a process in its own process group, and a blocking read
+from a `Process` pipe cannot be interrupted. The carrier is built around both:
+
+- **Reads never block.** stdout and stderr are read on the caller's thread,
+  only after `available()` reports bytes in the pipe. Between polls the
+  thread parks for 0.1 to 5 ms. Every wait, whether for a frame, a write, a
+  handler, or the exit, rechecks the one lifetime deadline, the `Cancel`, and
+  the interrupt status. No thread reads stdout or stderr, so none can be
+  left blocked on them.
+- **Writes run on one stdin thread**, because a pipe write can block. The
+  caller waits for each write under the lifetime. Each frame is written in
+  chunks of at most 4096 bytes. Each chunk starts only while input is open,
+  the deadline has not passed, and cancellation has not been requested. A
+  chunk already started may complete after expiry. It reaches no worker,
+  because expiry kills the worker first.
+- **Expiry kills a process tree, not a group.** At expiry, cancellation, or
+  disposal of a running worker, the host snapshots `Process.descendants()`
+  and calls `destroyForcibly()` (SIGKILL on Unix) on the worker and on every
+  process in the snapshot. A descendant that was already reparented is not in
+  the snapshot and keeps running: one whose parent exited, or one that
+  daemonized. So is one started after the snapshot.
+- **The JDK owns the exit.** It reaps the worker as soon as it exits, and then
+  drains and closes all three pipes. So stdout ends when the worker exits and
+  its output has been read, not when the worker closes stdout. A descendant
+  still holding a pipe after the exit is neither observed nor waited for. The
+  Go and Rust hosts report a descendant that keeps stderr open after a
+  successful exit as a carrier loss and, on Linux, stop it with the worker's
+  process group. The Java host reports the worker's own result, and the
+  descendant keeps running.
+- **Signals are inferred.** The JDK reports a process ended by signal N as
+  exit status 128 + N. The host reports `signal() == "SIGKILL"` only when it
+  killed the worker itself and the status is 137; any other value is
+  reported as the exit status.
+
+What this guarantees: an invocation returns at its deadline plus bounded
+cleanup. Each cleanup wait, for a killed worker to exit or for the stdin thread
+to stop, is capped at one second. An invocation leaves no adapter thread or
+pipe descriptor behind, with one exception: a stdin write blocked on a pipe
+whose read end is held by a descendant that escaped the kill and never reads.
+That stdin thread stays blocked until the descendant exits or reads, and so
+does the JDK's process reaper thread for that worker, which waits on the same
+stream. The caller is not held. A Linux test counts descriptors and adapter
+threads across invocations, and checks that case too.
+
+## Conformance kit
+
+`Kit.load()` verifies the class-path copy of the kit against the pinned
+digests. `Replayer.replayKit` replays all 21 recordings, including the hostile
+host inputs, against a worker. It reports any semantic differences and any
+drift in non-normative diagnostic prose.
+
+## Development
+
+From this directory, with Maven 3.9+ and JDK 21 or later:
+
+```sh
+mvn -B verify
+# With the pinned Core configured (eval "$(python3 ../scripts/core_pin.py install)"):
+JACQUARD_REQUIRE_LIVE=1 mvn -B verify
+```
+
+The live tests in `LiveTest` skip without `JACQUARD_BIN` and
+`JACQUARD_PRELUDE` (set `JACQUARD_REQUIRE_LIVE` to make them fail instead).
+The offline tests drive `StandIn`, a test-source main class that replays
+recordings or simulates faulty workers in a fresh JVM. Its descendant modes
+use `sh` and `sleep`, so those tests run on Unix only, and the descriptor test
+runs on Linux only. Surefire starts a fresh JVM for each test class.
+
+`src/main/java/org/jacquardlang/host/Compat.java` is generated, and
+`src/main/resources/org/jacquardlang/host/kit/host-protocol-v0/` is a byte copy
+of the pinned kit. `scripts/core_pin.py` maintains both; do not edit them by
+hand. `NOTICE` must stay identical to the repository's `NOTICE`, and the
+README example must stay identical to `src/test/java/org/jacquardlang/host/readme/Echo.java`;
+tests check both.

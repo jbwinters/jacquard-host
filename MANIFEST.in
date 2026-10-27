@@ -14,3 +14,6 @@ recursive-include go *.go *.md *.json *.jac
 include rust/Cargo.toml rust/Cargo.lock rust/rustfmt.toml rust/LICENSE rust/NOTICE
 recursive-include rust *.rs *.md *.json *.jac
 prune rust/target
+include java/pom.xml java/LICENSE java/NOTICE
+recursive-include java *.java *.md *.json *.jac
+prune java/target
