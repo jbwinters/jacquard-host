@@ -1,8 +1,13 @@
 package org.jacquardlang.host.carrier;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -26,12 +31,23 @@ import org.jacquardlang.host.protocol.Limits;
  * One bounded {@code stdio-u32-json-v0} worker lifetime.
  *
  * <p>Java cannot start a process in its own process group, and a read from a
- * {@link Process} pipe cannot be interrupted. So stdout and stderr are never
- * read with a blocking call: the caller's thread polls {@code available()}
- * in short slices and reads only bytes already in the pipe, and every wait
- * (for a frame, a write, a handler, or the exit) rechecks the single lifetime
+ * pipe cannot be interrupted. So stdout and stderr are never read with a
+ * blocking call: the caller's thread polls {@code available()} in short
+ * slices and reads only bytes already in the pipe, and every wait (for a
+ * frame, a write, a handler, or the exit) rechecks the single lifetime
  * deadline, the cancellation token, and the thread's interrupt status. Writes
  * run on one stdin thread ({@link Writer}) because a pipe write can block.
+ *
+ * <p>On Unix, stdout and stderr are FIFOs the host creates with
+ * {@code mkfifo} in a private directory and opens read-write before the
+ * spawn, and the worker's output is redirected to them; the directory is
+ * removed once the worker starts. The JDK's own process pipes drain
+ * themselves on its reaper thread when the process exits, under the stream
+ * lock that {@code available()} also takes, for as long as a descendant keeps
+ * writing, and into an unbounded buffer. The JDK does not touch a redirected
+ * file, so no host read can wait on that lock, and output a descendant keeps
+ * writing stays in the pipe until the host disposes the worker and closes its
+ * end. Elsewhere the JDK's pipes are used, with that drain.
  *
  * <p>At expiry, cancellation, or disposal while the worker runs, the worker's
  * process tree is killed: a snapshot of {@link Process#descendants()} and
@@ -39,10 +55,9 @@ import org.jacquardlang.host.protocol.Limits;
  * its parent exited or it daemonized) is not in the snapshot and keeps
  * running.
  *
- * <p>The JDK reaps the worker itself as soon as it exits, and then drains and
- * closes all three pipes. So stdout ends when the worker exits and its
- * output has been read, and a descendant still holding a pipe after the exit
- * is neither observed nor waited for.
+ * <p>The JDK reaps the worker itself as soon as it exits. So stdout ends when
+ * the worker has exited and its pipe is empty, and a descendant still holding
+ * a pipe after the exit is neither observed nor waited for.
  *
  * <p>A worker is used from one thread at a time.
  */
@@ -58,10 +73,16 @@ public final class Worker implements AutoCloseable {
     private static final int STDERR_SLICE = 1 << 20;
     /** The exit value the JDK reports for a process ended by SIGKILL. */
     private static final int SIGKILL_EXIT = 128 + 9;
+    /** Whether the worker's output goes through host-owned FIFOs. */
+    private static final boolean FIFOS = !System.getProperty("os.name", "").startsWith("Windows");
+    /** The longest {@code mkfifo} may take, within the lifetime. */
+    private static final long MKFIFO_WAIT = TimeUnit.SECONDS.toNanos(5);
 
     private final Process process;
     private final InputStream stdout;
     private final InputStream stderrStream;
+    /** The host's read-write handles on the output FIFOs, or null. */
+    private final Fifos fifos;
     private final Writer writer;
     private final Gate gate;
     private final long expires;
@@ -82,8 +103,9 @@ public final class Worker implements AutoCloseable {
     private Integer exitStatus;
     private String signal;
 
-    private Worker(Process process, Gate gate, long expires, Cancel cancel, String spawnError) {
+    private Worker(Process process, Fifos fifos, Gate gate, long expires, Cancel cancel, String spawnError) {
         this.process = process;
+        this.fifos = fifos;
         this.gate = gate;
         this.expires = expires;
         this.cancel = cancel;
@@ -93,10 +115,98 @@ public final class Worker implements AutoCloseable {
             this.stderrStream = null;
             this.writer = null;
         } else {
-            this.stdout = process.getInputStream();
-            this.stderrStream = process.getErrorStream();
+            this.stdout = fifos != null ? fifos.stdoutStream() : process.getInputStream();
+            this.stderrStream = fifos != null ? fifos.stderrStream() : process.getErrorStream();
             this.writer = new Writer(process.getOutputStream(), gate);
         }
+    }
+
+    /**
+     * The host's handles on the worker's stdout and stderr FIFOs. Each is
+     * opened read-write, so the open never waits for a writer and the host
+     * always holds a read end; reads go through a {@link FileInputStream} on
+     * the same descriptor, whose {@code available()} asks the pipe directly.
+     */
+    private record Fifos(RandomAccessFile stdout, RandomAccessFile stderr, InputStream stdoutStream, InputStream stderrStream) {
+        static Fifos open(Path stdout, Path stderr) throws IOException {
+            RandomAccessFile out = new RandomAccessFile(stdout.toFile(), "rw");
+            try {
+                RandomAccessFile err = new RandomAccessFile(stderr.toFile(), "rw");
+                return new Fifos(out, err, new FileInputStream(out.getFD()), new FileInputStream(err.getFD()));
+            } catch (IOException | RuntimeException error) {
+                out.close();
+                throw error;
+            }
+        }
+
+        /** Closes both descriptors. Nothing else holds a lock on them. */
+        void close() {
+            for (AutoCloseable handle : List.of(stdoutStream, stderrStream, stdout, stderr)) {
+                try {
+                    handle.close();
+                } catch (Exception ignored) {
+                    // Already closed through the shared descriptor.
+                }
+            }
+        }
+    }
+
+    /** Creates both FIFOs with one {@code mkfifo -m 600}, waiting at most {@code nanos}. */
+    private static void makeFifos(Path stdout, Path stderr, long nanos) throws IOException {
+        Process mkfifo = new ProcessBuilder("mkfifo", "-m", "600", stdout.toString(), stderr.toString())
+                .redirectInput(ProcessBuilder.Redirect.from(new java.io.File("/dev/null")))
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start();
+        boolean exited = false;
+        boolean interrupted = false;
+        long end = System.nanoTime() + nanos;
+        while (!exited) {
+            long left = end - System.nanoTime();
+            if (left <= 0) {
+                break;
+            }
+            try {
+                exited = mkfifo.waitFor(left, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException error) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        if (!exited) {
+            mkfifo.destroyForcibly();
+            throw new IOException("mkfifo did not finish in time");
+        }
+        if (mkfifo.exitValue() != 0) {
+            throw new IOException("mkfifo exited with status " + mkfifo.exitValue());
+        }
+    }
+
+    private static void deleteQuietly(Path directory) {
+        if (directory == null) {
+            return;
+        }
+        for (String name : List.of("stdout", "stderr")) {
+            try {
+                Files.deleteIfExists(directory.resolve(name));
+            } catch (IOException | RuntimeException ignored) {
+                // Left for the system's temporary-file cleanup.
+            }
+        }
+        try {
+            Files.deleteIfExists(directory);
+        } catch (IOException | RuntimeException ignored) {
+            // Left for the system's temporary-file cleanup.
+        }
+    }
+
+    private static Worker failed(Gate gate, long expires, Cancel cancel, String spawnError, String message) {
+        Worker failed = new Worker(null, null, gate, expires, cancel, spawnError);
+        failed.fault = CarrierException.loss(message);
+        failed.exitRecorded = true;
+        return failed;
     }
 
     /**
@@ -119,17 +229,43 @@ public final class Worker implements AutoCloseable {
         long budget = deadline.compareTo(Duration.ofNanos(Long.MAX_VALUE / 4)) > 0 ? Long.MAX_VALUE / 4 : deadline.toNanos();
         long expires = System.nanoTime() + budget;
         Gate gate = new Gate(expires, cancel);
+        Fifos fifos = null;
+        Path directory = null;
         Process process;
         try {
-            process = builder.start();
-        } catch (IOException | RuntimeException error) {
-            Worker failed = new Worker(null, gate, expires, cancel, String.valueOf(error.getMessage()));
-            failed.fault = CarrierException.loss(
-                    "could not start " + command.get(0) + " (" + error.getMessage() + "); check the configured Core installation");
-            failed.exitRecorded = true;
-            return failed;
+            if (FIFOS) {
+                try {
+                    directory = Files.createTempDirectory("jacquard-worker-",
+                            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+                    Path out = directory.resolve("stdout");
+                    Path err = directory.resolve("stderr");
+                    makeFifos(out, err, Math.max(0, Math.min(MKFIFO_WAIT, expires - System.nanoTime())));
+                    fifos = Fifos.open(out, err);
+                    builder.redirectOutput(ProcessBuilder.Redirect.to(out.toFile()));
+                    builder.redirectError(ProcessBuilder.Redirect.to(err.toFile()));
+                } catch (IOException | RuntimeException error) {
+                    if (fifos != null) {
+                        fifos.close();
+                    }
+                    return failed(gate, expires, cancel, String.valueOf(error.getMessage()),
+                            "could not create the worker's output pipes (" + error.getMessage() + "); the Java host needs mkfifo on Unix");
+                }
+            }
+            try {
+                process = builder.start();
+            } catch (IOException | RuntimeException error) {
+                if (fifos != null) {
+                    fifos.close();
+                }
+                return failed(gate, expires, cancel, String.valueOf(error.getMessage()),
+                        "could not start " + command.get(0) + " (" + error.getMessage() + "); check the configured Core installation");
+            }
+        } finally {
+            // The worker holds its ends and the host holds its own, so the
+            // names are no longer needed.
+            deleteQuietly(directory);
         }
-        Worker worker = new Worker(process, gate, expires, cancel, null);
+        Worker worker = new Worker(process, fifos, gate, expires, cancel, null);
         try {
             worker.writer.start();
         } catch (OutOfMemoryError error) {
@@ -512,8 +648,14 @@ public final class Worker implements AutoCloseable {
             }
             recordExit();
             drainStderr();
-            closeQuietly(stdout);
-            closeQuietly(stderrStream);
+            if (fifos != null) {
+                // Closing the host's ends leaves a descendant still writing
+                // with no reader, so its next write fails.
+                fifos.close();
+            } else {
+                closeQuietly(stdout);
+                closeQuietly(stderrStream);
+            }
         }
         if (writer != null) {
             // The thread is idle, or its write fails once the killed worker's

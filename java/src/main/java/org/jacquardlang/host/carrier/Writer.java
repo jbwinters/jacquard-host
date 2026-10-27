@@ -14,6 +14,8 @@ import java.util.concurrent.TimeUnit;
  * not ended, and cancellation has not been requested. A chunk already
  * admitted may still complete after the gate closes, and the worker may read
  * it, until the caller's next poll kills the worker (at most one poll slice).
+ * The flush and close that end the thread can block the same way while a
+ * descendant holds the pipe without reading.
  */
 final class Writer {
     /** The most bytes one admitted write may carry. */

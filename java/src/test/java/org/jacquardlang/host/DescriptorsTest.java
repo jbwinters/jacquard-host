@@ -15,9 +15,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import org.jacquardlang.host.carrier.Cancel;
+import org.jacquardlang.host.carrier.Options;
 import org.jacquardlang.host.kit.Kit;
 import org.jacquardlang.host.protocol.BoundaryType;
 import org.jacquardlang.host.protocol.Interface;
@@ -109,6 +111,89 @@ class DescriptorsTest {
                 return false;
             }
         }), "failure paths: descriptors grew from " + before);
+    }
+
+    @Test
+    void aStderrFloodAfterTheWorkerExitsDoesNotHoldTheCaller() throws Exception {
+        assertFloodDoesNotHold("(yes jacquard-flood >&2 & echo $! > \"$PIDFILE\"); sleep 0.3; exit 0", Duration.ofSeconds(10), null);
+    }
+
+    @Test
+    void aStderrFloodDoesNotHoldExpiry() throws Exception {
+        assertFloodDoesNotHold("(yes jacquard-flood >&2 & echo $! > \"$PIDFILE\"); exec sleep 30", Duration.ofMillis(500), null);
+    }
+
+    @Test
+    void aStderrFloodDoesNotHoldCancellation() throws Exception {
+        assertFloodDoesNotHold("(yes jacquard-flood >&2 & echo $! > \"$PIDFILE\"); exec sleep 30", Duration.ofSeconds(20),
+                Duration.ofMillis(500));
+    }
+
+    @Test
+    void aStdoutFloodDoesNotHoldTheCaller() throws Exception {
+        assertFloodDoesNotHold("(yes jacquard-flood & echo $! > \"$PIDFILE\"); exec sleep 30", Duration.ofSeconds(10), null);
+    }
+
+    /**
+     * The worker leaves a reparented descendant writing to its stdout or
+     * stderr as fast as it can; the kill cannot find it. The JDK's own
+     * process pipes drain such a writer on the reaper thread, under the lock
+     * {@code available()} takes, into an unbounded buffer. The invocation must
+     * return within its bound, keep no flood in the heap, and leave the
+     * writer without a reader once it returns.
+     */
+    private void assertFloodDoesNotHold(String script, Duration deadline, Duration cancelAfter) throws Exception {
+        assertTrue(invokeReady(faulty("ok", Duration.ofSeconds(10), null)).ok()); // warm up
+        long before = descriptors();
+        Path dir = Files.createTempDirectory("jacquard-flood-");
+        Path pidFile = dir.resolve("pid");
+        Options options = new Options(List.of("sh", "-c", script),
+                new java.util.HashMap<>(Map.of("PATH", System.getenv("PATH"), "PIDFILE", pidFile.toString())), deadline);
+        Runtime runtime = Runtime.getRuntime();
+        System.gc();
+        long heapBefore = runtime.totalMemory() - runtime.freeMemory();
+        Cancel cancel = new Cancel();
+        Thread trigger = null;
+        if (cancelAfter != null) {
+            trigger = Thread.ofPlatform().daemon().start(() -> {
+                try {
+                    Thread.sleep(cancelAfter.toMillis());
+                } catch (InterruptedException ignored) {
+                    return;
+                }
+                cancel.cancel();
+            });
+        }
+        long start = System.nanoTime();
+        InvocationResult result = new Host("unused", new HostOptions(options, null)).shutdownProbe(cancel);
+        Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
+        long heapAfter = runtime.totalMemory() - runtime.freeMemory();
+        if (trigger != null) {
+            trigger.join();
+        }
+        assertTrue(eventually(() -> Files.exists(pidFile)), "the flood never started");
+        long pid = Long.parseLong(Files.readString(pidFile).trim());
+        try {
+            assertTrue(!result.ok(), result.toString());
+            Duration bound = (cancelAfter != null ? cancelAfter : deadline.compareTo(Duration.ofSeconds(1)) < 0 ? deadline : Duration.ZERO)
+                    .plusSeconds(3);
+            assertTrue(elapsed.compareTo(bound) < 0, "returned after " + elapsed);
+            assertTrue(heapAfter - heapBefore < 64L << 20, "the heap grew by " + ((heapAfter - heapBefore) >> 20) + " MiB");
+            // The host closed its end, so the writer's next write fails.
+            assertTrue(eventually(() -> !Support.alive(pid)), "the flood still has a reader");
+        } finally {
+            kill(pid);
+            Files.deleteIfExists(pidFile);
+            Files.deleteIfExists(dir);
+        }
+        assertTrue(eventually(() -> adapterThreads() == 0), "adapter threads remain");
+        assertTrue(eventually(() -> {
+            try {
+                return descriptors() <= before;
+            } catch (IOException error) {
+                return false;
+            }
+        }), "descriptors grew from " + before);
     }
 
     @Test

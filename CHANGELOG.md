@@ -27,9 +27,10 @@
   registry. It carries the pinned kit as class-path resources and replays all
   21 recordings. It is protocol-level only, with no SDK layer. Java cannot
   start the worker in its own process group or interrupt a pipe read, so the
-  carrier never blocks on a read, kills the worker's process tree from a
-  `ProcessHandle` snapshot, and documents what that misses in
-  `docs/LIMITS.md`. `scripts/core_pin.py` now generates
+  carrier never blocks on a read, reads the worker's output through FIFOs it
+  creates with `mkfifo` on Unix (so the JDK's exit-time pipe drain cannot hold
+  the caller), kills the worker's process tree from a `ProcessHandle`
+  snapshot, and documents what that misses in `docs/LIMITS.md`. `scripts/core_pin.py` now generates
   `java/src/main/java/org/jacquardlang/host/Compat.java` and keeps the Java kit
   copy in sync, and CI runs the offline tests on Java 21 and 25 and the live
   tests against the pinned Core.

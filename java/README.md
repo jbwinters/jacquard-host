@@ -108,14 +108,28 @@ until it returns. Nothing is retried.
 ## Process carrier
 
 Java cannot start a process in its own process group, and a blocking read
-from a `Process` pipe cannot be interrupted. The carrier is built around both:
+from a pipe cannot be interrupted. The carrier is built around both:
 
+- **The host owns the output pipes on Unix.** The JDK's own process pipes
+  drain themselves on its process reaper thread when the process exits, under
+  the stream lock that `available()` and `close()` also take, for as long as a
+  descendant keeps writing, and into a buffer with no bound. So on Unix the
+  host creates two FIFOs with `mkfifo -m 600` in a private temporary
+  directory, opens each read-write (the open never waits, and the host always
+  holds a read end), redirects the worker's stdout and stderr to them, and
+  removes the directory once the worker starts. The JDK never touches those
+  descriptors, and output a descendant keeps writing stays in the 64 KiB pipe,
+  where the writer blocks, until the host disposes the worker and closes its
+  ends; the writer's next write then fails. If `mkfifo` is missing or fails,
+  the worker does not start and the invocation reports a carrier loss. On
+  other systems the JDK's pipes and their drain are used.
 - **Reads never block.** stdout and stderr are read on the caller's thread,
   only after `available()` reports bytes in the pipe. Between polls the
   thread parks for 0.1 to 5 ms. Every wait, whether for a frame, a write, a
   handler, or the exit, rechecks the one lifetime deadline, the `Cancel`, and
   the interrupt status. No thread reads stdout or stderr, so none can be
-  left blocked on them.
+  left blocked on them, and at most 1 MiB of stderr is read per poll, of which
+  only the bounded prefix is kept.
 - **Writes run on one stdin thread**, because a pipe write can block. The
   caller waits for each write under the lifetime. Each frame is written in
   chunks of at most 4096 bytes. Each chunk starts only while input is open,
@@ -129,13 +143,14 @@ from a `Process` pipe cannot be interrupted. The carrier is built around both:
   `ProcessHandle` and on every process in the snapshot. It signals through the
   handle because `Process.destroyForcibly()` also closes stdin on the calling
   thread, which would wait behind a blocked write. Killing the worker and a
-  descendant that holds stdin ends such a write. A descendant that was already reparented is not in
-  the snapshot and keeps running: one whose parent exited, or one that
-  daemonized. So is one started after the snapshot.
-- **The JDK owns the exit.** It reaps the worker as soon as it exits, and then
-  drains and closes all three pipes. So stdout ends when the worker exits and
-  its output has been read, not when the worker closes stdout. A descendant
-  still holding a pipe after the exit is neither observed nor waited for. The
+  descendant that holds stdin ends such a write. A descendant that was
+  already reparented is not in the snapshot and keeps running: one whose
+  parent exited, or one that daemonized. So is one started after the
+  snapshot.
+- **The JDK owns the exit.** It reaps the worker as soon as it exits. So
+  stdout ends when the worker has exited and its pipe is empty, not when the
+  worker closes stdout. A descendant still holding a pipe after the exit is
+  neither observed nor waited for. The
   Go and Rust hosts report a descendant that keeps stderr open after a
   successful exit as a carrier loss and, on Linux, stop it with the worker's
   process group. The Java host reports the worker's own result, and the
@@ -149,16 +164,22 @@ What this guarantees: an invocation returns at its deadline plus bounded
 cleanup. Each cleanup wait is capped at one second: for a killed worker's exit
 to be recorded, for a still-running worker to exit at disposal, and for the
 stdin thread to stop. So in the worst case `invoke` returns about three seconds
-after the deadline. The carrier leaves no thread or pipe descriptor behind,
-with one exception: a stdin write blocked on a pipe whose read end is held by a
-descendant that escaped the kill and never reads. That stdin thread stays
-blocked until the descendant exits or reads, and so does the JDK's process
-reaper thread for that worker, which waits on the same stream. The caller is
-not held. Separately, a handler that ignores cancellation keeps its own thread
+after the deadline. On Unix this holds even while a descendant that escaped
+the kill floods stdout or stderr, and the flood does not reach the heap. The
+carrier leaves no thread or pipe descriptor behind, with one exception: a
+stdin write, or the flush and close that end the stdin thread, blocked on a
+pipe whose read end is held by a descendant that escaped the kill and never
+reads. That stdin thread stays blocked until the descendant exits or reads,
+and so does the JDK's process reaper thread for that worker, which drains the
+same stream under its lock. The caller is not held. On non-Unix systems the
+JDK's output pipes are used, so a descendant that keeps writing after the
+worker exits holds the caller, and grows the heap, until it stops. Separately, a handler that ignores cancellation keeps its own thread
 until it returns (see above). Linux tests count descriptors and adapter threads
 across successful and failed invocations, and check that a blocked write ends
 when expiry or cancellation kills a live worker and the child holding its
-stdin.
+stdin, and that a reparented descendant flooding stdout or stderr holds
+neither the caller nor the heap, at a worker's own exit, at expiry, and at
+cancellation.
 
 ## Conformance kit
 
