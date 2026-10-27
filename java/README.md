@@ -85,7 +85,9 @@ Values are `Value.Int` (Core's signed 63-bit integer, held in a `long`),
 zero survive), `Value.HashValue`, `Value.Tuple` (`Value.UNIT` is the empty
 tuple), and `Value.Constructor`. A `long` outside `-2^62..2^62-1` has no
 encoding and is refused with E1604; a string with a lone surrogate, which Java
-strings can hold, is refused with E1601, as in the TypeScript adapter.
+strings can hold, is refused with E1601, as in the TypeScript adapter, unless
+it is already too long for `max_text_bytes` or the frame, which is refused
+with E1602 before it is scanned.
 
 ## Handlers and cancellation
 

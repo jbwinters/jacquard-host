@@ -12,6 +12,8 @@ final class Gate {
     private final Cancel cancel;
     /** The thread that drives the worker; its interrupt stops the call. */
     private final Thread caller;
+    /** Set before the caller consumes its interrupt. */
+    private volatile boolean callerInterrupted;
 
     Gate(long deadline, Cancel cancel, Thread caller) {
         this.deadline = deadline;
@@ -19,9 +21,18 @@ final class Gate {
         this.caller = caller;
     }
 
-    /** Whether the call is cancelled, interrupted, or past its lifetime. */
+    /**
+     * Whether the call is cancelled, interrupted, or past its lifetime. The
+     * interrupt status is read before the recorded interrupt, which is set
+     * before the status is cleared, so an interrupt is never missed.
+     */
     boolean stopped() {
-        return System.nanoTime() - deadline >= 0 || cancel.isCancelled() || caller.isInterrupted();
+        return System.nanoTime() - deadline >= 0 || cancel.isCancelled() || caller.isInterrupted() || callerInterrupted;
+    }
+
+    /** Records that the caller was interrupted; called before it clears its status. */
+    void interrupted() {
+        callerInterrupted = true;
     }
 
     boolean admits() {

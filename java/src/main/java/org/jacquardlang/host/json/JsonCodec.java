@@ -383,6 +383,11 @@ public final class JsonCodec {
     }
 
     private static void quote(Sink out, String text) throws ProtocolException {
+        // Each char is at least one UTF-8 byte, so a text that cannot fit is
+        // refused before it is scanned.
+        if (out.bytes + text.length() + 2 > out.limit) {
+            throw ProtocolException.exceeded("payload exceeds max_frame_bytes");
+        }
         if (!isScalar(text)) {
             throw ProtocolException.malformed("a JSON string contains a lone surrogate");
         }

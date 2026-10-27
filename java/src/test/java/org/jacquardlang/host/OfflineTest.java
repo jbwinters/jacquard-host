@@ -666,6 +666,14 @@ class OfflineTest {
      * was aborted.
      */
     private static void noHandlerAfterAStopAtTheHandlerCheck(boolean interrupt) {
+        noHandlerAfterAStopAtTheHandlerCheck(interrupt, false);
+    }
+
+    /**
+     * As above; with {@code consumed}, the check waits until the caller has
+     * consumed its interrupt, so only the host's record of it remains.
+     */
+    private static void noHandlerAfterAStopAtTheHandlerCheck(boolean interrupt, boolean consumed) {
         Kit kit = kit();
         BoundaryType text = new BoundaryType.Nominal(kit.identity("text"), List.of());
         Interface spec = new Interface(List.of(text), text, List.of(kit.identity("kit-world")));
@@ -681,6 +689,10 @@ class OfflineTest {
             stopped.set(true);
             if (interrupt) {
                 caller.interrupt();
+                long give = System.nanoTime() + 5_000_000_000L;
+                while (consumed && caller.isInterrupted() && System.nanoTime() < give) {
+                    Thread.onSpinWait();
+                }
             } else {
                 cancel.cancel();
             }
@@ -708,6 +720,13 @@ class OfflineTest {
     @Test
     void anInterruptionJustBeforeTheHandlerIsCalledRunsNoHandler() {
         noHandlerAfterAStopAtTheHandlerCheck(true);
+    }
+
+    @Test
+    void anInterruptTheCallerHasAlreadyConsumedStillRunsNoHandler() {
+        for (int i = 0; i < 20; i++) {
+            noHandlerAfterAStopAtTheHandlerCheck(true, true);
+        }
     }
 
     @Test
@@ -765,5 +784,10 @@ class OfflineTest {
         // {"k":"…"} is 8 bytes plus 6 per escaped U+0001: exactly 6008.
         assertEquals(4 + 6008, JsonCodec.frameBytes(frame, 6008, 64).length);
         assertEquals("\"\\u0001\\u001f\"", JsonCodec.stringify(Json.of("\u0001\u001f"), 64));
+        // A text that cannot fit is refused by length, before the scan that
+        // would find its lone surrogate.
+        ProtocolException long_ = assertThrows(ProtocolException.class,
+                () -> JsonCodec.frameBytes(Map.of("k", Json.of("\ud800" + "x".repeat(7000))), 6008, 64));
+        assertEquals("payload exceeds max_frame_bytes", long_.detail());
     }
 }

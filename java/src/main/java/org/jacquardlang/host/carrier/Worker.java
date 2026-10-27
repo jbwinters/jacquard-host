@@ -14,10 +14,9 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
@@ -357,9 +356,7 @@ public final class Worker implements AutoCloseable {
     /** The carrier failure that ended the worker, if any; null otherwise. */
     public CarrierException fault() {
         if (fault == null) {
-            if (Thread.interrupted()) {
-                interrupted = true;
-            }
+            takeInterrupt();
             if (cancel.isCancelled() || interrupted) {
                 expire();
                 fault = CarrierException.aborted("invocation aborted; outside completion is unknown");
@@ -416,36 +413,49 @@ public final class Worker implements AutoCloseable {
     /** Parks for up to {@code nanos}, never past the lifetime deadline. */
     private void pause(long nanos) {
         long slice = Math.min(nanos, expires - System.nanoTime());
-        if (slice > 0) {
+        if (slice > 0 && !Thread.currentThread().isInterrupted()) {
             LockSupport.parkNanos(slice);
         }
-        if (Thread.interrupted()) {
-            interrupted = true;
+    }
+
+    /**
+     * Consumes the caller's interrupt, recording it in the gate first: a stop
+     * check on another thread reads the interrupt status and then the gate,
+     * so it sees the interrupt at every moment from its arrival on.
+     */
+    private boolean takeInterrupt() {
+        if (!Thread.currentThread().isInterrupted()) {
+            return false;
         }
+        gate.interrupted();
+        Thread.interrupted();
+        interrupted = true;
+        return true;
     }
 
     /**
      * Waits for {@code future} until it completes, the deadline passes, or the
      * invocation is cancelled. Returns null if the future failed.
      */
-    public <T> T await(Future<T> future) throws CarrierException {
+    public <T> T await(CompletableFuture<T> future) throws CarrierException {
         long idle = POLL_MIN;
         while (true) {
             CarrierException current = fault();
             if (current != null) {
                 throw current;
             }
-            long slice = Math.max(0, Math.min(idle, expires - System.nanoTime()));
-            try {
-                return future.get(slice, TimeUnit.NANOSECONDS);
-            } catch (TimeoutException error) {
-                drainStderr();
-                idle = Math.min(idle * 2, POLL_MAX);
-            } catch (InterruptedException error) {
-                interrupted = true;
-            } catch (ExecutionException | CancellationException error) {
-                return null;
+            if (future.isDone()) {
+                try {
+                    return future.join();
+                } catch (CompletionException | CancellationException error) {
+                    return null;
+                }
             }
+            // Parking leaves the interrupt status set, so the stop check on
+            // other threads sees it until fault() records it.
+            pause(idle);
+            drainStderr();
+            idle = Math.min(idle * 2, POLL_MAX);
         }
     }
 
@@ -656,6 +666,8 @@ public final class Worker implements AutoCloseable {
             try {
                 process.waitFor(left, TimeUnit.NANOSECONDS);
             } catch (InterruptedException error) {
+                // The wait cleared the status; record it as takeInterrupt would.
+                gate.interrupted();
                 interrupted = true;
             }
         }
