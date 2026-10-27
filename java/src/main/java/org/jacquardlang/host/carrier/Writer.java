@@ -12,8 +12,8 @@ import java.util.concurrent.TimeUnit;
  * lifetime. Each frame is written in chunks of at most {@link #CHUNK} bytes,
  * and the gate admits each chunk only while input is open, the lifetime has
  * not ended, and cancellation has not been requested. A chunk already
- * admitted may still complete after the gate closes; it reaches no worker
- * process, because expiry kills the worker first.
+ * admitted may still complete after the gate closes, and the worker may read
+ * it, until the caller's next poll kills the worker (at most one poll slice).
  */
 final class Writer {
     /** The most bytes one admitted write may carry. */

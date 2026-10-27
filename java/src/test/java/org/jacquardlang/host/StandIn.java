@@ -94,6 +94,20 @@ public final class StandIn {
                 readFrame();
                 System.exit(0);
             }
+            case "stdin-child-alive" -> {
+                // A child holds stdin and never reads, and the worker stays
+                // alive without reading, so the invoke write blocks while the
+                // worker is still alive at expiry.
+                ProcessBuilder builder = new ProcessBuilder("sleep", "30")
+                        .redirectInput(ProcessBuilder.Redirect.INHERIT)
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                        .redirectError(ProcessBuilder.Redirect.DISCARD);
+                report(builder.start().pid());
+                Kit kit = kit();
+                send(kit.transcripts().get(0).coreOutput().get(0));
+                readFrame();
+                block();
+            }
             case "replay" -> System.exit(replay(kit(), env(CASE_VAR)));
             case "" -> System.exit(2);
             default -> System.exit(fault(kit(), mode));

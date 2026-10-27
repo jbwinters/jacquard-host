@@ -71,8 +71,9 @@ public final class Echo {
 }
 ```
 
-`invoke` returns an `InvocationResult` in every case. The result keeps Core's
-frames, diagnostics, and evidence. It also keeps the host's frames, exit
+`invoke` returns an `InvocationResult` in every case; only a null argument
+throws (`NullPointerException`), before any worker starts. The result keeps
+Core's frames, diagnostics, and evidence. It also keeps the host's frames, exit
 status, bounded stderr, and host evidence (`jacquard-host-java-evidence-v0`).
 `valueOrThrow` returns the value, or throws an `InvocationException`. The
 exception's `failure()` is one of `DEADLINE_EXCEEDED`, `WORKER_LOST`,
@@ -119,12 +120,16 @@ from a `Process` pipe cannot be interrupted. The carrier is built around both:
   caller waits for each write under the lifetime. Each frame is written in
   chunks of at most 4096 bytes. Each chunk starts only while input is open,
   the deadline has not passed, and cancellation has not been requested. A
-  chunk already started may complete after expiry. It reaches no worker,
-  because expiry kills the worker first.
+  chunk already started may still complete, and the worker may read it,
+  until the caller's next poll kills the worker: at most one poll slice
+  (5 ms) after a cancellation, and less after the deadline.
 - **Expiry kills a process tree, not a group.** At expiry, cancellation, or
   disposal of a running worker, the host snapshots `Process.descendants()`
-  and calls `destroyForcibly()` (SIGKILL on Unix) on the worker and on every
-  process in the snapshot. A descendant that was already reparented is not in
+  and calls `destroyForcibly()` (SIGKILL on Unix) on the worker's
+  `ProcessHandle` and on every process in the snapshot. It signals through the
+  handle because `Process.destroyForcibly()` also closes stdin on the calling
+  thread, which would wait behind a blocked write. Killing the worker and a
+  descendant that holds stdin ends such a write. A descendant that was already reparented is not in
   the snapshot and keeps running: one whose parent exited, or one that
   daemonized. So is one started after the snapshot.
 - **The JDK owns the exit.** It reaps the worker as soon as it exits, and then
@@ -141,14 +146,19 @@ from a `Process` pipe cannot be interrupted. The carrier is built around both:
   reported as the exit status.
 
 What this guarantees: an invocation returns at its deadline plus bounded
-cleanup. Each cleanup wait, for a killed worker to exit or for the stdin thread
-to stop, is capped at one second. An invocation leaves no adapter thread or
-pipe descriptor behind, with one exception: a stdin write blocked on a pipe
-whose read end is held by a descendant that escaped the kill and never reads.
-That stdin thread stays blocked until the descendant exits or reads, and so
-does the JDK's process reaper thread for that worker, which waits on the same
-stream. The caller is not held. A Linux test counts descriptors and adapter
-threads across invocations, and checks that case too.
+cleanup. Each cleanup wait is capped at one second: for a killed worker's exit
+to be recorded, for a still-running worker to exit at disposal, and for the
+stdin thread to stop. So in the worst case `invoke` returns about three seconds
+after the deadline. The carrier leaves no thread or pipe descriptor behind,
+with one exception: a stdin write blocked on a pipe whose read end is held by a
+descendant that escaped the kill and never reads. That stdin thread stays
+blocked until the descendant exits or reads, and so does the JDK's process
+reaper thread for that worker, which waits on the same stream. The caller is
+not held. Separately, a handler that ignores cancellation keeps its own thread
+until it returns (see above). Linux tests count descriptors and adapter threads
+across successful and failed invocations, and check that a blocked write ends
+when expiry or cancellation kills a live worker and the child holding its
+stdin.
 
 ## Conformance kit
 

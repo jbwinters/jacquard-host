@@ -70,8 +70,15 @@ public final class Host {
      * Runs {@code target} with {@code args}. The invoke frame is validated
      * before a worker starts. Cancelling {@code cancel}, or interrupting the
      * calling thread, kills the worker; nothing is retried.
+     *
+     * @throws NullPointerException if any argument is null
      */
     public InvocationResult invoke(Hash target, Interface spec, List<Value> args, OperationRegistry registry, Cancel cancel) {
+        Objects.requireNonNull(target, "target");
+        Objects.requireNonNull(spec, "spec");
+        Objects.requireNonNull(args, "args");
+        Objects.requireNonNull(registry, "registry");
+        Objects.requireNonNull(cancel, "cancel");
         List<OperationEntry> entries = registry.entries();
         try {
             Map<String, Json> frame = Protocol.invokeFrame(target, spec, args, entries, limits);
@@ -88,8 +95,13 @@ public final class Host {
         return run(session -> session.invoke(target, spec, args, entries), registry, cancel);
     }
 
-    /** Negotiates a session and shuts it down without invoking. */
+    /**
+     * Negotiates a session and shuts it down without invoking.
+     *
+     * @throws NullPointerException if {@code cancel} is null
+     */
     public InvocationResult shutdownProbe(Cancel cancel) {
+        Objects.requireNonNull(cancel, "cancel");
         return run(Session::shutdown, new OperationRegistry(), cancel);
     }
 

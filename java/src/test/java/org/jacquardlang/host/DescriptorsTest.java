@@ -85,6 +85,90 @@ class DescriptorsTest {
         }
         assertTrue(eventually(() -> adapterThreads() == 0), "handler threads remain");
         assertTrue(descriptors() <= before, "handlers: descriptors grew from " + before + " to " + descriptors());
+
+        // Failure paths release the same resources: expiry, cancellation,
+        // an interrupted caller, and a truncated frame.
+        for (int i = 0; i < 3; i++) {
+            assertEquals("deadline", reason(invokeReady(faulty("silent", Duration.ofMillis(300), null))));
+            Cancel cancelled = new Cancel();
+            cancelled.cancel();
+            InvocationResult aborted = faulty("silent", Duration.ofSeconds(10), null).invoke(kit.identity("kit-ready"),
+                    Support.unit(), List.of(), new OperationRegistry(), cancelled);
+            assertTrue(!aborted.ok(), aborted.toString());
+            Thread.currentThread().interrupt();
+            InvocationResult interrupted = invokeReady(faulty("silent", Duration.ofSeconds(10), null));
+            assertTrue(Thread.interrupted(), "the interrupt status was not restored");
+            assertTrue(!interrupted.ok(), interrupted.toString());
+            assertTrue(!invokeReady(faulty("truncated", Duration.ofSeconds(10), null)).ok());
+        }
+        assertTrue(eventually(() -> adapterThreads() == 0), "failure paths: adapter threads remain");
+        assertTrue(eventually(() -> {
+            try {
+                return descriptors() <= before;
+            } catch (IOException error) {
+                return false;
+            }
+        }), "failure paths: descriptors grew from " + before);
+    }
+
+    @Test
+    void expiryWithALiveWorkerKillsTheChildHoldingABlockedWrite() throws Exception {
+        assertExpiryKillsTheBlockingChild(Duration.ofMillis(500), null);
+    }
+
+    @Test
+    void cancellationWithALiveWorkerKillsTheChildHoldingABlockedWrite() throws Exception {
+        assertExpiryKillsTheBlockingChild(Duration.ofSeconds(20), Duration.ofMillis(500));
+    }
+
+    /**
+     * The worker stays alive and its child holds stdin without reading, so
+     * the invoke frame blocks the stdin thread. Expiry, or cancellation after
+     * {@code cancelAfter}, must return promptly and kill both, which ends the
+     * blocked write.
+     */
+    private void assertExpiryKillsTheBlockingChild(Duration deadline, Duration cancelAfter) throws Exception {
+        assertTrue(invokeReady(faulty("ok", Duration.ofSeconds(10), null)).ok()); // warm up
+        long before = descriptors();
+        Kit kit = kit();
+        BoundaryType text = new BoundaryType.Nominal(kit.identity("text"), List.of());
+        Interface spec = new Interface(List.of(text), text, List.of());
+        Cancel cancel = new Cancel();
+        Thread trigger = null;
+        if (cancelAfter != null) {
+            trigger = Thread.ofPlatform().daemon().start(() -> {
+                try {
+                    Thread.sleep(cancelAfter.toMillis());
+                } catch (InterruptedException ignored) {
+                    return;
+                }
+                cancel.cancel();
+            });
+        }
+        long start = System.nanoTime();
+        InvocationResult result = faulty("stdin-child-alive", deadline, null)
+                .invoke(kit.identity("kit-ready"), spec, List.of(new Value.Text("x".repeat(220_000))), new OperationRegistry(), cancel);
+        Duration elapsed = Duration.ofNanos(System.nanoTime() - start);
+        if (trigger != null) {
+            trigger.join();
+        }
+        long pid = descendant("stdin-child-alive", result.stderr());
+        try {
+            assertTrue(!result.ok(), result.toString());
+            Duration bound = (cancelAfter != null ? cancelAfter : deadline).plusSeconds(3);
+            assertTrue(elapsed.compareTo(bound) < 0, "returned after " + elapsed);
+            assertTrue(eventually(() -> !Support.alive(pid)), "the child holding stdin survived");
+        } finally {
+            kill(pid);
+        }
+        assertTrue(eventually(() -> adapterThreads() == 0), "the stdin thread outlived the kill");
+        assertTrue(eventually(() -> {
+            try {
+                return descriptors() <= before;
+            } catch (IOException error) {
+                return false;
+            }
+        }), "descriptors grew from " + before);
     }
 
     @Test

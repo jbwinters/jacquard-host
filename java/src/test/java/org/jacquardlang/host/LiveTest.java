@@ -67,13 +67,21 @@ class LiveTest {
         store = root.resolve("store").toString();
         env = new HashMap<>(System.getenv());
         env.put("JACQUARD_PRELUDE", prelude);
-        ProcessBuilder builder = new ProcessBuilder(binary, "run", source.toString(), "--store", store).redirectErrorStream(true);
+        // Output goes to a file, so a hung install cannot hold a pipe read
+        // past the timeout.
+        Path log = root.resolve("install.log");
+        ProcessBuilder builder = new ProcessBuilder(binary, "run", source.toString(), "--store", store)
+                .redirectErrorStream(true)
+                .redirectOutput(log.toFile());
         builder.environment().clear();
         builder.environment().putAll(env);
         Process process = builder.start();
-        byte[] output = process.getInputStream().readAllBytes();
-        assertTrue(process.waitFor(60, TimeUnit.SECONDS), "installing fixtures timed out");
-        assertEquals(0, process.exitValue(), "installing fixtures: " + new String(output, StandardCharsets.UTF_8));
+        if (!process.waitFor(60, TimeUnit.SECONDS)) {
+            process.toHandle().descendants().forEach(ProcessHandle::destroyForcibly);
+            process.destroyForcibly();
+            fail("installing fixtures timed out");
+        }
+        assertEquals(0, process.exitValue(), "installing fixtures: " + Files.readString(log, StandardCharsets.UTF_8));
     }
 
     @AfterEach

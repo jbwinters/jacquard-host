@@ -58,6 +58,14 @@ class OfflineTest {
     }
 
     @Test
+    void nullArgumentsAreRefusedBeforeAWorkerStarts() {
+        Host host = faulty("ok", Duration.ofSeconds(10), null);
+        assertThrows(NullPointerException.class, () -> host.shutdownProbe(null));
+        assertThrows(NullPointerException.class,
+                () -> host.invoke(kit().identity("kit-ready"), unit(), List.of(), new OperationRegistry(), null));
+    }
+
+    @Test
     void strictJsonRefusals() throws Exception {
         for (String text : List.of(
                 "{\"a\":1,\"a\":2}",

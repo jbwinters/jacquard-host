@@ -206,7 +206,10 @@ public final class Worker implements AutoCloseable {
      * Kills the worker and a snapshot of its descendants. The snapshot is
      * taken only while the JDK still reports the worker alive, so it lists
      * the worker's own descendants; each handle carries its start time, which
-     * the JDK checks before signalling.
+     * the JDK checks before signalling. The worker is signalled through its
+     * {@link ProcessHandle}: {@link Process#destroyForcibly()} also closes the
+     * worker's stdin on the calling thread, which blocks behind a write the
+     * stdin thread has in progress, and so would never reach the descendants.
      */
     private void killTree() {
         if (process == null || !process.isAlive()) {
@@ -219,7 +222,7 @@ public final class Worker implements AutoCloseable {
             tree = List.of();
         }
         killed = true;
-        process.destroyForcibly();
+        process.toHandle().destroyForcibly();
         for (ProcessHandle handle : tree) {
             try {
                 handle.destroyForcibly();
