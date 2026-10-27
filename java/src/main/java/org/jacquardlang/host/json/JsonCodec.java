@@ -258,12 +258,50 @@ public final class JsonCodec {
 
     /** Encodes a JSON value canonically. */
     public static String stringify(Json value, int maxDepth) throws ProtocolException {
-        StringBuilder out = new StringBuilder();
+        Sink out = new Sink(Long.MAX_VALUE);
         write(out, value, maxDepth, 1);
-        return out.toString();
+        return out.text.toString();
     }
 
-    private static void write(StringBuilder out, Json value, int maxDepth, int depth) throws ProtocolException {
+    /**
+     * The encoding so far and its UTF-8 length. Every append is counted, and
+     * the encoding stops once it passes {@code limit}, so a value whose
+     * encoding is far larger than a frame (one long text referenced many
+     * times, say) costs at most about one frame of memory and time.
+     */
+    private static final class Sink {
+        final StringBuilder text = new StringBuilder();
+        final long limit;
+        long bytes;
+
+        Sink(long limit) {
+            this.limit = limit;
+        }
+
+        /** Appends ASCII. */
+        Sink append(String ascii) throws ProtocolException {
+            text.append(ascii);
+            return count(ascii.length());
+        }
+
+        Sink append(char c) throws ProtocolException {
+            text.append(c);
+            // A surrogate pair is four UTF-8 bytes: two for each half.
+            return count(c < 0x80 ? 1 : c < 0x800 || Character.isSurrogate(c) ? 2 : 3);
+        }
+
+        private Sink count(int length) throws ProtocolException {
+            bytes += length;
+            if (bytes > limit) {
+                throw ProtocolException.exceeded("payload exceeds max_frame_bytes");
+            }
+            return this;
+        }
+    }
+
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+    private static void write(Sink out, Json value, int maxDepth, int depth) throws ProtocolException {
         switch (value) {
             case Json.Null ignored -> out.append("null");
             case Json.Bool flag -> out.append(flag.value() ? "true" : "false");
@@ -271,7 +309,7 @@ public final class JsonCodec {
                 if (number.value() < Json.INT_MIN || number.value() > Json.INT_MAX) {
                     throw ProtocolException.malformed("JSON integer is outside the 63-bit range");
                 }
-                out.append(number.value());
+                out.append(Long.toString(number.value()));
             }
             case Json.Str text -> quote(out, text.value());
             case Json.Arr array -> {
@@ -344,7 +382,7 @@ public final class JsonCodec {
         return length;
     }
 
-    private static void quote(StringBuilder out, String text) throws ProtocolException {
+    private static void quote(Sink out, String text) throws ProtocolException {
         if (!isScalar(text)) {
             throw ProtocolException.malformed("a JSON string contains a lone surrogate");
         }
@@ -361,7 +399,7 @@ public final class JsonCodec {
                 case '\t' -> out.append("\\t");
                 default -> {
                     if (c < 0x20) {
-                        out.append(String.format("\\u%04x", (int) c));
+                        out.append("\\u00").append(HEX[c >> 4]).append(HEX[c & 0xf]);
                     } else {
                         out.append(c);
                     }
@@ -376,7 +414,9 @@ public final class JsonCodec {
      * refusing payloads outside {@code 1..=maxBytes}.
      */
     public static byte[] frameBytes(Map<String, Json> frame, int maxBytes, int maxDepth) throws ProtocolException {
-        byte[] payload = stringify(new Json.Obj(frame), maxDepth).getBytes(StandardCharsets.UTF_8);
+        Sink out = new Sink(maxBytes);
+        write(out, new Json.Obj(frame), maxDepth, 1);
+        byte[] payload = out.text.toString().getBytes(StandardCharsets.UTF_8);
         if (payload.length == 0 || payload.length > maxBytes) {
             throw ProtocolException.exceeded("payload exceeds max_frame_bytes");
         }

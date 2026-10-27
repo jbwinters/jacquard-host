@@ -297,7 +297,17 @@ public final class Worker implements AutoCloseable {
             // names are no longer needed.
             deleteQuietly(directory);
         }
-        Worker worker = new Worker(process, fifos, gate, expires, cancel, null);
+        Worker worker;
+        try {
+            worker = new Worker(process, fifos, gate, expires, cancel, null);
+        } catch (Throwable error) {
+            // An Error after the spawn: kill the worker and close the host's ends.
+            process.toHandle().destroyForcibly();
+            if (fifos != null) {
+                fifos.close();
+            }
+            throw error;
+        }
         try {
             worker.writer.start();
         } catch (OutOfMemoryError error) {

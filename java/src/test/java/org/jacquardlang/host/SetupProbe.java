@@ -9,7 +9,8 @@ import org.jacquardlang.host.carrier.Options;
 /**
  * Runs one shutdown probe in its own JVM, so {@link SetupTest} can put a slow
  * {@code mkfifo} first on this JVM's {@code PATH}. Prints the reason, the
- * elapsed milliseconds, and whether the caller is still interrupted.
+ * elapsed milliseconds, whether the caller is still interrupted, and how
+ * many of its child processes (the hanging {@code mkfifo}) are still alive.
  */
 public final class SetupProbe {
     private SetupProbe() {}
@@ -38,6 +39,13 @@ public final class SetupProbe {
         long start = System.nanoTime();
         InvocationResult result = new Host("unused", new HostOptions(options, null)).shutdownProbe(cancel);
         long elapsed = (System.nanoTime() - start) / 1_000_000;
-        System.out.println(Support.reason(result) + " " + elapsed + " " + Thread.interrupted());
+        boolean interrupted = Thread.interrupted();
+        // A forcible kill is asynchronous; allow it a moment to land.
+        long settle = System.nanoTime() + 2_000_000_000L;
+        long children;
+        while ((children = ProcessHandle.current().children().filter(ProcessHandle::isAlive).count()) > 0 && System.nanoTime() < settle) {
+            Thread.sleep(10);
+        }
+        System.out.println(Support.reason(result) + " " + elapsed + " " + interrupted + " " + children);
     }
 }

@@ -122,9 +122,9 @@ from a pipe cannot be interrupted. The carrier is built around both:
   descriptors, and output a descendant keeps writing stays in the kernel's
   pipe buffer (64 KiB by default on Linux; a writer can enlarge it), where
   the writer blocks, until the host disposes the worker and closes its ends;
-  the writer's next write then fails. If `mkfifo` is missing or fails, the
-  worker does not start and the invocation reports a carrier loss
-  (`worker_spawn_failed`). Making the FIFOs obeys the same deadline,
+  the writer's next write then fails. If `mkfifo` is missing, fails, or takes
+  more than 5 s, the worker does not start and the invocation reports a
+  carrier loss (`worker_spawn_failed`). Making the FIFOs obeys the same deadline,
   `Cancel`, and interrupt status as the rest of the call, which then reports
   `deadline` or `aborted` and does not start the worker. On other systems the
   JDK's pipes and their drain are used.

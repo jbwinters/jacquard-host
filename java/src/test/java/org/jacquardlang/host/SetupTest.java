@@ -28,7 +28,11 @@ class SetupTest {
     @TempDir
     Path scratch;
 
-    /** Runs {@link SetupProbe} with a hanging {@code mkfifo}; returns its reason, milliseconds, and interrupt flag. */
+    /**
+     * Runs {@link SetupProbe} with a hanging {@code mkfifo}; returns its
+     * reason, milliseconds, and interrupt flag, having checked that the
+     * {@code mkfifo} was killed.
+     */
     private String[] probe(String mode) throws Exception {
         Path bin = Files.createDirectory(scratch.resolve("bin"));
         Path shim = bin.resolve("mkfifo");
@@ -54,7 +58,8 @@ class SetupTest {
             assertEquals(List.of(), left.toList(), "setup left files behind");
         }
         String[] fields = output.lines().reduce((first, second) -> second).orElse("").split(" ");
-        assertEquals(3, fields.length, output);
+        assertEquals(4, fields.length, output);
+        assertEquals("0", fields[3], "mkfifo was left running");
         return fields;
     }
 

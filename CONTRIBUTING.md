@@ -115,9 +115,10 @@ directly, so there is no copy to keep in sync.
 ## Java
 
 The independent Java adapter lives in `java/` as Maven artifact
-`org.jacquardlang:jacquard-host`. It has no runtime dependencies beyond the JDK
-and does not call Python, Node.js, Go, or Rust. JUnit 5 is its only test
-dependency. Java 21+ and Maven 3.9+ are required.
+`org.jacquardlang:jacquard-host`. It has no third-party runtime dependencies
+and does not call Python, Node.js, Go, or Rust; on Unix it runs the system
+`mkfifo`. JUnit 5 is its only test dependency. Java 21+ and Maven 3.9+ are
+required.
 
 ```sh
 cd java

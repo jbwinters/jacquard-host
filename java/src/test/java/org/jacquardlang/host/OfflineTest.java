@@ -546,4 +546,49 @@ class OfflineTest {
         }), FailureCategory.OUTSIDE_FAILURE, "\ufffd" + "é".repeat(2046));
         assertFalse(Host.bounded("😀", 3).contains("\ud83d"));
     }
+
+    /**
+     * 256 references to one text at the text ceiling: within the node,
+     * collection, and text limits, but over 384 MiB once escaped.
+     */
+    private static Value hugeResult() {
+        return new Value.Tuple(java.util.Collections.nCopies(256, new Value.Text("\u0001".repeat(262_144))));
+    }
+
+    @Test
+    void aResultFarOverTheFrameCeilingIsRefusedWithoutEncodingItAll() {
+        long start = System.nanoTime();
+        Map<String, Json> frame = response((context, args) -> hugeResult());
+        long elapsed = (System.nanoTime() - start) / 1_000_000;
+        failure(frame, FailureCategory.OUTSIDE_FAILURE, "handler result has no encoding within the selected limits");
+        assertTrue(elapsed < 3000, "returned after " + elapsed + " ms");
+    }
+
+    @Test
+    void cancellationWhileAHugeResultIsEncodedEndsTheCallPromptly() {
+        Kit kit = kit();
+        BoundaryType text = new BoundaryType.Nominal(kit.identity("text"), List.of());
+        Interface spec = new Interface(List.of(text), text, List.of(kit.identity("kit-world")));
+        Cancel cancel = new Cancel();
+        OperationRegistry registry = new OperationRegistry().bind(kit.identity("kit-world"), kit.identity("send"), (context, args) -> {
+            cancel.cancel();
+            return hugeResult();
+        });
+        Host host = new Host("unused", new HostOptions(standin("replay", "one-once-effect-success", Duration.ofSeconds(20)), null));
+        long start = System.nanoTime();
+        InvocationResult result = host.invoke(kit.identity("kit-echo"), spec, List.of(new Value.Text("ping")), registry, cancel);
+        long elapsed = (System.nanoTime() - start) / 1_000_000;
+        assertEquals("aborted", reason(result), result.toString());
+        assertTrue(elapsed < 3000, "returned after " + elapsed + " ms");
+    }
+
+    @Test
+    void theEncoderStopsAtTheFrameCeiling() throws ProtocolException {
+        Map<String, Json> frame = Map.of("k", Json.of("\u0001".repeat(1000)));
+        ProtocolException refused = assertThrows(ProtocolException.class, () -> JsonCodec.frameBytes(frame, 6007, 64));
+        assertEquals("payload exceeds max_frame_bytes", refused.detail());
+        // {"k":"…"} is 8 bytes plus 6 per escaped U+0001: exactly 6008.
+        assertEquals(4 + 6008, JsonCodec.frameBytes(frame, 6008, 64).length);
+        assertEquals("\"\\u0001\\u001f\"", JsonCodec.stringify(Json.of("\u0001\u001f"), 64));
+    }
 }
