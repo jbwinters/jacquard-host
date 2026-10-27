@@ -61,18 +61,14 @@ fn invocations_release_their_pipes_and_threads() {
     // pipes rather than wait for the descendant.
     let start = Instant::now();
     let result = invoke("escaped-descendant");
+    let elapsed = start.elapsed();
     let pid: i32 = String::from_utf8_lossy(&result.stderr).parse().expect("descendant pid");
     let (after_descriptors, after_threads) = (settled("/proc/self/fd", descriptors), settled("/proc/self/task", threads));
     // SAFETY: the pid names the stand-in's own descendant.
     unsafe {
         kill(pid, 9);
     }
-    assert!(
-        result.kind == ResultKind::CarrierLoss && start.elapsed() < Duration::from_secs(5),
-        "{:?} after {:?}",
-        result.kind,
-        start.elapsed()
-    );
+    assert!(result.kind == ResultKind::CarrierLoss && elapsed < Duration::from_secs(5), "{:?} after {elapsed:?}", result.kind);
     assert!(after_descriptors <= descriptors, "escaped descendant: descriptors grew from {descriptors} to {after_descriptors}");
     assert!(after_threads <= threads, "escaped descendant: threads grew from {threads} to {after_threads}");
 }
