@@ -592,16 +592,26 @@ class OfflineTest {
         assertTrue(elapsed < 3000, "returned after " + elapsed + " ms");
     }
 
+    /** Whether the caller is decoding a string, which a 256 KiB request makes long. */
+    private static boolean decoding(StackTraceElement[] stack) {
+        for (StackTraceElement frame : stack) {
+            if (frame.getClassName().equals(JsonCodec.class.getName() + "$Decoder") && frame.getMethodName().equals("quoted")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
-     * Cancels the call, or interrupts the caller, while it decodes a 256 KiB
-     * effect request, and reports whether the handler then started. Retries
-     * until the stop lands during decoding.
+     * Cancels the call, or interrupts the caller, once its stack matches
+     * {@code when}, and checks that the handler then never started. Retries
+     * until the stop lands there.
      */
-    private static void noHandlerAfterAStopDuringDecoding(boolean interrupt) throws Exception {
+    private static void noHandlerAfterAStop(boolean interrupt, java.util.function.Predicate<StackTraceElement[]> when) throws Exception {
         Kit kit = kit();
         BoundaryType text = new BoundaryType.Nominal(kit.identity("text"), List.of());
         Interface spec = new Interface(List.of(text), text, List.of(kit.identity("kit-world")));
-        for (int attempt = 0; attempt < 5; attempt++) {
+        for (int attempt = 0; attempt < 10; attempt++) {
             Cancel cancel = new Cancel();
             java.util.concurrent.atomic.AtomicLong stoppedAt = new java.util.concurrent.atomic.AtomicLong();
             java.util.concurrent.atomic.AtomicLong startedAt = new java.util.concurrent.atomic.AtomicLong();
@@ -613,16 +623,14 @@ class OfflineTest {
             java.util.concurrent.atomic.AtomicBoolean done = new java.util.concurrent.atomic.AtomicBoolean();
             Thread watcher = Thread.ofPlatform().daemon().start(() -> {
                 while (!done.get()) {
-                    for (StackTraceElement frame : caller.getStackTrace()) {
-                        if (frame.getClassName().equals(JsonCodec.class.getName() + "$Decoder") && frame.getMethodName().equals("quoted")) {
-                            stoppedAt.set(System.nanoTime());
-                            if (interrupt) {
-                                caller.interrupt();
-                            } else {
-                                cancel.cancel();
-                            }
-                            return;
+                    if (when.test(caller.getStackTrace())) {
+                        stoppedAt.set(System.nanoTime());
+                        if (interrupt) {
+                            caller.interrupt();
+                        } else {
+                            cancel.cancel();
                         }
+                        return;
                     }
                 }
             });
@@ -639,17 +647,97 @@ class OfflineTest {
             assertEquals(interrupt, interrupted);
             return;
         }
-        throw new AssertionError("the stop never landed while the request was decoded");
+        throw new AssertionError("the stop never landed where the test aimed it");
     }
 
     @Test
     void cancellationWhileTheRequestIsDecodedStartsNoHandler() throws Exception {
-        noHandlerAfterAStopDuringDecoding(false);
+        noHandlerAfterAStop(false, OfflineTest::decoding);
     }
 
     @Test
     void interruptionWhileTheRequestIsDecodedStartsNoHandler() throws Exception {
-        noHandlerAfterAStopDuringDecoding(true);
+        noHandlerAfterAStop(true, OfflineTest::decoding);
+    }
+
+    /**
+     * Cancels the call, or interrupts the caller, from the handler thread just
+     * before its check, and checks that the handler never ran and the call
+     * was aborted.
+     */
+    private static void noHandlerAfterAStopAtTheHandlerCheck(boolean interrupt) {
+        Kit kit = kit();
+        BoundaryType text = new BoundaryType.Nominal(kit.identity("text"), List.of());
+        Interface spec = new Interface(List.of(text), text, List.of(kit.identity("kit-world")));
+        Cancel cancel = new Cancel();
+        Thread caller = Thread.currentThread();
+        java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean();
+        OperationRegistry registry = new OperationRegistry().bind(kit.identity("kit-world"), kit.identity("send"), (context, args) -> {
+            ran.set(true);
+            return Value.UNIT;
+        });
+        Runnable stop = () -> {
+            stopped.set(true);
+            if (interrupt) {
+                caller.interrupt();
+            } else {
+                cancel.cancel();
+            }
+        };
+        Host.handlerCheckHook = stop;
+        InvocationResult result;
+        try {
+            Host host = new Host("unused", new HostOptions(standin("replay", "one-once-effect-success", Duration.ofSeconds(20)), null));
+            result = host.invoke(kit.identity("kit-echo"), spec, List.of(new Value.Text("ping")), registry, cancel);
+        } finally {
+            Host.handlerCheckHook = null;
+        }
+        boolean interrupted = Thread.interrupted();
+        assertTrue(stopped.get(), "the seam never ran");
+        assertFalse(ran.get(), "the handler ran after the stop");
+        assertEquals("aborted", reason(result), result.toString());
+        assertEquals(interrupt, interrupted);
+    }
+
+    @Test
+    void aCancellationJustBeforeTheHandlerIsCalledRunsNoHandler() {
+        noHandlerAfterAStopAtTheHandlerCheck(false);
+    }
+
+    @Test
+    void anInterruptionJustBeforeTheHandlerIsCalledRunsNoHandler() {
+        noHandlerAfterAStopAtTheHandlerCheck(true);
+    }
+
+    @Test
+    void validatingManyReferencesToALongTextIsBounded() {
+        // 4 x 1022 references to one text of 65536 emoji (262144 UTF-8
+        // bytes): within the node, collection, and text limits, and about
+        // 1 GiB of text to scan if each reference were checked in full.
+        Value.Text text = new Value.Text("😀".repeat(65_536));
+        Value value = new Value.Tuple(java.util.Collections.nCopies(4, new Value.Tuple(java.util.Collections.nCopies(1022, text))));
+        java.util.concurrent.atomic.AtomicLong returned = new java.util.concurrent.atomic.AtomicLong();
+        Map<String, Json> frame = response((context, args) -> {
+            returned.set(System.nanoTime());
+            return value;
+        });
+        long elapsed = (System.nanoTime() - returned.get()) / 1_000_000;
+        failure(frame, FailureCategory.OUTSIDE_FAILURE, "handler result has no encoding within the selected limits");
+        assertTrue(elapsed < 500, "answered " + elapsed + " ms after the handler returned");
+    }
+
+    @Test
+    void aTextFarOverTheTextCeilingIsRefusedWithoutScanningIt() {
+        Value.Text text = new Value.Text("é".repeat(32 << 20));
+        java.util.concurrent.atomic.AtomicLong returned = new java.util.concurrent.atomic.AtomicLong();
+        Map<String, Json> frame = response((context, args) -> {
+            returned.set(System.nanoTime());
+            return text;
+        });
+        long elapsed = (System.nanoTime() - returned.get()) / 1_000_000;
+        failure(frame, FailureCategory.OUTSIDE_FAILURE, "handler result has no encoding within the selected limits");
+        assertTrue(elapsed < 500, "answered " + elapsed + " ms after the handler returned");
     }
 
     @Test

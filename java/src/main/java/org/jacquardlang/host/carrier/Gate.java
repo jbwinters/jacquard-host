@@ -2,21 +2,30 @@ package org.jacquardlang.host.carrier;
 
 /**
  * Decides whether a stdin chunk may start: never once input is closed, the
- * lifetime deadline has passed, or cancellation was requested, even before
- * the host notices the deadline or the request.
+ * lifetime deadline has passed, cancellation was requested, or the calling
+ * thread is interrupted, even before the host notices any of these. It is
+ * read from other threads, and is also the stop check for handler threads.
  */
 final class Gate {
     private volatile boolean closed;
     private final long deadline;
     private final Cancel cancel;
+    /** The thread that drives the worker; its interrupt stops the call. */
+    private final Thread caller;
 
-    Gate(long deadline, Cancel cancel) {
+    Gate(long deadline, Cancel cancel, Thread caller) {
         this.deadline = deadline;
         this.cancel = cancel;
+        this.caller = caller;
+    }
+
+    /** Whether the call is cancelled, interrupted, or past its lifetime. */
+    boolean stopped() {
+        return System.nanoTime() - deadline >= 0 || cancel.isCancelled() || caller.isInterrupted();
     }
 
     boolean admits() {
-        return !closed && System.nanoTime() - deadline < 0 && !cancel.isCancelled();
+        return !closed && !stopped();
     }
 
     void close() {

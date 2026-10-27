@@ -20,7 +20,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
-import java.util.function.BooleanSupplier;
 
 import org.jacquardlang.host.ProtocolException;
 import org.jacquardlang.host.json.Json;
@@ -257,7 +256,7 @@ public final class Worker implements AutoCloseable {
         // Clamp to about 73 years so the nanosecond deadline cannot overflow.
         long budget = deadline.compareTo(Duration.ofNanos(Long.MAX_VALUE / 4)) > 0 ? Long.MAX_VALUE / 4 : deadline.toNanos();
         long expires = System.nanoTime() + budget;
-        Gate gate = new Gate(expires, cancel);
+        Gate gate = new Gate(expires, cancel, Thread.currentThread());
         Fifos fifos = null;
         Path directory = null;
         Process process = null;
@@ -342,17 +341,12 @@ public final class Worker implements AutoCloseable {
     }
 
     /**
-     * Whether the call is cancelled, the worker has expired, or its lifetime
-     * has passed. Safe from any thread; it does not see the caller's
-     * interrupt, which {@link #fault()} reports on the caller's thread.
+     * Whether the call is cancelled, the caller interrupted, the worker
+     * expired, or its lifetime passed. Safe from any thread, and exact: it
+     * does not wait for the caller's next poll to notice the deadline.
      */
     public boolean stopping() {
-        return expired.get() || cancel.isCancelled() || System.nanoTime() - expires >= 0;
-    }
-
-    /** A flag handlers can observe; true once the worker expires or is cancelled. */
-    public BooleanSupplier expiredFlag() {
-        return expired::get;
+        return expired.get() || gate.stopped();
     }
 
     /** Whether the stdin thread is still running (after disposal: stuck on a pipe a descendant holds). */

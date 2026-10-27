@@ -262,6 +262,12 @@ public final class Host {
 
     private record Failed(FailureCategory category, String message) implements Answer {}
 
+    /**
+     * Test seam: runs on the handler thread just before its check, so a test
+     * can stop the call at exactly that point. Null outside tests.
+     */
+    static volatile Runnable handlerCheckHook;
+
     /** The call stopped before the handler began; the fault check after the wait reports why. */
     private static final Answer NOT_STARTED = new Failed(FailureCategory.OUTSIDE_FAILURE, "handler was not started");
 
@@ -278,17 +284,23 @@ public final class Host {
             answer = new Failed(FailureCategory.UNSUPPORTED_OPERATION, "operation is not configured");
         } else {
             // Decoding the request takes time; an outside action must not
-            // begin once the call is cancelled, interrupted, or past its
-            // lifetime, so check here and again as the handler thread starts.
+            // begin once the call is cancelled, the caller interrupted, or the
+            // lifetime passed. The caller checks before creating the handler
+            // thread, and the thread checks again before calling the handler.
             CarrierException early = worker.fault();
             if (early != null) {
                 throw early;
             }
-            HandlerContext context = new HandlerContext(worker.expiredFlag(), ended::get, cancel);
+            HandlerContext context = new HandlerContext(worker::stopping, ended::get, cancel);
             List<Value> arguments = request.arguments();
             CompletableFuture<Answer> done = new CompletableFuture<>();
-            Thread thread = new Thread(() -> done.complete(worker.stopping() ? NOT_STARTED : call(handler, context, arguments)),
-                    "jacquard-handler");
+            Thread thread = new Thread(() -> {
+                Runnable hook = handlerCheckHook;
+                if (hook != null) {
+                    hook.run();
+                }
+                done.complete(worker.stopping() ? NOT_STARTED : call(handler, context, arguments));
+            }, "jacquard-handler");
             thread.setDaemon(true);
             boolean started;
             try {

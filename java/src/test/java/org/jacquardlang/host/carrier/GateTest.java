@@ -25,7 +25,7 @@ class GateTest {
     @Test
     void aClosedGateAdmitsNoWrite() throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        Gate gate = new Gate(System.nanoTime() + MINUTE, new Cancel());
+        Gate gate = new Gate(System.nanoTime() + MINUTE, new Cancel(), Thread.currentThread());
         Writer writer = new Writer(out, gate);
         writer.start();
         assertNull(write(writer, "before"));
@@ -47,7 +47,7 @@ class GateTest {
             if (cancelled) {
                 cancel.cancel();
             }
-            Gate gate = new Gate(cancelled ? System.nanoTime() + MINUTE : System.nanoTime(), cancel);
+            Gate gate = new Gate(cancelled ? System.nanoTime() + MINUTE : System.nanoTime(), cancel, Thread.currentThread());
             Writer writer = new Writer(out, gate);
             writer.start();
             assertNotNull(write(writer, "late"));
@@ -57,8 +57,24 @@ class GateTest {
     }
 
     @Test
+    void anInterruptedCallerStopsTheGate() throws Exception {
+        Thread caller = Thread.ofPlatform().unstarted(() -> {});
+        Gate gate = new Gate(System.nanoTime() + MINUTE, new Cancel(), Thread.currentThread());
+        assertTrue(gate.admits());
+        Thread.currentThread().interrupt();
+        try {
+            assertTrue(gate.stopped());
+            assertFalse(gate.admits());
+        } finally {
+            Thread.interrupted();
+        }
+        assertTrue(gate.admits());
+        assertFalse(new Gate(System.nanoTime() + MINUTE, new Cancel(), caller).stopped());
+    }
+
+    @Test
     void aGateClosedDuringAWriteStopsBeforeTheNextChunk() throws Exception {
-        Gate gate = new Gate(System.nanoTime() + MINUTE, new Cancel());
+        Gate gate = new Gate(System.nanoTime() + MINUTE, new Cancel(), Thread.currentThread());
         ByteArrayOutputStream out = new ByteArrayOutputStream() {
             @Override
             public synchronized void write(byte[] bytes, int offset, int length) {
@@ -85,7 +101,7 @@ class GateTest {
                 closed[0] = true;
             }
         };
-        Writer writer = new Writer(out, new Gate(System.nanoTime() + MINUTE, new Cancel()));
+        Writer writer = new Writer(out, new Gate(System.nanoTime() + MINUTE, new Cancel(), Thread.currentThread()));
         writer.start();
         writer.close();
         assertTrue(writer.join(TimeUnit.SECONDS.toNanos(5)));

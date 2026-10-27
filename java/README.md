@@ -99,14 +99,18 @@ code point, and a lone surrogate in it becomes U+FFFD.
 
 Each handler runs on its own daemon thread, bounded by the worker's lifetime
 deadline. No handler starts once the call is cancelled, interrupted, or past
-its lifetime: the host checks after decoding the request and again as the
-handler thread begins. At the deadline, when the caller's `Cancel` is triggered, or when the
-calling thread is interrupted, the host kills the worker's process tree and
-sends no late response. An interrupt is reported as an abort, and the caller's
-interrupt status is restored before `invoke` returns. Cancellation is
-cooperative. `HandlerContext.isCancelled` turns true, and stays true once the
-invocation ends, but a handler that ignores it keeps running on its thread
-until it returns. Nothing is retried.
+its lifetime: the host checks after decoding the request, and the handler
+thread checks again, caller's interrupt included, just before calling the
+handler. A stop that lands after that check is seen by the handler through
+its context. At the deadline, when
+the caller's `Cancel` is triggered, or when the calling thread is interrupted,
+the host kills the worker's process tree and sends no late response. An
+interrupt is reported as an abort, and the caller's interrupt status is
+restored before `invoke` returns. Cancellation is cooperative.
+`HandlerContext.isCancelled` turns true as soon as the call is cancelled, the
+caller interrupted, or the lifetime passed, and stays true once the invocation
+ends, but a handler that ignores it keeps running on its thread until it
+returns. Nothing is retried.
 
 ## Process carrier
 
@@ -140,7 +144,8 @@ from a pipe cannot be interrupted. The carrier is built around both:
 - **Writes run on one stdin thread**, because a pipe write can block. The
   caller waits for each write under the lifetime. Each frame is written in
   chunks of at most 4096 bytes. Each chunk starts only while input is open,
-  the deadline has not passed, and cancellation has not been requested. A
+  the deadline has not passed, cancellation has not been requested, and the
+  calling thread is not interrupted. A
   chunk already started may still complete, and the worker may read it,
   until the caller's next poll kills the worker: at most one poll slice
   (5 ms) after a cancellation, and less after the deadline.
