@@ -68,7 +68,7 @@ final class Support {
         }
     }
 
-    private static String location(Class<?> type) {
+    static String location(Class<?> type) {
         try {
             return Path.of(type.getProtectionDomain().getCodeSource().getLocation().toURI()).toString();
         } catch (URISyntaxException error) {

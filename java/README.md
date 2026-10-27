@@ -2,8 +2,9 @@
 
 An independent Java adapter for Jacquard Core's experimental `jacquard-host-v0`
 protocol. It implements the pinned protocol on its own, without calling Python,
-Node.js, Go, or Rust, and has no runtime dependencies beyond the JDK. Java 21+
-is required.
+Node.js, Go, or Rust, and has no third-party runtime dependencies. Java 21+
+is required, and on Unix the `mkfifo` command must be on the JVM's `PATH`
+(see "Process carrier" below).
 
 This is the protocol-level adapter, comparable to the Go `host` package and the
 Rust `host` module. It includes strict codecs, the host session state machine,
@@ -118,11 +119,15 @@ from a pipe cannot be interrupted. The carrier is built around both:
   directory, opens each read-write (the open never waits, and the host always
   holds a read end), redirects the worker's stdout and stderr to them, and
   removes the directory once the worker starts. The JDK never touches those
-  descriptors, and output a descendant keeps writing stays in the 64 KiB pipe,
-  where the writer blocks, until the host disposes the worker and closes its
-  ends; the writer's next write then fails. If `mkfifo` is missing or fails,
-  the worker does not start and the invocation reports a carrier loss. On
-  other systems the JDK's pipes and their drain are used.
+  descriptors, and output a descendant keeps writing stays in the kernel's
+  pipe buffer (64 KiB by default on Linux; a writer can enlarge it), where
+  the writer blocks, until the host disposes the worker and closes its ends;
+  the writer's next write then fails. If `mkfifo` is missing or fails, the
+  worker does not start and the invocation reports a carrier loss
+  (`worker_spawn_failed`). Making the FIFOs obeys the same deadline,
+  `Cancel`, and interrupt status as the rest of the call, which then reports
+  `deadline` or `aborted` and does not start the worker. On other systems the
+  JDK's pipes and their drain are used.
 - **Reads never block.** stdout and stderr are read on the caller's thread,
   only after `available()` reports bytes in the pipe. Between polls the
   thread parks for 0.1 to 5 ms. Every wait, whether for a frame, a write, a

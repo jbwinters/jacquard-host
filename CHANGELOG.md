@@ -21,7 +21,8 @@
   implement `std::error::Error`, and a downstream `From` impl for a type that
   implements `Error` conflicts with it.
 - Java adapter: an independent Maven project in `java/`
-  (`org.jacquardlang:jacquard-host`, Java 21+) with no runtime dependencies.
+  (`org.jacquardlang:jacquard-host`, Java 21+) with no third-party runtime
+  dependencies (on Unix it runs the system `mkfifo`).
   It provides strict codecs, the session state machine, a bounded process
   carrier for `jacquard host worker`, and a `Host` with a closed operation
   registry. It carries the pinned kit as class-path resources and replays all

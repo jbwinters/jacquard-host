@@ -133,7 +133,7 @@ public final class Worker implements AutoCloseable {
             try {
                 RandomAccessFile err = new RandomAccessFile(stderr.toFile(), "rw");
                 return new Fifos(out, err, new FileInputStream(out.getFD()), new FileInputStream(err.getFD()));
-            } catch (IOException | RuntimeException error) {
+            } catch (Throwable error) {
                 out.close();
                 throw error;
             }
@@ -151,37 +151,54 @@ public final class Worker implements AutoCloseable {
         }
     }
 
-    /** Creates both FIFOs with one {@code mkfifo -m 600}, waiting at most {@code nanos}. */
-    private static void makeFifos(Path stdout, Path stderr, long nanos) throws IOException {
-        Process mkfifo = new ProcessBuilder("mkfifo", "-m", "600", stdout.toString(), stderr.toString())
-                .redirectInput(ProcessBuilder.Redirect.from(new java.io.File("/dev/null")))
-                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                .redirectError(ProcessBuilder.Redirect.DISCARD)
-                .start();
-        boolean exited = false;
-        boolean interrupted = false;
-        long end = System.nanoTime() + nanos;
-        while (!exited) {
+    /**
+     * Creates both FIFOs with one {@code mkfifo -m 600}. Returns false, with
+     * {@code mkfifo} killed, once the call is cancelled or interrupted or the
+     * lifetime ends; the caller then reports that instead of a spawn failure.
+     * An interrupt stays set for the caller.
+     *
+     * @throws IOException when {@code mkfifo} cannot run, fails, or takes
+     *     longer than {@link #MKFIFO_WAIT}
+     */
+    private static boolean makeFifos(Path stdout, Path stderr, long expires, Cancel cancel) throws IOException {
+        Process mkfifo;
+        try {
+            mkfifo = new ProcessBuilder("mkfifo", "-m", "600", stdout.toString(), stderr.toString())
+                    .redirectInput(ProcessBuilder.Redirect.from(new java.io.File("/dev/null")))
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+        } catch (IOException error) {
+            throw new IOException(error.getMessage() + "; the Java host needs mkfifo on Unix", error);
+        }
+        long end = System.nanoTime() + MKFIFO_WAIT;
+        while (true) {
+            if (stopped(expires, cancel)) {
+                mkfifo.toHandle().destroyForcibly();
+                return false;
+            }
             long left = end - System.nanoTime();
             if (left <= 0) {
-                break;
+                mkfifo.toHandle().destroyForcibly();
+                throw new IOException("mkfifo did not finish in time");
             }
             try {
-                exited = mkfifo.waitFor(left, TimeUnit.NANOSECONDS);
+                if (mkfifo.waitFor(Math.min(left, POLL_MAX), TimeUnit.NANOSECONDS)) {
+                    break;
+                }
             } catch (InterruptedException error) {
-                interrupted = true;
+                Thread.currentThread().interrupt();
             }
-        }
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-        if (!exited) {
-            mkfifo.destroyForcibly();
-            throw new IOException("mkfifo did not finish in time");
         }
         if (mkfifo.exitValue() != 0) {
             throw new IOException("mkfifo exited with status " + mkfifo.exitValue());
         }
+        return true;
+    }
+
+    /** Whether the call is cancelled or interrupted (the interrupt stays set) or the lifetime has ended. */
+    private static boolean stopped(long expires, Cancel cancel) {
+        return cancel.isCancelled() || Thread.currentThread().isInterrupted() || System.nanoTime() - expires >= 0;
     }
 
     private static void deleteQuietly(Path directory) {
@@ -210,6 +227,18 @@ public final class Worker implements AutoCloseable {
     }
 
     /**
+     * A worker that was never spawned because the call was cancelled or
+     * interrupted, or its lifetime ended, during setup. Its first operation
+     * reports the abort or the deadline, as for a running worker.
+     */
+    private static Worker stoppedBeforeSpawn(Gate gate, long expires, Cancel cancel) {
+        Worker stopped = new Worker(null, null, gate, expires, cancel, null);
+        stopped.exitRecorded = true;
+        stopped.fault();
+        return stopped;
+    }
+
+    /**
      * Spawns the worker. A spawn failure is reported by the first operation.
      *
      * @throws IllegalArgumentException for invalid options
@@ -231,7 +260,7 @@ public final class Worker implements AutoCloseable {
         Gate gate = new Gate(expires, cancel);
         Fifos fifos = null;
         Path directory = null;
-        Process process;
+        Process process = null;
         try {
             if (FIFOS) {
                 try {
@@ -239,28 +268,31 @@ public final class Worker implements AutoCloseable {
                             PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
                     Path out = directory.resolve("stdout");
                     Path err = directory.resolve("stderr");
-                    makeFifos(out, err, Math.max(0, Math.min(MKFIFO_WAIT, expires - System.nanoTime())));
+                    if (!makeFifos(out, err, expires, cancel)) {
+                        return stoppedBeforeSpawn(gate, expires, cancel);
+                    }
                     fifos = Fifos.open(out, err);
                     builder.redirectOutput(ProcessBuilder.Redirect.to(out.toFile()));
                     builder.redirectError(ProcessBuilder.Redirect.to(err.toFile()));
                 } catch (IOException | RuntimeException error) {
-                    if (fifos != null) {
-                        fifos.close();
-                    }
                     return failed(gate, expires, cancel, String.valueOf(error.getMessage()),
-                            "could not create the worker's output pipes (" + error.getMessage() + "); the Java host needs mkfifo on Unix");
+                            "could not create the worker's output pipes (" + error.getMessage() + ")");
                 }
+            }
+            if (stopped(expires, cancel)) {
+                return stoppedBeforeSpawn(gate, expires, cancel);
             }
             try {
                 process = builder.start();
             } catch (IOException | RuntimeException error) {
-                if (fifos != null) {
-                    fifos.close();
-                }
                 return failed(gate, expires, cancel, String.valueOf(error.getMessage()),
                         "could not start " + command.get(0) + " (" + error.getMessage() + "); check the configured Core installation");
             }
         } finally {
+            if (process == null && fifos != null) {
+                // Any path that did not spawn, including an Error, closes the host's ends.
+                fifos.close();
+            }
             // The worker holds its ends and the host holds its own, so the
             // names are no longer needed.
             deleteQuietly(directory);
