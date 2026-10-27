@@ -11,7 +11,10 @@ third-party runtime dependencies. The [TypeScript SDK](typescript/README.md),
 the [Go SDK](go/README.md), and the [Rust SDK](rust/README.md) implement the
 pinned protocol independently. The TypeScript SDK supports async service
 methods, the Go SDK maps native Go types and context cancellation, and the Rust
-SDK maps native Rust types through `record!` and `variants!` declarations.
+SDK maps native Rust types through `record!` and `variants!` declarations. A
+protocol-level [Java adapter](java/README.md) (Java 21+) also implements the
+pinned protocol independently. It has a closed operation registry and kit
+replay, but no SDK layer yet.
 
 **Experimental:** the SDK targets Core's pinned `jacquard-host-v0` protocol.
 Core is installed separately. Each invocation runs one fresh, serial worker;
@@ -113,8 +116,8 @@ participant collection require separate application work.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for offline tests, installed-distribution
 checks, and live runs. CI tests Python 3.11–3.13, Node.js 22/24, Go 1.24 and
-stable, and Rust 1.88 and stable. It separately installs the pinned Core release
-for every adapter's live suite and the public examples.
+stable, Rust 1.88 and stable, and Java 21 and 25. It separately installs the
+pinned Core release for every adapter's live suite and the public examples.
 
 [Evidence](docs/EVIDENCE.md) records the checks and platform claims;
 [development experiments](docs/development/README.md) preserve the usability

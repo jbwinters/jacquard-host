@@ -17,8 +17,9 @@ Contributions are licensed under [Apache 2.0](LICENSE), matching this repository
 
 `core-pin.json` names the one Core release all adapters target. Do not edit
 `src/jacquard_host/compat.py`, `typescript/src/compat.ts`, `go/protocol/compat.go`,
-`rust/src/compat.rs`, the Go and Rust kit copies under `go/kit/data/` and
-`rust/kit/`, or the generated block
+`rust/src/compat.rs`, `java/src/main/java/org/jacquardlang/host/Compat.java`,
+the Go, Rust, and Java kit copies under `go/kit/data/`, `rust/kit/`, and
+`java/src/main/resources/org/jacquardlang/host/kit/`, or the generated block
 in `docs/COMPATIBILITY.md` by hand: change the pin with
 `python3 scripts/core_pin.py update --tag ...`, which also vendors the kit, and
 `python3 scripts/core_pin.py check` (run in CI) reports any drift.
@@ -111,6 +112,29 @@ kit. `scripts/core_pin.py` maintains both; do not edit them by hand. The
 `jacquard-examples` Cargo example reads the rules and inputs from `examples/`
 directly, so there is no copy to keep in sync.
 
+## Java
+
+The independent Java adapter lives in `java/` as Maven artifact
+`org.jacquardlang:jacquard-host`. It has no runtime dependencies beyond the JDK
+and does not call Python, Node.js, Go, or Rust. JUnit 5 is its only test
+dependency. Java 21+ and Maven 3.9+ are required.
+
+```sh
+cd java
+mvn -B verify
+# With the pinned Core configured (eval "$(python3 ../scripts/core_pin.py install)"):
+JACQUARD_REQUIRE_LIVE=1 mvn -B verify
+```
+
+CI runs the offline tests on Java 21 and 25, and the live tests on Java 21 in
+the shared pinned-Core job. The compiler runs with `-Xlint:all -Werror`.
+`java/src/main/java/org/jacquardlang/host/Compat.java` is generated and the
+kit under `java/src/main/resources/` is a byte copy of the pinned kit.
+`scripts/core_pin.py` maintains both; do not edit them by hand. The `StandIn`
+main class in the test sources is a fixture for the offline tests. Copy the
+repository `NOTICE` to `java/NOTICE` when it changes (a test fails if they
+differ).
+
 ## Releasing
 
 A release is one commit on `main` with green CI. To cut one:
@@ -118,7 +142,7 @@ A release is one commit on `main` with green CI. To cut one:
 1. Open a pull request that dates the CHANGELOG entry and updates any version
    references in the docs. Keep the Python (`src/jacquard_host/__init__.py`),
    npm (`typescript/package.json`, `typescript/src/version.ts`), Rust
-   (`rust/Cargo.toml`), and release versions equal.
+   (`rust/Cargo.toml`), Java (`java/pom.xml`), and release versions equal.
 2. After it merges, tag the merge commit twice, with annotated tags
    (`git tag -a`):
    `jacquard-host-X.Y.Z` for the repository and its assets, and `go/vX.Y.Z`
@@ -131,8 +155,8 @@ A release is one commit on `main` with green CI. To cut one:
 4. Publish a GitHub release for `jacquard-host-X.Y.Z` with the CHANGELOG
    entry as its notes and the assets attached.
 
-Nothing is published to PyPI, npm, or crates.io. The Rust crate is used from
-the repository tag.
+Nothing is published to PyPI, npm, crates.io, or Maven Central. The Rust
+crate is used from the repository tag, and the Java artifact is built from it.
 
 ## TypeScript
 
