@@ -744,10 +744,16 @@ class OfflineTest {
         long elapsed = (System.nanoTime() - returned.get()) / 1_000_000;
         failure(frame, FailureCategory.OUTSIDE_FAILURE, "handler result has no encoding within the selected limits");
         assertTrue(elapsed < 500, "answered " + elapsed + " ms after the handler returned");
+        // Deterministically: validation itself charges the texts against the
+        // frame and stops, rather than checking every reference in full and
+        // leaving the refusal to the encoder.
+        ProtocolException refused = assertThrows(ProtocolException.class,
+                () -> org.jacquardlang.host.protocol.Protocol.encodeValue(value, new org.jacquardlang.host.protocol.Budget(HARD)));
+        assertEquals("payload exceeds max_frame_bytes", refused.detail());
     }
 
     @Test
-    void aTextFarOverTheTextCeilingIsRefusedWithoutScanningIt() {
+    void aTextFarOverTheTextCeilingIsRefusedPromptly() {
         Value.Text text = new Value.Text("é".repeat(32 << 20));
         java.util.concurrent.atomic.AtomicLong returned = new java.util.concurrent.atomic.AtomicLong();
         Map<String, Json> frame = response((context, args) -> {

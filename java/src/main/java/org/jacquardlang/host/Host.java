@@ -264,7 +264,8 @@ public final class Host {
 
     /**
      * Test seam: runs on the handler thread just before its check, so a test
-     * can stop the call at exactly that point. Null outside tests.
+     * can stop the call at exactly that point. Null outside tests. It is
+     * global, so tests that set it must not run in parallel in one JVM.
      */
     static volatile Runnable handlerCheckHook;
 
