@@ -553,10 +553,37 @@ final class Codecs {
     private static final class UnionCodec<S> implements Cases<S> {
         private final Class<S> type;
         private final List<Cases<?>> cases;
+        /**
+         * The distinct non-union cases, nested unions flattened in order, so
+         * decoding asks each once: asking a nested union asked every case
+         * below it again, which grew as 2 to the nesting depth.
+         */
+        private final List<Cases<?>> leaves;
 
         UnionCodec(Class<S> type, List<Cases<?>> cases) {
             this.type = type;
             this.cases = List.copyOf(cases);
+            List<Cases<?>> flat = new ArrayList<>();
+            flatten(this.cases, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), flat);
+            this.leaves = List.copyOf(flat);
+        }
+
+        private static void flatten(List<Cases<?>> cases, java.util.Set<Object> seen, List<Cases<?>> out) {
+            for (Cases<?> each : cases) {
+                if (!seen.add(each)) {
+                    continue;
+                }
+                if (each instanceof UnionCodec<?> nested) {
+                    // Already flattened when it was built.
+                    for (Cases<?> leaf : nested.leaves) {
+                        if (seen.add(leaf)) {
+                            out.add(leaf);
+                        }
+                    }
+                } else {
+                    out.add(each);
+                }
+            }
         }
 
         @Override
@@ -566,7 +593,7 @@ final class Codecs {
 
         @Override
         public boolean decodes(Decoder decoder, Value value) {
-            for (Cases<?> each : cases) {
+            for (Cases<?> each : leaves) {
                 if (each.decodes(decoder, value)) {
                     return true;
                 }
@@ -586,7 +613,7 @@ final class Codecs {
 
         @Override
         public S decode(Decoder decoder, Value value) throws JacquardException {
-            for (Cases<?> each : cases) {
+            for (Cases<?> each : leaves) {
                 if (each.decodes(decoder, value)) {
                     return type.cast(each.decode(decoder, value));
                 }

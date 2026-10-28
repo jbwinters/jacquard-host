@@ -540,6 +540,11 @@ class DataTest {
         String mapping = assertThrows(JacquardException.class, () -> data.decode(invalidating, data.encode(Codec.INT, 1L))).getMessage();
         assertEquals(JacquardException.MESSAGE_LIMIT, mapping.length());
         assertTrue(mapping.endsWith("X... (1000000 chars)"), mapping.substring(mapping.length() - 40));
+        // A note larger than any string is not the SDK's, so it is not trusted.
+        String forged = "Y".repeat(JacquardException.MESSAGE_LIMIT - 31) + "... (9223372036854775807 chars)";
+        assertEquals(JacquardException.MESSAGE_LIMIT, forged.length());
+        String unforged = JacquardException.joined("p: ", forged);
+        assertTrue(unforged.endsWith("... (" + (forged.length() + 3) + " chars)"), unforged.substring(unforged.length() - 40));
         // A null message is joined as "null", not dereferenced.
         assertEquals("p: null", JacquardException.joined("p: ", null));
         // A cut that dropped a high surrogate at the boundary is still recognised as cut.
@@ -553,6 +558,28 @@ class DataTest {
         String again = JacquardException.joined("batch 1: ", mapping);
         assertEquals(JacquardException.MESSAGE_LIMIT, again.length());
         assertTrue(again.startsWith("batch 1: XXX") && again.endsWith("X... (1000009 chars)"), again.substring(again.length() - 40));
+    }
+
+    record One() {}
+
+    /**
+     * Nested unions are flattened when built, so decoding asks each distinct
+     * case once: 64 layers of a two-case union over one record decode, or are
+     * refused, at once (before the fix the work doubled with each layer, 4.2 s
+     * at 30 layers, so 64 would not finish).
+     */
+    @Test
+    void nestedUnionsDecodeInTimeLinearInTheirCases() throws Exception {
+        Data data = fixture(Limits.HARD);
+        Codec<One> codec = Codec.record(One.class, "routed");
+        for (int i = 0; i < 64; i++) {
+            codec = Codec.union(One.class, List.of(codec, codec));
+        }
+        Codec<One> nested = codec;
+        Value notRouted = data.encode(Codec.INT, 1L);
+        JacquardException refused = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
+                () -> assertThrows(JacquardException.class, () -> data.decode(nested, notRouted)));
+        assertEquals(JacquardException.Kind.BINDING, refused.kind());
     }
 
     /** A Dynamic value over the hard limit is refused at construction, before its items are copied. */

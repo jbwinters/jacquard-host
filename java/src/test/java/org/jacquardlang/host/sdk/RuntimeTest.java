@@ -67,6 +67,11 @@ class RuntimeTest {
         String cache = assertThrows(JacquardException.class, () -> runtime.prepare(List.of(Path.of("rules.jac")),
                 new PrepareOptions(Path.of("/" + "c".repeat(1_000_000))))).getMessage();
         assertTrue(cache.length() < 200 && cache.startsWith("cache directory /ccc"), cache.substring(0, 80));
+        // A relative path is measured as the file system will see it: 4,080 chars here grow past the limit.
+        String relative = assertThrows(JacquardException.class, () -> runtime.prepare(List.of(Path.of("rules.jac")),
+                new PrepareOptions(Path.of("c".repeat(4080))))).getMessage();
+        assertTrue(relative.startsWith("cache directory ccc") && relative.endsWith("is longer than any path"), relative.substring(0, 60));
+        assertFalse(Files.exists(Path.of("c".repeat(200))), "a directory was made");
         JacquardException prelude = assertThrows(JacquardException.class, () -> new Runtime(base.withPrelude(Path.of("/" + "p".repeat(1_000_000)))));
         assertEquals(JacquardException.Kind.BINDING, prelude.kind());
         assertTrue(prelude.getMessage().length() < 200, prelude.getMessage().substring(0, 80));

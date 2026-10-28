@@ -110,7 +110,7 @@ public final class Runtime {
             throw JacquardException.binding(
                     "set JACQUARD_PRELUDE or RuntimeOptions.prelude; Core and prelude must match the compatibility pin");
         }
-        if (preludePath.toString().length() > Core.PATH_LIMIT) {
+        if (preludePath.toString().length() > Core.PATH_LIMIT || preludePath.toAbsolutePath().toString().length() > Core.PATH_LIMIT) {
             throw JacquardException.binding("prelude " + Identities.excerpt(preludePath.toString()) + " is longer than any path");
         }
         if (options.deadline() != null && (options.deadline().isZero() || options.deadline().isNegative())) {

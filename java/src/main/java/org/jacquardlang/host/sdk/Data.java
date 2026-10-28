@@ -87,7 +87,8 @@ public final class Data {
     /**
      * A {@link Dynamic.Variant} after checking that the constructor exists.
      *
-     * @throws JacquardException a binding failure for an unknown constructor
+     * @throws JacquardException a binding failure for an unknown constructor,
+     *     or for more fields than the v0 hard limit of collection items
      */
     public Dynamic make(String name, Dynamic... fields) throws JacquardException {
         if (fields.length > Limits.HARD.maxCollectionItems()) {

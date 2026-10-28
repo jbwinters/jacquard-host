@@ -61,7 +61,9 @@ public final class JacquardException extends Exception {
         }
         int open = message.lastIndexOf("... (");
         try {
-            return open < 0 ? -1 : Long.parseLong(message.substring(open + 5, message.length() - 7));
+            long noted = open < 0 ? -1 : Long.parseLong(message.substring(open + 5, message.length() - 7));
+            // No string is longer than Integer.MAX_VALUE, so a larger note is not the SDK's.
+            return noted < message.length() || noted > Integer.MAX_VALUE ? -1 : noted;
         } catch (NumberFormatException error) {
             return -1;
         }

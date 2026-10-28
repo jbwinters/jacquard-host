@@ -276,7 +276,9 @@ final class Core {
      */
     static Path checkedPath(Path path, String what) throws JacquardException {
         String text = path.toString();
-        if (text.length() > PATH_LIMIT) {
+        // As given first, so a huge path is not copied again; then as the
+        // file system will see it, since a relative path grows.
+        if (text.length() > PATH_LIMIT || path.toAbsolutePath().toString().length() > PATH_LIMIT) {
             throw JacquardException.preparation(what + " " + Identities.excerpt(text) + " is longer than any path");
         }
         return path;
