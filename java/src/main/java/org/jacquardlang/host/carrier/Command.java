@@ -3,6 +3,9 @@ package org.jacquardlang.host.carrier;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
@@ -20,28 +23,35 @@ import java.util.concurrent.locks.LockSupport;
  * FIFOs on Unix (see {@link OutputPipes}), read only after {@code available()}
  * reports bytes, on the caller's thread, in polls of 0.1 to 5 ms that recheck
  * the timeout, the {@link Cancel}, and the caller's interrupt status, which is
- * never cleared. Its stdin is the null device. While the command runs, its
- * descendants are recorded about every 10 ms, each by pid and start time.
+ * never cleared. Its stdin is the null device.
  *
- * <p>Once the command has exited, the host waits up to {@link #OUTPUT_GRACE}
- * for its output to close: on Linux, until no other process of this user
- * holds either FIFO, which it finds through {@code /proc/<pid>/fd}. A process
- * still holding one then fails the command with "its output did not close",
- * and is killed if it started no earlier than the command (or than this JVM,
- * when the command exited before its start time was read) and still has the
- * start time it was found with. Then what is left in the pipes (at most
- * {@link #EXIT_DRAIN} more bytes of each) is read and the host closes its
- * ends. Elsewhere there is no {@code /proc}: a descendant still holding the
- * output is not detected, the host closes its ends after the exit, and that
- * descendant's next write fails.
+ * <p>On Linux, when util-linux {@code setsid} is installed (at
+ * {@code /usr/bin/setsid} or {@code /bin/setsid}), the command runs as
+ * {@code setsid -- <command>}. The JDK's child is never a process group
+ * leader, so {@code setsid} starts a new session and execs the command
+ * without forking: the command keeps the child's pid and leads a new process
+ * group whose id is that pid. Every descendant that does not leave the group
+ * shares it. The host kills that group when the command exits, and on
+ * timeout, cancellation, or interruption: it lists {@code /proc}, acquires
+ * each process's {@link ProcessHandle} first, then reads its group id from
+ * {@code /proc/<pid>/stat}, and kills it through that handle only when the
+ * group id is the command's. The JDK checks the handle's start time before
+ * signalling, so a pid reused after the handle was acquired is not killed,
+ * and a group with a live member keeps its id, so a matching id proves
+ * membership. A pass always runs to the end, and passes repeat (at most
+ * {@link #GROUP_PASSES}) until one finds no live member. A descendant that
+ * leaves the group (calls {@code setsid} itself) is neither detected nor
+ * killed; the host closes its ends of the output after the exit, so its next
+ * write fails.
  *
- * <p>Whatever the outcome, every recorded descendant still alive with the
- * start time it was recorded with is killed. On timeout, cancellation, or
- * interruption the command's process tree is killed too: a snapshot of its
- * descendants and the command itself. A descendant that was never recorded
- * (one started and reparented between two records) and holds no output keeps
- * running. On other systems the JDK's pipes are used, with their exit-time
- * drain.
+ * <p>Elsewhere (macOS, or Linux without {@code setsid}) the command's
+ * descendants are recorded about every 10 ms, each by pid and start time, and
+ * every recorded descendant still alive with that start time is killed when
+ * the command returns; on timeout, cancellation, or interruption a snapshot
+ * of its descendants is killed too. A descendant that was never recorded
+ * (one started and reparented between two records, as in a fast fork and
+ * exit) keeps running. On Windows the JDK's pipes are used, with their
+ * exit-time drain.
  */
 public final class Command {
     private Command() {}
@@ -54,18 +64,47 @@ public final class Command {
     private static final int SLICE = 1 << 20;
     /** The most of each stream read after the command has exited. */
     public static final int EXIT_DRAIN = 4 << 20;
-    /** How long the output may stay open after the command exits. */
-    public static final Duration OUTPUT_GRACE = Duration.ofSeconds(1);
-    /** How often the command's descendants are recorded, and the output's holders looked for after the exit. */
+    /** How often the command's descendants are recorded where there are no process groups. */
     private static final long SAMPLE_INTERVAL = TimeUnit.MILLISECONDS.toNanos(10);
+    /** The most passes over {@code /proc} one group kill makes. */
+    static final int GROUP_PASSES = 8;
+    private static final Path PROC = Path.of("/proc");
 
-    /**
-     * Test seam: whether descendants are recorded. Tests clear it to show
-     * that a holder of the output is killed without being recorded.
-     */
+    /** The {@code setsid} that starts each command in its own group, or null where groups are not used. */
+    static final String SETSID = findSetsid();
+
+    private static String findSetsid() {
+        if (!System.getProperty("os.name", "").equals("Linux") || !Files.isReadable(Path.of("/proc/self/stat"))) {
+            return null;
+        }
+        for (String candidate : List.of("/usr/bin/setsid", "/bin/setsid")) {
+            Path path = Path.of(candidate);
+            if (Files.isRegularFile(path) && Files.isExecutable(path)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /** Test seam: when set, commands run without a process group, as where {@code setsid} is absent. */
+    static volatile boolean withoutGroups;
+    /** Test seam: whether descendants are recorded where there are no groups. */
     static volatile boolean recordDescendants = true;
     /** Test seam: runs after each record with every pid recorded so far. Null outside tests. */
     static volatile java.util.function.Consumer<java.util.Set<Long>> recordedHook;
+    /** Test seam: receives the pid of each command once it has started. Null outside tests. */
+    static volatile java.util.function.LongConsumer startedHook;
+    /** Test seam: runs after the cleanup that follows the exit, before the stop is checked again. Null outside tests. */
+    static volatile Runnable exitedHook;
+    /** Test seam: whether the group is killed when the command exits. */
+    static volatile boolean killGroupAtExit = true;
+    /** Test seam: whether the group is killed on a stop. */
+    static volatile boolean killGroupOnStop = true;
+
+    /** Whether the next command runs in its own process group. */
+    static boolean grouped() {
+        return SETSID != null && !withoutGroups;
+    }
 
     /** The command's descendants seen while it ran, by pid, with their start times. */
     private static final class Recorded {
@@ -106,6 +145,103 @@ public final class Command {
         } catch (RuntimeException ignored) {
             // Not permitted, or already gone.
         }
+    }
+
+    /**
+     * Kills every live process whose group id is {@code group}, in passes
+     * over {@code /proc} until one finds none, at most {@link #GROUP_PASSES}.
+     * Each process's handle is acquired before its group id is read, and the
+     * kill goes through that handle, whose start time the JDK checks. A pass
+     * is never cut short. Returns how many kills were sent.
+     */
+    static int killGroup(long group) {
+        long self = ProcessHandle.current().pid();
+        int killed = 0;
+        for (int pass = 0; pass < GROUP_PASSES; pass++) {
+            int found = 0;
+            try (DirectoryStream<Path> entries = Files.newDirectoryStream(PROC)) {
+                for (Path entry : entries) {
+                    String name = entry.getFileName().toString();
+                    if (name.isEmpty() || name.length() > 18 || !name.chars().allMatch(c -> c >= '0' && c <= '9')) {
+                        continue;
+                    }
+                    long pid = Long.parseLong(name);
+                    if (pid == self) {
+                        continue;
+                    }
+                    ProcessHandle handle;
+                    try {
+                        handle = ProcessHandle.of(pid).orElse(null);
+                    } catch (RuntimeException error) {
+                        continue;
+                    }
+                    if (handle == null || groupOf(entry) != group) {
+                        continue;
+                    }
+                    found++;
+                    try {
+                        if (handle.destroyForcibly()) {
+                            killed++;
+                        }
+                    } catch (RuntimeException ignored) {
+                        // Not permitted, or already gone.
+                    }
+                }
+            } catch (IOException | RuntimeException error) {
+                // What was killed so far; a later pass may see the rest.
+            }
+            if (found == 0) {
+                break;
+            }
+        }
+        return killed;
+    }
+
+    /**
+     * The group id in {@code /proc/<pid>/stat}, read after the last
+     * {@code )} (the command name may hold any byte), or -1 when the process
+     * is gone, is a zombie, or the line cannot be read.
+     */
+    static long groupOf(Path process) {
+        try {
+            String stat = new String(Files.readAllBytes(process.resolve("stat")), java.nio.charset.StandardCharsets.ISO_8859_1);
+            int close = stat.lastIndexOf(')');
+            if (close < 0) {
+                return -1;
+            }
+            String[] fields = stat.substring(close + 1).trim().split(" ");
+            // state ppid pgrp ...
+            if (fields.length < 3 || fields[0].equals("Z") || fields[0].equals("X")) {
+                return -1;
+            }
+            return Long.parseLong(fields[2]);
+        } catch (IOException | RuntimeException error) {
+            return -1;
+        }
+    }
+
+    /**
+     * The command's executable, resolved on the {@code PATH} when it names no
+     * directory, so that one {@code setsid} cannot exec is reported as a
+     * start failure, as without {@code setsid}.
+     */
+    private static String executable(String name) throws CarrierException {
+        java.util.List<Path> candidates = new java.util.ArrayList<>();
+        if (name.contains("/")) {
+            candidates.add(Path.of(name));
+        } else {
+            // The JDK looks a bare name up on this JVM's PATH, so the same is done here.
+            String path = System.getenv("PATH");
+            for (String directory : (path == null ? "" : path).split(":", -1)) {
+                candidates.add(Path.of(directory.isEmpty() ? "." : directory, name));
+            }
+        }
+        for (Path candidate : candidates) {
+            if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
+                return candidate.toString();
+            }
+        }
+        throw CarrierException.loss("could not start " + name + " (not an executable file)");
     }
 
     /**
@@ -220,7 +356,13 @@ public final class Command {
         }
         long budget = timeout.compareTo(Duration.ofNanos(Long.MAX_VALUE / 4)) > 0 ? Long.MAX_VALUE / 4 : timeout.toNanos();
         long expires = System.nanoTime() + budget;
-        ProcessBuilder builder = new ProcessBuilder(command);
+        boolean grouped = grouped();
+        List<String> argv = command;
+        if (grouped) {
+            argv = new java.util.ArrayList<>(List.of(SETSID, "--", executable(command.get(0))));
+            argv.addAll(command.subList(1, command.size()));
+        }
+        ProcessBuilder builder = new ProcessBuilder(argv);
         if (environment != null) {
             builder.environment().putAll(environment);
         }
@@ -256,19 +398,35 @@ public final class Command {
                 pipes.unlink();
             }
         }
-        Recorded recorded = new Recorded();
-        // A command that already exited has no start time; a holder then
-        // must at least have started after this JVM.
-        java.time.Instant started = process.toHandle().info().startInstant()
-                .orElseGet(() -> ProcessHandle.current().info().startInstant().orElse(null));
+        java.util.function.LongConsumer hook = startedHook;
+        if (hook != null) {
+            hook.accept(process.pid());
+        }
+        Recorded recorded = grouped ? null : new Recorded();
+        boolean[] cleaned = {false};
         try {
-            return await(process, pipes, recorded, started, expires, cancel, stdoutLimit, stderrLimit);
+            return await(process, pipes, grouped, recorded, cleaned, expires, cancel, stdoutLimit, stderrLimit);
         } finally {
-            if (process.isAlive()) {
-                killTree(process);
-                awaitExit(process, EXIT_GRACE);
+            if (!cleaned[0]) {
+                if (grouped) {
+                    // While the command is alive, or unreaped, its group id is reserved.
+                    if (killGroupOnStop) {
+                        killGroup(process.pid());
+                    }
+                    process.toHandle().destroyForcibly();
+                    awaitExit(process, EXIT_GRACE);
+                    if (killGroupOnStop) {
+                        // Members forked while the first pass ran.
+                        killGroup(process.pid());
+                    }
+                } else {
+                    if (process.isAlive()) {
+                        killTree(process);
+                        awaitExit(process, EXIT_GRACE);
+                    }
+                    recorded.killAlive();
+                }
             }
-            recorded.killAlive();
             if (pipes != null) {
                 // A descendant still writing has no reader now, so its next write fails.
                 pipes.close();
@@ -279,8 +437,8 @@ public final class Command {
         }
     }
 
-    private static Output await(Process process, OutputPipes pipes, Recorded recorded, java.time.Instant started, long expires,
-            Cancel cancel, int stdoutLimit, int stderrLimit) throws CarrierException {
+    private static Output await(Process process, OutputPipes pipes, boolean grouped, Recorded recorded, boolean[] cleaned,
+            long expires, Cancel cancel, int stdoutLimit, int stderrLimit) throws CarrierException {
         Capture stdout = new Capture(pipes != null ? pipes.stdout() : process.getInputStream(), stdoutLimit);
         Capture stderr = new Capture(pipes != null ? pipes.stderr() : process.getErrorStream(), stderrLimit);
         long idle = POLL_MIN;
@@ -288,16 +446,32 @@ public final class Command {
             // The exit is observed before the pipes are read, so everything
             // the command itself wrote is read below.
             boolean exited = !process.isAlive();
-            if (!exited) {
+            if (!exited && recorded != null) {
                 recorded.sample(process);
             }
             int read = stdout.step(SLICE) + stderr.step(SLICE);
             if (exited) {
-                if (pipes != null) {
-                    awaitClosed(pipes, started, stdout, stderr, expires, cancel);
+                // The cleanup pass always runs to the end, as Rust kills the
+                // group when the command exits.
+                if (grouped) {
+                    if (killGroupAtExit) {
+                        killGroup(process.pid());
+                    }
+                } else {
+                    recorded.killAlive();
                 }
+                cleaned[0] = true;
                 stdout.step(EXIT_DRAIN);
                 stderr.step(EXIT_DRAIN);
+                Runnable hook = exitedHook;
+                if (hook != null) {
+                    hook.run();
+                }
+                // The cleanup may have outlived the deadline or a stop.
+                CarrierException stopped = stopped(expires, cancel);
+                if (stopped != null) {
+                    throw stopped;
+                }
                 return new Output(process.exitValue(), stdout.bytes(), stdout.overflow, stderr.bytes());
             }
             CarrierException stopped = stopped(expires, cancel);
@@ -308,57 +482,6 @@ public final class Command {
                 idle = POLL_MIN;
             } else {
                 long slice = Math.min(idle, expires - System.nanoTime());
-                if (slice > 0 && !Thread.currentThread().isInterrupted()) {
-                    // Parking leaves the interrupt status set.
-                    LockSupport.parkNanos(slice);
-                }
-                idle = Math.min(idle * 2, POLL_MAX);
-            }
-        }
-    }
-
-    /**
-     * Waits up to {@link #OUTPUT_GRACE} after the exit until no other process
-     * holds the output, reading what arrives meanwhile. On failure it kills
-     * the holders it last found that started no earlier than the command.
-     */
-    private static void awaitClosed(OutputPipes pipes, java.time.Instant started, Capture stdout, Capture stderr, long expires,
-            Cancel cancel) throws CarrierException {
-        long end = System.nanoTime() + OUTPUT_GRACE.toNanos();
-        long scan = System.nanoTime();
-        long idle = POLL_MIN;
-        java.util.Map<ProcessHandle, java.time.Instant> holders = java.util.Map.of();
-        while (true) {
-            long now = System.nanoTime();
-            if (now - scan >= 0) {
-                holders = new java.util.HashMap<>();
-                for (ProcessHandle holder : pipes.holders()) {
-                    java.time.Instant start = holder.info().startInstant().orElse(null);
-                    if (start != null) {
-                        holders.put(holder, start);
-                    }
-                }
-                if (holders.isEmpty()) {
-                    return;
-                }
-                scan = now + SAMPLE_INTERVAL;
-            }
-            CarrierException stopped = stopped(expires, cancel);
-            if (stopped == null && now - end >= 0) {
-                stopped = CarrierException.loss("its output did not close");
-            }
-            if (stopped != null) {
-                holders.forEach((holder, start) -> {
-                    if (started != null && !start.isBefore(started)) {
-                        killIfStarted(holder, start);
-                    }
-                });
-                throw stopped;
-            }
-            if (stdout.step(SLICE) + stderr.step(SLICE) > 0) {
-                idle = POLL_MIN;
-            } else {
-                long slice = Math.min(idle, end - now);
                 if (slice > 0 && !Thread.currentThread().isInterrupted()) {
                     // Parking leaves the interrupt status set.
                     LockSupport.parkNanos(slice);

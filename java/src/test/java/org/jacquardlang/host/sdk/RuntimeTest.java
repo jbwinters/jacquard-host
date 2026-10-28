@@ -89,13 +89,19 @@ class RuntimeTest {
         }
     }
 
-    /** A Core command whose child keeps its output open fails after the grace, and the child is killed. */
+    /**
+     * A Core command whose child keeps its output open is not held by it: on
+     * Linux the command's group is killed when it exits, so the child dies
+     * and preparation goes on (and here fails at {@code run}).
+     */
     @EnabledOnOs(OS.LINUX)
     @Test
-    void aCoreCommandWhoseChildHoldsItsOutputFailsAndTheChildIsKilled() throws Exception {
+    void aCoreCommandsChildHoldingItsOutputIsKilledAtTheExit() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(Files.isExecutable(Path.of("/usr/bin/setsid")) || Files.isExecutable(Path.of("/bin/setsid")));
+        String hash = "0".repeat(64);
         try (FakeCore fake = FakeCore.create(scratch.resolve("holder"), Compat.CORE_VERSION, null,
-                "check) sleep 300 & echo $! > \"$ROOT/holder.pid\" ;;")) {
-            assertEquals("Core check failed: its output did not close", fake.prepareFails().getMessage());
+                "check) sleep 300 & echo $! > \"$ROOT/holder.pid\" ;;\nhash) echo '0:x " + hash + "' ;;\nrun) exit 4 ;;")) {
+            assertEquals("Core run failed: exit status 4", fake.prepareFails().getMessage());
             FakeCore.dies("the command's child", fake.pid("holder.pid"));
             assertFalse(fake.stagingLeft());
         }

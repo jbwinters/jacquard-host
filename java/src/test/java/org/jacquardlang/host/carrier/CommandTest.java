@@ -27,12 +27,13 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * The bounded command runner the SDK uses for Core's public commands: exit
  * status and output, output limits, and timeout, cancellation, and
- * interruption that kill the command and its child. A descendant that keeps
- * the output open after the command exits fails it after the grace and is
- * killed (on Linux, where the host finds it through /proc), holding neither
- * the caller nor the heap; a recorded descendant that closed its output is
- * killed when the command returns. The commands are shell scripts, so these
- * run on Unix only.
+ * interruption that kill the command and its child. On Linux with
+ * {@code setsid} the command leads its own process group, which is killed
+ * when it exits and on a stop, so a descendant still holding the output
+ * holds neither the caller nor the heap, and a process outside the group is
+ * left alone even when it holds the output. Without groups a recorded
+ * descendant that closed its output is killed when the command returns. The
+ * commands are shell scripts, so these run on Unix only.
  */
 @DisabledOnOs(OS.WINDOWS)
 class CommandTest {
@@ -46,6 +47,11 @@ class CommandTest {
         OutputPipes.mkfifoOverride = null;
         Command.recordDescendants = true;
         Command.recordedHook = null;
+        Command.startedHook = null;
+        Command.exitedHook = null;
+        Command.withoutGroups = false;
+        Command.killGroupAtExit = true;
+        Command.killGroupOnStop = true;
         Thread.interrupted();
         // Kill every process a script recorded, even after a failed assertion.
         try (Stream<Path> files = Files.list(scratch)) {
@@ -162,25 +168,43 @@ class CommandTest {
         return runtime.totalMemory() - runtime.freeMemory();
     }
 
+    private static void assumeGroups() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(Command.SETSID != null, "no setsid here");
+    }
+
+    /** {@code setsid} execs the command without forking: same pid, and it leads its own group and session. */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void theCommandKeepsItsPidAndLeadsItsOwnGroup() throws Exception {
+        assumeGroups();
+        long[] started = {-1};
+        Command.startedHook = pid -> started[0] = pid;
+        Command.Output output = sh("echo $$; cut -d' ' -f5,6 /proc/$$/stat", MINUTE, new Cancel());
+        assertEquals(0, output.exitStatus());
+        String[] lines = new String(output.stdout(), StandardCharsets.UTF_8).strip().split("\n");
+        long shell = Long.parseLong(lines[0]);
+        assertEquals(started[0], shell, "setsid forked");
+        assertEquals(shell + " " + shell, lines[1], "the group and session ids are not the command's pid");
+    }
+
     /**
      * The command exits soon, leaving a sleeper holding its output and a
-     * reparented {@code yes} flooding stderr. On the JDK's own pipes the
-     * reaper drains the flood under the stream lock {@code available()} takes,
-     * into an unbounded buffer, so the caller would be held and the heap grow.
-     * Here the command fails once the output stays open for the grace, and
-     * both holders are killed.
+     * reparented {@code yes} flooding stderr. Both are in the command's
+     * group, so both are killed when it exits, and the command succeeds
+     * without holding the caller or growing the heap.
      */
     @EnabledOnOs(OS.LINUX)
     @Test
     void aDescendantHoldingTheOutputHoldsNeitherTheCallerNorTheHeap() throws Exception {
+        assumeGroups();
         String script = "echo ready; sleep 300 & echo $! > \"$SCRATCH/holder.pid\"; "
                 + "(yes jacquard-flood >&2 & echo $! > \"$SCRATCH/flooder.pid\"); sleep 0.3";
         long heap = usedHeap();
         long started = System.nanoTime();
-        CarrierException error = assertThrows(CarrierException.class, () -> sh(script, MINUTE, new Cancel()));
+        Command.Output output = sh(script, MINUTE, new Cancel());
         long elapsed = (System.nanoTime() - started) / 1_000_000;
-        assertTrue(error.isLoss() && !error.isTimeout() && !error.isAborted(), error.getMessage());
-        assertEquals("its output did not close", error.getMessage());
+        assertEquals(0, output.exitStatus());
+        assertTrue(new String(output.stdout(), StandardCharsets.UTF_8).startsWith("ready\n"));
         assertTrue(elapsed < 4000, "returned after " + elapsed + " ms");
         long grown = usedHeap() - heap;
         assertTrue(grown < 64 << 20, "the heap grew by " + grown + " bytes");
@@ -190,30 +214,142 @@ class CommandTest {
 
     /**
      * {@code sh -c 'sleep 300 & echo $!'} exits 0 at once while its child
-     * holds stdout. With recording off, only the holder search can find the
-     * child: the command fails and the child is killed.
+     * holds stdout. As in Rust, the group is killed at the exit and the
+     * command succeeds with its output.
      */
     @EnabledOnOs(OS.LINUX)
     @Test
-    void aBackgroundChildHoldingTheOutputFailsTheCommandAndIsKilled() throws Exception {
-        for (boolean record : new boolean[] {false, true}) {
-            Command.recordDescendants = record;
-            String name = "child-" + record + ".pid";
-            CarrierException error = assertThrows(CarrierException.class,
-                    () -> sh("sleep 300 & echo $!; echo $! > \"$SCRATCH/" + name + "\"", MINUTE, new Cancel()), "recording " + record);
-            assertEquals("its output did not close", error.getMessage());
-            dies("the background child", pid(name));
+    void aBackgroundChildIsKilledWhenTheCommandExits() throws Exception {
+        assumeGroups();
+        Command.Output output = sh("sleep 300 & echo $!; echo $! > \"$SCRATCH/child.pid\"", MINUTE, new Cancel());
+        assertEquals(0, output.exitStatus());
+        long child = pid("child.pid");
+        assertEquals(child + "\n", new String(output.stdout(), StandardCharsets.UTF_8));
+        dies("the background child", child);
+    }
+
+    /**
+     * Under a JVM that is a child subreaper (as a container's PID 1 can be),
+     * the background child is reparented to the JVM itself when the shell
+     * exits; it is still in the command's group, so it is killed. A child JVM
+     * runs {@link SubreaperMain} under {@code prctl(PR_SET_CHILD_SUBREAPER)},
+     * set by a Python launcher that then execs it.
+     */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void underASubreaperJvmTheBackgroundChildIsKilled() throws Exception {
+        assumeGroups();
+        Path python = Stream.of("/usr/bin/python3", "/bin/python3").map(Path::of).filter(Files::isExecutable).findFirst().orElse(null);
+        org.junit.jupiter.api.Assumptions.assumeTrue(python != null, "no python3 here");
+        Path launcher = scratch.resolve("subreaper.py");
+        Files.writeString(launcher, "import ctypes, os, sys\n"
+                + "libc = ctypes.CDLL(None, use_errno=True)\n"
+                + "if libc.prctl(36, 1, 0, 0, 0) != 0:\n    sys.exit('prctl failed')\n"
+                + "os.execv(sys.argv[1], sys.argv[1:])\n");
+        String javaBin = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        Process child = new ProcessBuilder(python.toString(), "-I", launcher.toString(), javaBin, "-Xmx64m", "-XX:TieredStopAtLevel=1",
+                "-cp", System.getProperty("java.class.path"), SubreaperMain.class.getName())
+                .redirectInput(ProcessBuilder.Redirect.from(new java.io.File("/dev/null")))
+                .redirectErrorStream(true).start();
+        String output;
+        try {
+            output = new String(child.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertTrue(child.waitFor(60, java.util.concurrent.TimeUnit.SECONDS), "the subreaper JVM did not exit");
+        } finally {
+            child.destroyForcibly();
+        }
+        List<String> lines = output.lines().toList();
+        assertEquals(0, child.exitValue(), output);
+        assertEquals("subreaper true", lines.get(0), output);
+        assertEquals("status 0", lines.get(1), output);
+        assertTrue(lines.get(2).startsWith("child "), output);
+        assertEquals("alive false", lines.get(3), output);
+    }
+
+    /**
+     * A process outside the command's group that holds the command's stdout
+     * (opened through {@code /proc/<pid>/fd/1}, started after the command,
+     * and reparented) is not killed.
+     */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void anUnrelatedProcessHoldingTheOutputIsNotKilled() throws Exception {
+        assumeGroups();
+        Thread opener = once("command.id", () -> {
+            try {
+                long command = pid("command.id");
+                ProcessBuilder launcher = new ProcessBuilder("/bin/sh", "-c",
+                        "(exec 3<>/proc/" + command + "/fd/1; exec sleep 300) & echo $! > \"$SCRATCH/holder.pid\"")
+                        .redirectInput(ProcessBuilder.Redirect.from(new java.io.File("/dev/null")))
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD);
+                launcher.environment().put("SCRATCH", scratch.toString());
+                launcher.start().waitFor();
+                long holder = pid("holder.pid");
+                // Release the command once the holder has the descriptor.
+                long deadline = System.nanoTime() + MINUTE.toNanos();
+                while (!holds(holder, command) && System.nanoTime() < deadline) {
+                    Thread.sleep(5);
+                }
+                Files.writeString(scratch.resolve("held"), "");
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        });
+        Command.Output output = Command.run(List.of("/bin/sh", "-c",
+                "echo $$ > \"$SCRATCH/command.id\"; while [ ! -e \"$SCRATCH/held\" ]; do sleep 0.01; done; echo done"),
+                Map.of("SCRATCH", scratch.toString()), MINUTE, 1 << 20, 4096, new Cancel());
+        opener.join();
+        assertEquals(0, output.exitStatus());
+        long holder = pid("holder.pid");
+        Thread.sleep(200);
+        assertTrue(ProcessHandle.of(holder).map(ProcessHandle::isAlive).orElse(false), "the unrelated holder was killed");
+    }
+
+    /** Whether {@code holder} has a descriptor on the same pipe as {@code command}'s stdout. */
+    private static boolean holds(long holder, long command) {
+        try {
+            String pipe = Files.readSymbolicLink(Path.of("/proc/" + command + "/fd/1")).toString();
+            try (Stream<Path> fds = Files.list(Path.of("/proc/" + holder + "/fd"))) {
+                return fds.anyMatch(fd -> {
+                    try {
+                        return Files.readSymbolicLink(fd).toString().equals(pipe);
+                    } catch (IOException error) {
+                        return false;
+                    }
+                });
+            }
+        } catch (IOException error) {
+            return false;
         }
     }
 
     /**
-     * A descendant that closed its output and keeps running does not fail
-     * the command; once recorded, it is killed when the command returns. The
-     * command waits until the record holds the descendant, so the record
-     * cannot miss it.
+     * A cancellation while the command runs kills its whole group, including
+     * a descendant whose parent already exited (so it is no longer the
+     * command's descendant).
+     */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void aStopKillsTheWholeGroup() throws Exception {
+        assumeGroups();
+        Cancel cancel = new Cancel();
+        Thread canceller = once("orphan.pid", cancel::cancel);
+        CarrierException error = assertThrows(CarrierException.class,
+                () -> sh("(sleep 300 & echo $! > \"$SCRATCH/orphan.pid\"); sleep 300", MINUTE, cancel));
+        assertTrue(error.isAborted(), error.getMessage());
+        dies("the orphaned group member", pid("orphan.pid"));
+        canceller.join();
+    }
+
+    /**
+     * Without groups, a descendant that closed its output and keeps running
+     * does not fail the command; once recorded, it is killed when the
+     * command returns. The command waits until the record holds the
+     * descendant, so the record cannot miss it.
      */
     @Test
     void aRecordedDescendantThatClosedItsOutputIsKilled() throws Exception {
+        Command.withoutGroups = true;
         Path recorded = scratch.resolve("recorded");
         Command.recordedHook = pids -> {
             try {
@@ -231,6 +367,37 @@ class CommandTest {
         assertEquals(0, output.exitStatus());
         assertEquals("done\n", new String(output.stdout(), StandardCharsets.UTF_8));
         dies("the recorded descendant", pid("quiet.pid"));
+    }
+
+    /** Without groups, timeout, cancellation, and interruption still kill the command and its child. */
+    @Test
+    void withoutGroupsAStopKillsTheCommandAndItsChild() throws Exception {
+        Command.withoutGroups = true;
+        CarrierException error = assertThrows(CarrierException.class,
+                () -> sh("sleep 300 & echo $! > \"$SCRATCH/child.pid\"; wait", Duration.ofMillis(500), new Cancel()));
+        assertTrue(error.isTimeout(), error.getMessage());
+        dies("the timed-out command's child", pid("child.pid"));
+    }
+
+    /**
+     * A stop that arrives while the exit's cleanup runs (a test seam sets it
+     * there) is reported instead of success, with and without groups, and an
+     * interrupt is kept.
+     */
+    @Test
+    void aStopDuringTheExitCleanupIsReported() throws Exception {
+        for (boolean grouped : new boolean[] {true, false}) {
+            Command.withoutGroups = !grouped;
+            Cancel cancel = new Cancel();
+            Command.exitedHook = cancel::cancel;
+            CarrierException error = assertThrows(CarrierException.class, () -> sh("echo done", MINUTE, cancel), "grouped " + grouped);
+            assertTrue(error.isAborted(), error.getMessage());
+            Thread caller = Thread.currentThread();
+            Command.exitedHook = caller::interrupt;
+            error = assertThrows(CarrierException.class, () -> sh("echo done", MINUTE, new Cancel()), "grouped " + grouped);
+            assertTrue(error.isAborted(), error.getMessage());
+            assertTrue(Thread.interrupted(), "the interrupt status was cleared");
+        }
     }
 
     @Test
