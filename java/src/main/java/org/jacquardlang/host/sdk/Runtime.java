@@ -585,7 +585,6 @@ public final class Runtime {
         }
     }
 
-    /** How old a staging directory must be before a later preparation removes it. */
     /**
      * Loads a cache entry, refusing an accidental or partial change: the
      * entry and everything in it must be owned by this user and writable by

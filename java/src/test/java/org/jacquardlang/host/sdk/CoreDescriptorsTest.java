@@ -68,6 +68,12 @@ class CoreDescriptorsTest {
                 FakeCore.dies("the check command's descendant", fake.pid("check.pid"));
             }
             assertEquals(before, descriptors(), "descriptors grew");
+            // A JDK thread such as a process reaper can outlive a command
+            // briefly; only one still there after two seconds is a leak.
+            long deadline = System.nanoTime() + 2_000_000_000L;
+            while (threads() > threads && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
             assertTrue(threads() <= threads, "threads grew from " + named + " to " + names());
         }
     }
