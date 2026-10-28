@@ -1,13 +1,8 @@
 package org.jacquardlang.host.carrier;
 
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -71,16 +66,12 @@ public final class Worker implements AutoCloseable {
     private static final int STDERR_SLICE = 1 << 20;
     /** The exit value the JDK reports for a process ended by SIGKILL. */
     private static final int SIGKILL_EXIT = 128 + 9;
-    /** Whether the worker's output goes through host-owned FIFOs. */
-    private static final boolean FIFOS = !System.getProperty("os.name", "").startsWith("Windows");
-    /** The longest {@code mkfifo} may take, within the lifetime. */
-    private static final long MKFIFO_WAIT = TimeUnit.SECONDS.toNanos(5);
 
     private final Process process;
     private final InputStream stdout;
     private final InputStream stderrStream;
-    /** The host's read-write handles on the output FIFOs, or null. */
-    private final Fifos fifos;
+    /** The host's ends of the output FIFOs, or null. */
+    private final OutputPipes pipes;
     private final Writer writer;
     private final Gate gate;
     private final long expires;
@@ -101,9 +92,9 @@ public final class Worker implements AutoCloseable {
     private Integer exitStatus;
     private String signal;
 
-    private Worker(Process process, Fifos fifos, Gate gate, long expires, Cancel cancel, String spawnError) {
+    private Worker(Process process, OutputPipes pipes, Gate gate, long expires, Cancel cancel, String spawnError) {
         this.process = process;
-        this.fifos = fifos;
+        this.pipes = pipes;
         this.gate = gate;
         this.expires = expires;
         this.cancel = cancel;
@@ -113,108 +104,15 @@ public final class Worker implements AutoCloseable {
             this.stderrStream = null;
             this.writer = null;
         } else {
-            this.stdout = fifos != null ? fifos.stdoutStream() : process.getInputStream();
-            this.stderrStream = fifos != null ? fifos.stderrStream() : process.getErrorStream();
+            this.stdout = pipes != null ? pipes.stdout() : process.getInputStream();
+            this.stderrStream = pipes != null ? pipes.stderr() : process.getErrorStream();
             this.writer = new Writer(process.getOutputStream(), gate);
         }
     }
 
-    /**
-     * The host's handles on the worker's stdout and stderr FIFOs. Each is
-     * opened read-write, so the open never waits for a writer and the host
-     * always holds a read end; reads go through a {@link FileInputStream} on
-     * the same descriptor, whose {@code available()} asks the pipe directly.
-     */
-    private record Fifos(RandomAccessFile stdout, RandomAccessFile stderr, InputStream stdoutStream, InputStream stderrStream) {
-        static Fifos open(Path stdout, Path stderr) throws IOException {
-            RandomAccessFile out = new RandomAccessFile(stdout.toFile(), "rw");
-            try {
-                RandomAccessFile err = new RandomAccessFile(stderr.toFile(), "rw");
-                return new Fifos(out, err, new FileInputStream(out.getFD()), new FileInputStream(err.getFD()));
-            } catch (Throwable error) {
-                out.close();
-                throw error;
-            }
-        }
-
-        /** Closes both descriptors. Nothing else holds a lock on them. */
-        void close() {
-            for (AutoCloseable handle : List.of(stdoutStream, stderrStream, stdout, stderr)) {
-                try {
-                    handle.close();
-                } catch (Exception ignored) {
-                    // Already closed through the shared descriptor.
-                }
-            }
-        }
-    }
-
-    /**
-     * Creates both FIFOs with one {@code mkfifo -m 600}. Returns false, with
-     * {@code mkfifo} killed, once the call is cancelled or interrupted or the
-     * lifetime ends; the caller then reports that instead of a spawn failure.
-     * An interrupt stays set for the caller.
-     *
-     * @throws IOException when {@code mkfifo} cannot run, fails, or takes
-     *     longer than {@link #MKFIFO_WAIT}
-     */
-    private static boolean makeFifos(Path stdout, Path stderr, long expires, Cancel cancel) throws IOException {
-        Process mkfifo;
-        try {
-            mkfifo = new ProcessBuilder("mkfifo", "-m", "600", stdout.toString(), stderr.toString())
-                    .redirectInput(ProcessBuilder.Redirect.from(new java.io.File("/dev/null")))
-                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                    .redirectError(ProcessBuilder.Redirect.DISCARD)
-                    .start();
-        } catch (IOException error) {
-            throw new IOException(error.getMessage() + "; the Java host needs mkfifo on Unix", error);
-        }
-        long end = System.nanoTime() + MKFIFO_WAIT;
-        while (true) {
-            if (stopped(expires, cancel)) {
-                mkfifo.toHandle().destroyForcibly();
-                return false;
-            }
-            long left = end - System.nanoTime();
-            if (left <= 0) {
-                mkfifo.toHandle().destroyForcibly();
-                throw new IOException("mkfifo did not finish in time");
-            }
-            try {
-                if (mkfifo.waitFor(Math.min(left, POLL_MAX), TimeUnit.NANOSECONDS)) {
-                    break;
-                }
-            } catch (InterruptedException error) {
-                Thread.currentThread().interrupt();
-            }
-        }
-        if (mkfifo.exitValue() != 0) {
-            throw new IOException("mkfifo exited with status " + mkfifo.exitValue());
-        }
-        return true;
-    }
-
     /** Whether the call is cancelled or interrupted (the interrupt stays set) or the lifetime has ended. */
-    private static boolean stopped(long expires, Cancel cancel) {
+    static boolean stopped(long expires, Cancel cancel) {
         return cancel.isCancelled() || Thread.currentThread().isInterrupted() || System.nanoTime() - expires >= 0;
-    }
-
-    private static void deleteQuietly(Path directory) {
-        if (directory == null) {
-            return;
-        }
-        for (String name : List.of("stdout", "stderr")) {
-            try {
-                Files.deleteIfExists(directory.resolve(name));
-            } catch (IOException | RuntimeException ignored) {
-                // Left for the system's temporary-file cleanup.
-            }
-        }
-        try {
-            Files.deleteIfExists(directory);
-        } catch (IOException | RuntimeException ignored) {
-            // Left for the system's temporary-file cleanup.
-        }
     }
 
     private static Worker failed(Gate gate, long expires, Cancel cancel, String spawnError, String message) {
@@ -256,22 +154,16 @@ public final class Worker implements AutoCloseable {
         long budget = deadline.compareTo(Duration.ofNanos(Long.MAX_VALUE / 4)) > 0 ? Long.MAX_VALUE / 4 : deadline.toNanos();
         long expires = System.nanoTime() + budget;
         Gate gate = new Gate(expires, cancel, Thread.currentThread());
-        Fifos fifos = null;
-        Path directory = null;
+        OutputPipes pipes = null;
         Process process = null;
         try {
-            if (FIFOS) {
+            if (OutputPipes.SUPPORTED) {
                 try {
-                    directory = Files.createTempDirectory("jacquard-worker-",
-                            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
-                    Path out = directory.resolve("stdout");
-                    Path err = directory.resolve("stderr");
-                    if (!makeFifos(out, err, expires, cancel)) {
+                    pipes = OutputPipes.create("jacquard-worker-", expires, cancel);
+                    if (pipes == null) {
                         return stoppedBeforeSpawn(gate, expires, cancel);
                     }
-                    fifos = Fifos.open(out, err);
-                    builder.redirectOutput(ProcessBuilder.Redirect.to(out.toFile()));
-                    builder.redirectError(ProcessBuilder.Redirect.to(err.toFile()));
+                    pipes.redirect(builder);
                 } catch (IOException | RuntimeException error) {
                     return failed(gate, expires, cancel, String.valueOf(error.getMessage()),
                             "could not create the worker's output pipes (" + error.getMessage() + ")");
@@ -287,22 +179,24 @@ public final class Worker implements AutoCloseable {
                         "could not start " + command.get(0) + " (" + error.getMessage() + "); check the configured Core installation");
             }
         } finally {
-            if (process == null && fifos != null) {
-                // Any path that did not spawn, including an Error, closes the host's ends.
-                fifos.close();
+            if (pipes != null) {
+                if (process == null) {
+                    // Any path that did not spawn, including an Error, closes the host's ends.
+                    pipes.close();
+                }
+                // The worker holds its ends and the host holds its own, so
+                // the names are no longer needed.
+                pipes.unlink();
             }
-            // The worker holds its ends and the host holds its own, so the
-            // names are no longer needed.
-            deleteQuietly(directory);
         }
         Worker worker;
         try {
-            worker = new Worker(process, fifos, gate, expires, cancel, null);
+            worker = new Worker(process, pipes, gate, expires, cancel, null);
         } catch (Throwable error) {
             // An Error after the spawn: kill the worker and close the host's ends.
             process.toHandle().destroyForcibly();
-            if (fifos != null) {
-                fifos.close();
+            if (pipes != null) {
+                pipes.close();
             }
             throw error;
         }
@@ -705,10 +599,10 @@ public final class Worker implements AutoCloseable {
             }
             recordExit();
             drainStderr();
-            if (fifos != null) {
+            if (pipes != null) {
                 // Closing the host's ends leaves a descendant still writing
                 // with no reader, so its next write fails.
-                fifos.close();
+                pipes.close();
             } else {
                 closeQuietly(stdout);
                 closeQuietly(stderrStream);
