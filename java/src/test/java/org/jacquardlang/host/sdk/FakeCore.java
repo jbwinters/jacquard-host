@@ -125,9 +125,9 @@ final class FakeCore implements AutoCloseable {
         return ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
     }
 
-    /** Waits for {@code pid} to exit, failing if it outlives a minute. */
+    /** Waits for {@code pid} to exit, failing if it outlives ten seconds; the fakes' children live for five minutes. */
     static void dies(String what, long pid) throws InterruptedException {
-        long deadline = System.nanoTime() + Duration.ofMinutes(1).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
         while (alive(pid)) {
             if (System.nanoTime() > deadline) {
                 fail(what + " is still running");

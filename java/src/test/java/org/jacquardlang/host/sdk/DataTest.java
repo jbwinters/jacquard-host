@@ -3,10 +3,8 @@ package org.jacquardlang.host.sdk;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.time.Duration;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -277,27 +275,26 @@ class DataTest {
     }
 
     /**
-     * A small Java value can denote a huge one: three levels of 1024
-     * references to one tuple are 2^30 nodes. Encoding stops at the 4097th
+     * A small Java value can denote a huge one: three levels of 64
+     * references to one tuple are 64^3 integers. Encoding stops at the 4097th
      * node, so it costs no more than one frame; without the node budget it
-     * would build all of them.
+     * builds all 266,305 nodes and returns them. (At 1024 references per
+     * level the same Java value denotes 2^30 integers.)
      */
     @Test
     void sharedValuesAreBoundedByTheNodeBudget() {
         Data data = fixture(Limits.HARD);
-        Dynamic leaf = new Dynamic.Tuple(Collections.nCopies(1024, Dynamic.of(1)));
-        Dynamic middle = new Dynamic.Tuple(Collections.nCopies(1024, leaf));
-        Dynamic top = new Dynamic.Tuple(Collections.nCopies(1024, middle));
-        String message = assertTimeoutPreemptively(Duration.ofSeconds(30), () -> refusal(() -> data.encode(Codec.DYNAMIC, top)));
-        // Three tuples of 1025 nodes each, then 1021 integers of the fourth.
-        assertEquals("value[0][3][1021]: value exceeds max_value_nodes; use smaller independent batches", message);
-        Value rawLeaf = new Value.Tuple(Collections.nCopies(1024, new Value.Int(1)));
-        Value rawTop = new Value.Tuple(Collections.nCopies(1024, new Value.Tuple(Collections.nCopies(1024, rawLeaf))));
-        String raw = assertTimeoutPreemptively(Duration.ofSeconds(30), () -> refusal(() -> data.encode(Codec.VALUE, rawTop)));
-        assertEquals("value: value exceeds max_value_nodes; use smaller independent batches", raw);
+        Dynamic leaf = new Dynamic.Tuple(Collections.nCopies(64, Dynamic.of(1)));
+        Dynamic middle = new Dynamic.Tuple(Collections.nCopies(64, leaf));
+        Dynamic top = new Dynamic.Tuple(Collections.nCopies(64, middle));
+        // Sixty-three tuples of 65 nodes each, then the first integer of the next.
+        assertEquals("value[0][63][1]: value exceeds max_value_nodes; use smaller independent batches",
+                refusal(() -> data.encode(Codec.DYNAMIC, top)));
+        Value rawLeaf = new Value.Tuple(Collections.nCopies(64, new Value.Int(1)));
+        Value rawTop = new Value.Tuple(Collections.nCopies(64, new Value.Tuple(Collections.nCopies(64, rawLeaf))));
+        assertEquals("value: value exceeds max_value_nodes; use smaller independent batches", refusal(() -> data.encode(Codec.VALUE, rawTop)));
         // Decoding a supplied value is measured first, within the same bounds.
-        JacquardException decoded = assertTimeoutPreemptively(Duration.ofSeconds(30),
-                () -> assertThrows(JacquardException.class, () -> data.decode(Codec.DYNAMIC, rawTop)));
+        JacquardException decoded = assertThrows(JacquardException.class, () -> data.decode(Codec.DYNAMIC, rawTop));
         assertEquals("value exceeds max_value_nodes", decoded.getMessage());
         Value deep = new Value.Int(1);
         for (int i = 0; i < 100_000; i++) {
@@ -318,8 +315,7 @@ class DataTest {
         Data data = fixture(Limits.HARD);
         Dynamic text = Dynamic.of("x".repeat(Limits.HARD.maxTextBytes()));
         Dynamic many = new Dynamic.Tuple(Collections.nCopies(1000, text));
-        String message = assertTimeoutPreemptively(Duration.ofSeconds(30), () -> refusal(() -> data.encode(Codec.DYNAMIC, many)));
-        assertEquals("value[4]: value exceeds max_frame_bytes; use smaller independent batches", message);
+        assertEquals("value[4]: value exceeds max_frame_bytes; use smaller independent batches", refusal(() -> data.encode(Codec.DYNAMIC, many)));
         Value rawText = new Value.Text("x".repeat(Limits.HARD.maxTextBytes()));
         Value raw = new Value.Tuple(Collections.nCopies(1000, rawText));
         assertEquals("value: value exceeds max_frame_bytes; use smaller independent batches", refusal(() -> data.encode(Codec.VALUE, raw)));

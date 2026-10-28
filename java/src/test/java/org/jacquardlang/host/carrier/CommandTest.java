@@ -73,9 +73,12 @@ class CommandTest {
         }
     }
 
-    /** Waits for {@code pid} to exit, failing if it outlives a minute. */
+    /**
+     * Waits for {@code pid} to exit, failing if it outlives ten seconds; the
+     * scripts' children would otherwise live for five minutes.
+     */
     private static void dies(String what, long pid) throws InterruptedException {
-        long deadline = System.nanoTime() + MINUTE.toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
         while (ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
             if (System.nanoTime() > deadline) {
                 fail(what + " is still running");
@@ -119,7 +122,7 @@ class CommandTest {
     @Test
     void aCommandThatDoesNotExitInTimeIsKilledWithItsChild() throws Exception {
         CarrierException error = assertThrows(CarrierException.class,
-                () -> sh("sleep 60 & echo $! > \"$SCRATCH/child.pid\"; wait", Duration.ofMillis(500), new Cancel()));
+                () -> sh("sleep 300 & echo $! > \"$SCRATCH/child.pid\"; wait", Duration.ofMillis(500), new Cancel()));
         assertTrue(error.isTimeout(), error.getMessage());
         dies("the timed-out command's child", pid("child.pid"));
     }
@@ -129,7 +132,7 @@ class CommandTest {
         Cancel cancel = new Cancel();
         Thread canceller = once("child.pid", cancel::cancel);
         CarrierException error = assertThrows(CarrierException.class,
-                () -> sh("sleep 60 & echo $! > \"$SCRATCH/child.pid\"; wait", MINUTE, cancel));
+                () -> sh("sleep 300 & echo $! > \"$SCRATCH/child.pid\"; wait", MINUTE, cancel));
         assertTrue(error.isAborted(), error.getMessage());
         dies("the cancelled command's child", pid("child.pid"));
         canceller.join();
@@ -140,7 +143,7 @@ class CommandTest {
         Thread caller = Thread.currentThread();
         Thread interrupter = once("child.pid", caller::interrupt);
         CarrierException error = assertThrows(CarrierException.class,
-                () -> sh("sleep 60 & echo $! > \"$SCRATCH/child.pid\"; wait", MINUTE, new Cancel()));
+                () -> sh("sleep 300 & echo $! > \"$SCRATCH/child.pid\"; wait", MINUTE, new Cancel()));
         assertTrue(error.isAborted(), error.getMessage());
         assertTrue(Thread.interrupted(), "the interrupt status was cleared");
         dies("the interrupted command's child", pid("child.pid"));
@@ -161,7 +164,7 @@ class CommandTest {
      */
     @Test
     void aDescendantHoldingTheOutputHoldsNeitherTheCallerNorTheHeap() throws Exception {
-        String script = "echo ready; sleep 60 & echo $! > \"$SCRATCH/holder.pid\"; "
+        String script = "echo ready; sleep 300 & echo $! > \"$SCRATCH/holder.pid\"; "
                 + "(yes jacquard-flood >&2 & echo $! > \"$SCRATCH/flooder.pid\"); sleep 0.3";
         long heap = usedHeap();
         long started = System.nanoTime();
@@ -194,7 +197,7 @@ class CommandTest {
     @Test
     void cancellationWhileThePipesAreMadeKillsMkfifoAndLeavesNothing() throws Exception {
         Path shim = scratch.resolve("mkfifo");
-        Files.writeString(shim, "#!/bin/sh\necho $$ > '" + scratch.resolve("mkfifo.pid") + "'\nexec sleep 60\n");
+        Files.writeString(shim, "#!/bin/sh\necho $$ > '" + scratch.resolve("mkfifo.pid") + "'\nexec sleep 300\n");
         Files.setPosixFilePermissions(shim, PosixFilePermissions.fromString("rwx------"));
         OutputPipes.mkfifoOverride = shim.toString();
         List<String> before = commandDirectories();

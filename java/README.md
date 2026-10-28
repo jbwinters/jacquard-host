@@ -112,21 +112,22 @@ seconds, keeps at most 8 MiB of stdout and 4 KiB of stderr, and runs through
 the same host-owned output FIFOs as the worker (see
 [process carrier](#process-carrier)). `prepare` also takes a `Cancel`;
 cancelling it, or interrupting the calling thread, kills the running command
-and its process tree and fails the preparation. The interrupt status stays
-set, and a preparation waiting for another thread's version check or prelude
-discovery stops waiting too. Once a command exits, at most 4 MiB more of each
-output is read and the host closes its ends, so a descendant that keeps the
-output open holds neither the caller nor the heap; as for the worker, a
-descendant that was already reparented keeps running.
+and a snapshot of its process tree, and fails the preparation. The interrupt
+status stays set, and a preparation waiting for another thread's version
+check or prelude discovery stops waiting too. Once a command exits, at most
+4 MiB more of each output is read and the host closes its ends, so a
+descendant that keeps the output open holds neither the caller nor the heap;
+as for the worker, a descendant that was already reparented keeps running.
 
 Arguments are Java values encoded by their runtime class (see [data](#data)),
-or `codec.arg(value)` where the runtime class does not say enough, such as an
-empty list of records. `call` decodes the result with the codec you pass;
-`invoke` keeps the whole `Invocation`. Overloads that take a `Cancel` first
-kill the worker when it is cancelled, as does interrupting the calling
-thread. `Invocation.save` writes the frames and evidence, including argument
-and result values; a new file is created owner-only where the file system has
-POSIX permissions, and an existing file keeps its permissions.
+or `codec.arg(value)` where the runtime class does not say enough, such as a
+record that crosses as a tuple or whose constructor has another name. `call`
+decodes the result with the codec you pass; `invoke` keeps the whole
+`Invocation`. Overloads that take a `Cancel` first kill the worker when it is
+cancelled, as does interrupting the calling thread. `Invocation.save` writes
+the frames and evidence, including argument and result values; a new file is
+created owner-only where the file system has POSIX permissions, and an
+existing file keeps its permissions.
 
 ## Data
 

@@ -127,7 +127,7 @@ class RuntimeTest {
         }
     }
 
-    private static final String SLOW_CHECK = "check) sleep 60 & echo $! > \"$ROOT/child.pid\"; wait ;;";
+    private static final String SLOW_CHECK = "check) sleep 300 & echo $! > \"$ROOT/child.pid\"; wait ;;";
 
     @DisabledOnOs(OS.WINDOWS)
     @Test
@@ -191,7 +191,7 @@ class RuntimeTest {
     @DisabledOnOs(OS.WINDOWS)
     @Test
     void aPreparationWaitingForAnotherObservesItsCancelAndInterrupt() throws Exception {
-        String slowVersion = "sleep 60 & echo $! > \"$ROOT/version.pid\"; wait; echo 'jacquard " + Compat.CORE_VERSION + "'";
+        String slowVersion = "sleep 300 & echo $! > \"$ROOT/version.pid\"; wait; echo 'jacquard " + Compat.CORE_VERSION + "'";
         try (FakeCore fake = FakeCore.create(scratch.resolve("waiter"), Compat.CORE_VERSION, slowVersion, "check) exit 3 ;;")) {
             Cancel first = new Cancel();
             CompletableFuture<JacquardException> owner = CompletableFuture.supplyAsync(() -> {
