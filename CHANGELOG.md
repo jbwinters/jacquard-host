@@ -26,7 +26,7 @@
   It provides strict codecs, the session state machine, a bounded process
   carrier for `jacquard host worker`, and a `Host` with a closed operation
   registry. It carries the pinned kit as class-path resources and replays all
-  21 recordings. It is protocol-level only, with no SDK layer. Java cannot
+  21 recordings. Java cannot
   start the worker in its own process group or interrupt a pipe read, so the
   carrier never blocks on a read, reads the worker's output through FIFOs it
   creates with `mkfifo` on Unix (so the JDK's exit-time pipe drain cannot hold
@@ -35,6 +35,21 @@
   `java/src/main/java/org/jacquardlang/host/Compat.java` and keeps the Java kit
   copy in sync, and CI runs the offline tests on Java 21 and 25 and the live
   tests against the pinned Core.
+- Java SDK (`org.jacquardlang.host.sdk`): prepares and caches checked programs
+  with Core's public commands, maps Java values through explicit `Codec`
+  objects (derived from records, enums, and sealed interfaces through their
+  declarations, and `Dynamic` for untyped code), binds typed handlers to exact
+  operation identities, checks arguments against the checked signature and
+  the selected limits before a worker starts, and keeps each invocation's raw
+  evidence. Encoding is bounded by the selected limits as it goes, so a small
+  Java value that denotes a huge one is refused after about one frame's work.
+  `mapBatches` runs explicit
+  batches. Preparation takes a `Cancel` and stops on the caller's interrupt.
+  The four example projects run through the `JacquardExamples` command. The
+  low-level adapter gains `carrier.Command`, the bounded runner the SDK uses
+  for Core's commands, which shares the worker's output FIFOs, and
+  `HandlerContext.of` for calling a handler outside an invocation. CI runs
+  the SDK's offline and live tests and the four projects.
 
 ## 0.2.0 — 2026-10-25
 
