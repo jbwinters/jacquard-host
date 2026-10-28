@@ -569,6 +569,33 @@ class RuntimeTest {
         }
     }
 
+    /**
+     * A cancel after the first of two empty prelude files stops the walk
+     * before the second, whichever comes first: an empty file has no piece
+     * to read, so only the check before each entry can see the stop.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aStopBetweenEmptyFilesIsObserved() throws Exception {
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("empty"), Compat.CORE_VERSION)) {
+            Files.writeString(fake.root.resolve("prelude/01-prim.jqd"), "");
+            Files.createFile(fake.root.resolve("prelude/02-empty.jqd"));
+            List<Path> digested = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Cancel cancel = new Cancel();
+            Core.treeFileHook = path -> {
+                digested.add(path);
+                cancel.cancel();
+            };
+            try {
+                assertTrue(fake.prepareFails("rules.jac", cancel).getMessage().endsWith(Core.ABORTED));
+            } finally {
+                Core.treeFileHook = null;
+            }
+            assertEquals(1, digested.size(), digested.toString());
+            assertEquals(0, fake.calls("check"));
+        }
+    }
+
     /** A tree over the entry cap is refused, zero-byte files counted (a test seam lowers the cap to 3). */
     @DisabledOnOs(OS.WINDOWS)
     @Test
