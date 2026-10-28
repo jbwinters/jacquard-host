@@ -107,48 +107,93 @@ final class Identities {
         return displayToStore(name).replace('_', '-');
     }
 
-    /** Tokens of a printed signature. */
+    /**
+     * The deepest type a signature may nest (a type with no arguments has
+     * depth 1): the protocol's value-depth limit
+     * ({@code max_json_depth}, 64), since no deeper value could be passed.
+     */
+    static final int SIGNATURE_DEPTH = 64;
+    /** The most types one signature may name. */
+    static final int SIGNATURE_NODES = 4096;
+    /** The most tokens one signature may have, which bounds the parser's work before any type is counted. */
+    static final int SIGNATURE_TOKENS = 4 * SIGNATURE_NODES;
+
+    /** Tokens of a printed signature, at most a few per type, so the token count is bounded too. */
     private static List<String> tokens(String text) throws JacquardException {
         List<String> tokens = new ArrayList<>();
-        String rest = text.stripLeading();
-        while (!rest.isEmpty()) {
+        int at = 0;
+        int end = text.length();
+        while (true) {
+            while (at < end && Character.isWhitespace(text.charAt(at))) {
+                at++;
+            }
+            if (at == end) {
+                return tokens;
+            }
+            if (tokens.size() >= SIGNATURE_TOKENS) {
+                throw JacquardException.binding("signature is longer than " + SIGNATURE_TOKENS + " tokens");
+            }
             int length;
-            char first = rest.charAt(0);
-            if (rest.startsWith("->{")) {
+            char first = text.charAt(at);
+            if (text.startsWith("->{", at)) {
                 length = 3;
             } else if ("(),{}".indexOf(first) >= 0) {
                 length = 1;
             } else if ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) {
                 length = 1;
-                while (length < rest.length()) {
-                    char c = rest.charAt(length);
+                while (at + length < end) {
+                    char c = text.charAt(at + length);
                     if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || ".?!-".indexOf(c) >= 0)) {
                         break;
                     }
                     length++;
                 }
             } else {
-                throw JacquardException.binding("unsupported signature near " + rest.substring(0, Math.min(12, rest.length())));
+                throw JacquardException.binding("unsupported signature near " + text.substring(at, Math.min(at + 12, end)));
             }
-            tokens.add(rest.substring(0, length));
-            rest = rest.substring(length).stripLeading();
+            tokens.add(text.substring(at, at + length));
+            at += length;
         }
-        return tokens;
     }
 
     /**
      * Reads a closed v0 signature printed by {@code check --print-sigs}, such as
      * {@code (List Line, Int) ->{Inventory} Option Text}. Polymorphic and
-     * effect-polymorphic signatures are refused.
+     * effect-polymorphic signatures are refused, and so is one with more than
+     * {@link #SIGNATURE_TOKENS} tokens, one whose types nest deeper than
+     * {@link #SIGNATURE_DEPTH} levels, or one with more than
+     * {@link #SIGNATURE_NODES} types. The nesting is refused before the parser
+     * recurses past it, so no signature can exhaust the stack.
      */
     static Interface parseSignature(String text, Map<String, Hash> names) throws JacquardException {
         return new Parser(tokens(text), names).parse();
+    }
+
+    private static JacquardException tooDeep() {
+        return JacquardException.binding("signature nests types deeper than " + SIGNATURE_DEPTH
+                + " levels, the protocol's value-depth limit (max_json_depth)");
+    }
+
+    /** Refuses a type deeper than {@link #SIGNATURE_DEPTH} or, with {@code nodes}, more than {@link #SIGNATURE_NODES} types. */
+    private static void measure(BoundaryType type, int level, int[] nodes) throws JacquardException {
+        if (level > SIGNATURE_DEPTH) {
+            throw tooDeep();
+        }
+        if (++nodes[0] > SIGNATURE_NODES) {
+            throw JacquardException.binding("signature names more than " + SIGNATURE_NODES + " types");
+        }
+        List<BoundaryType> children = type instanceof BoundaryType.Nominal nominal ? nominal.arguments()
+                : ((BoundaryType.Tuple) type).items();
+        for (BoundaryType child : children) {
+            measure(child, level + 1, nodes);
+        }
     }
 
     private static final class Parser {
         private final List<String> tokens;
         private final Map<String, Hash> names;
         private int index;
+        private int frames;
 
         Parser(List<String> tokens, Map<String, Hash> names) {
             this.tokens = tokens;
@@ -216,15 +261,22 @@ final class Identities {
         }
 
         private BoundaryType type() throws JacquardException {
+            // Each nested parse is inside a type that is one level shallower
+            // (Core prints no redundant parentheses), so this bounds the
+            // recursion before it goes further.
+            if (++frames > SIGNATURE_DEPTH) {
+                throw tooDeep();
+            }
             BoundaryType head = atom();
-            if (!(head instanceof BoundaryType.Nominal nominal)) {
-                return head;
+            if (head instanceof BoundaryType.Nominal nominal) {
+                List<BoundaryType> arguments = new ArrayList<>(nominal.arguments());
+                while (!List.of("", ",", ")", "}", "->{").contains(peek())) {
+                    arguments.add(atom());
+                }
+                head = new BoundaryType.Nominal(nominal.identity(), arguments);
             }
-            List<BoundaryType> arguments = new ArrayList<>(nominal.arguments());
-            while (!List.of("", ",", ")", "}", "->{").contains(peek())) {
-                arguments.add(atom());
-            }
-            return new BoundaryType.Nominal(nominal.identity(), arguments);
+            frames--;
+            return head;
         }
 
         Interface parse() throws JacquardException {
@@ -250,6 +302,11 @@ final class Identities {
                 throw JacquardException.binding("trailing signature tokens");
             }
             effects.sort(null);
+            int[] nodes = {0};
+            for (BoundaryType parameter : parameters) {
+                measure(parameter, 1, nodes);
+            }
+            measure(result, 1, nodes);
             return new Interface(parameters, result, effects);
         }
     }

@@ -31,6 +31,8 @@ public final class Program {
     private final Map<String, Interface> interfaces = new TreeMap<>();
     private final Map<String, EffectGroup> effects = new TreeMap<>();
     private final Map<String, Operations> services = new TreeMap<>();
+    /** Why each checked function without a binding has none. */
+    private final Map<String, String> unsupported = new TreeMap<>();
 
     Program(Runtime runtime, Path directory, Runtime.Metadata metadata, Path executable) throws JacquardException {
         this.runtime = runtime;
@@ -58,7 +60,12 @@ public final class Program {
                 used.addAll(parsed.effects());
                 interfaces.put(signature.getKey(), parsed);
             } catch (JacquardException unsupported) {
-                // Polymorphic and other unsupported signatures have no binding.
+                // Polymorphic, too deep, and other unsupported signatures
+                // have no binding; the other functions keep theirs.
+                this.unsupported.put(signature.getKey(), unsupported.getMessage());
+            } catch (RuntimeException | StackOverflowError unexpected) {
+                // The parser's bounds make this unreachable; no Error escapes preparation either way.
+                this.unsupported.put(signature.getKey(), "signature cannot be read (" + unexpected + ")");
             }
         }
         for (List<Identities.Entry> group : metadata.groups()) {
@@ -108,7 +115,8 @@ public final class Program {
     public synchronized Program provide(String effect, Operations operations) throws JacquardException {
         java.util.Objects.requireNonNull(operations, "operations");
         if (!effects.containsKey(Identities.normal(effect))) {
-            throw JacquardException.binding("unknown effect " + effect);
+            throw JacquardException.binding("unknown effect " + effect + (unsupported.isEmpty() ? ""
+                    : "; the effects of functions with unsupported signatures (" + String.join(", ", unsupported.keySet()) + ") are not bound"));
         }
         services.put(Identities.normal(effect), operations);
         return this;
@@ -131,7 +139,8 @@ public final class Program {
     public synchronized Function function(String name, Map<String, Operations> bindings) throws JacquardException {
         Interface signature = interfaces.get(name);
         if (signature == null) {
-            throw JacquardException.binding(name + ": absent or unsupported closed v0 signature");
+            String reason = unsupported.get(name);
+            throw JacquardException.binding(name + ": absent or unsupported closed v0 signature" + (reason == null ? "" : ": " + reason));
         }
         Hash target = data.name(name);
         if (target == null) {

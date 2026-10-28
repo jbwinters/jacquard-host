@@ -376,6 +376,35 @@ class SdkLiveTest {
                 assertThrows(JacquardException.class, () -> prepare(source("rules.txt", ""))).kind());
     }
 
+    /**
+     * Core accepts a parameter nesting 2,500 {@code Option}s, which overflowed
+     * the signature parser's stack on both the cold and warm paths. That
+     * function is now unavailable, refused with a binding failure that names
+     * the depth limit, while {@code safe} works on both paths.
+     */
+    @Test
+    void aSignatureTooDeepToBindLeavesTheOtherFunctionsWorking() throws Exception {
+        int depth = 2500;
+        Path source = source("deep.jac", "deep : (" + "Option (".repeat(depth) + "Int" + ")".repeat(depth) + ") ->{} Int\ndeep(x) = 0\n"
+                + "safe : () ->{} Int\nsafe() = 1\n");
+        int afterCold = -1;
+        for (String path : List.of("cold", "warm")) {
+            Program program = prepare(source);
+            if (afterCold < 0) {
+                afterCold = runtime.coreCommands();
+            } else {
+                assertEquals(afterCold, runtime.coreCommands(), "the warm path ran Core");
+            }
+            assertEquals(1L, program.function("safe").call(Codec.INT), path);
+            JacquardException refused = assertThrows(JacquardException.class, () -> program.function("deep"), path);
+            assertEquals(JacquardException.Kind.BINDING, refused.kind(), path);
+            assertTrue(refused.getMessage().contains("deeper than 64 levels, the protocol's value-depth limit"), refused.getMessage());
+            JacquardException bound = assertThrows(JacquardException.class, () -> program.function("deep", Map.of("Unused", new Operations())), path);
+            assertEquals(JacquardException.Kind.BINDING, bound.kind(), path);
+            assertTrue(bound.getMessage().contains("deeper than 64 levels"), bound.getMessage());
+        }
+    }
+
     /** Pointing {@code first} at {@code second}'s identity in program.json would make it return 2. */
     @Test
     void aRedirectedNameInProgramJsonIsRefused() throws Exception {
