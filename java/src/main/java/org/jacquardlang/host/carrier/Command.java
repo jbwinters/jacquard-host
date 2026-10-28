@@ -152,9 +152,12 @@ public final class Command {
      * over {@code /proc} until one finds none, at most {@link #GROUP_PASSES}.
      * Each process's handle is acquired before its group id is read, and the
      * kill goes through that handle, whose start time the JDK checks. A pass
-     * is never cut short. Returns how many kills were sent.
+     * is never cut short, except that once {@code leader} has been reaped a
+     * live process whose pid is {@code group} has reused the id, so the old
+     * group is empty and nothing more is killed. Returns how many kills were
+     * sent.
      */
-    static int killGroup(long group) {
+    static int killGroup(long group, Process leader) {
         long self = ProcessHandle.current().pid();
         int killed = 0;
         for (int pass = 0; pass < GROUP_PASSES; pass++) {
@@ -178,6 +181,9 @@ public final class Command {
                     if (handle == null || groupOf(entry) != group) {
                         continue;
                     }
+                    if (reused(group, leader)) {
+                        return killed;
+                    }
                     found++;
                     try {
                         if (handle.destroyForcibly()) {
@@ -195,6 +201,15 @@ public final class Command {
             }
         }
         return killed;
+    }
+
+    /**
+     * Whether {@code group}, the pid of {@code leader}, now names another
+     * process. While a group has members its id cannot be reused, so a
+     * reaped leader's pid held by a live process means the group is gone.
+     */
+    static boolean reused(long group, Process leader) {
+        return !leader.isAlive() && ProcessHandle.of(group).map(ProcessHandle::isAlive).orElse(false);
     }
 
     /**
@@ -411,13 +426,13 @@ public final class Command {
                 if (grouped) {
                     // While the command is alive, or unreaped, its group id is reserved.
                     if (killGroupOnStop) {
-                        killGroup(process.pid());
+                        killGroup(process.pid(), process);
                     }
                     process.toHandle().destroyForcibly();
                     awaitExit(process, EXIT_GRACE);
                     if (killGroupOnStop) {
                         // Members forked while the first pass ran.
-                        killGroup(process.pid());
+                        killGroup(process.pid(), process);
                     }
                 } else {
                     if (process.isAlive()) {
@@ -455,7 +470,7 @@ public final class Command {
                 // group when the command exits.
                 if (grouped) {
                     if (killGroupAtExit) {
-                        killGroup(process.pid());
+                        killGroup(process.pid(), process);
                     }
                 } else {
                     recorded.killAlive();

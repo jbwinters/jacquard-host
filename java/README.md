@@ -572,10 +572,10 @@ What remains: a descendant that leaves the group (calls `setsid` itself) is
 neither detected nor killed. The Rust SDK detects one that still holds Core's
 output ("its output did not close") but does not kill it either; the Java
 host holds its FIFOs read-write, so it never sees EOF and cannot detect it.
-Such a descendant's next write fails once the host closes its ends. If the
-whole group has exited by the time the JDK reaps Core, and a new process
-reuses Core's pid as its own group id before the exit's pass reads it, that
-process would match. Without `setsid` (macOS, or Linux without util-linux),
+Such a descendant's next write fails once the host closes its ends. A group
+id cannot be reused while the group has members, so once Core has been
+reaped, a live process holding Core's pid means the group is gone, and the
+pass stops without killing anything more. Without `setsid` (macOS, or Linux without util-linux),
 the host records the command's descendants about every 10 ms, by pid and
 start time, kills every recorded descendant still alive with its recorded
 start time when the command returns, and on a stop also kills a snapshot of

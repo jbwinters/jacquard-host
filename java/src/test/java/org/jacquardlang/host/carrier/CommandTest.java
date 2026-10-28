@@ -188,6 +188,37 @@ class CommandTest {
     }
 
     /**
+     * Once the leader is reaped, a live process whose pid is the old group id
+     * has reused it: it leads a new group, and the group kill leaves it alone.
+     */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void aGroupIdReusedAfterTheLeaderIsReapedIsNotKilled() throws Exception {
+        assumeGroups();
+        Process leader = new ProcessBuilder("/bin/true").start();
+        assertTrue(leader.waitFor(10, java.util.concurrent.TimeUnit.SECONDS));
+        // A process leading its own group stands in for one that reused the reaped leader's pid.
+        Process other = new ProcessBuilder(Command.SETSID, "--", "/bin/sleep", "300").start();
+        try {
+            Path stat = Path.of("/proc", Long.toString(other.pid()));
+            long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (Command.groupOf(stat) != other.pid()) {
+                if (System.nanoTime() > deadline) {
+                    fail("setsid did not make the process a group leader");
+                }
+                Thread.sleep(10);
+            }
+            assertEquals(0, Command.killGroup(other.pid(), leader));
+            assertTrue(other.isAlive(), "the process that reused the group id was killed");
+            // While the leader is alive, its group is still killed.
+            assertTrue(Command.killGroup(other.pid(), other) >= 1, "the live leader's group was not killed");
+            dies("the group leader", other.pid());
+        } finally {
+            other.destroyForcibly();
+        }
+    }
+
+    /**
      * The command exits soon, leaving a sleeper holding its output and a
      * reparented {@code yes} flooding stderr. Both are in the command's
      * group, so both are killed when it exits, and the command succeeds
