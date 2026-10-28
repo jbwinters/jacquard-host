@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -321,14 +322,14 @@ public final class Runtime {
         Path executable = Core.executable(binary);
         String binaryHash;
         try {
-            binaryHash = Core.fileDigest(executable);
+            binaryHash = Core.fileDigest(executable, cancel);
         } catch (IOException error) {
             throw JacquardException.preparation("cannot read " + executable + ": " + error.getMessage());
         }
         checkVersion(executable, binaryHash, cancel);
         String preludeHash;
         try {
-            preludeHash = Core.mapDigest(Core.tree(prelude, cancel));
+            preludeHash = Core.mapDigest(Core.tree(prelude, cancel, Core.Access.ANY));
         } catch (JacquardException error) {
             throw JacquardException.preparation("cannot read prelude " + prelude + ": " + error.getMessage());
         }
@@ -342,10 +343,17 @@ public final class Runtime {
         identity.put("syntax", syntax);
         Path directory = cache.resolve(Core.mapDigest(identity));
         try {
-            Files.createDirectories(cache);
+            if (Owner.posix()) {
+                Files.createDirectories(cache, PosixFilePermissions.asFileAttribute(Owner.DIRECTORY));
+            } else {
+                Files.createDirectories(cache);
+            }
         } catch (IOException error) {
             throw JacquardException.preparation("cannot create " + cache + ": " + error.getMessage());
         }
+        // Only the cache's owner may write it; nothing inside it can resist
+        // someone else who may.
+        Owner.check(cache, Core.Access.OWNER_ONLY);
         if (Files.exists(directory)) {
             return load(directory, identity, executable, cancel);
         }
@@ -366,8 +374,9 @@ public final class Runtime {
                 write(staging.resolve(preludeOutput(PRELUDE_FILES.get(i))), preludeHashes.get(i).getBytes(StandardCharsets.UTF_8),
                         "cannot write Core's output");
             }
+            // Core made the store with its own permissions; the entry is owner-only.
             Metadata metadata = new Metadata(identity, bindings.names(), bindings.constructors(), bindings.signatures(), bindings.groups(),
-                    Core.tree(staging, cancel));
+                    Core.tree(staging, cancel, Core.Access.RESTRICT));
             write(staging.resolve("program.json"), metadata.toJson().getBytes(StandardCharsets.UTF_8), "cannot write program.json");
             try {
                 Files.move(staging, directory, StandardCopyOption.ATOMIC_MOVE);
@@ -445,14 +454,22 @@ public final class Runtime {
 
     private static void createDirectory(Path path) throws JacquardException {
         try {
-            Files.createDirectory(path);
+            if (Owner.posix()) {
+                Files.createDirectory(path, PosixFilePermissions.asFileAttribute(Owner.DIRECTORY));
+            } else {
+                Files.createDirectory(path);
+            }
         } catch (IOException error) {
             throw JacquardException.preparation("cannot create " + path + ": " + error.getMessage());
         }
     }
 
+    /** Writes a new owner-only file. */
     private static void write(Path path, byte[] bytes, String context) throws JacquardException {
         try {
+            if (Owner.posix()) {
+                Files.createFile(path, PosixFilePermissions.asFileAttribute(Owner.FILE));
+            }
             Files.write(path, bytes);
         } catch (IOException error) {
             throw JacquardException.preparation(context + ": " + error.getMessage());
@@ -464,7 +481,8 @@ public final class Runtime {
         for (int attempt = 0; attempt < 100; attempt++) {
             Path path = cache.resolve(String.format("prepare-%d-%08x-%d", ProcessHandle.current().pid(), nanos, STAGING.getAndIncrement()));
             try {
-                return Files.createDirectory(path);
+                return Owner.posix() ? Files.createDirectory(path, PosixFilePermissions.asFileAttribute(Owner.DIRECTORY))
+                        : Files.createDirectory(path);
             } catch (FileAlreadyExistsException error) {
                 // Try the next name.
             } catch (IOException error) {
@@ -489,10 +507,13 @@ public final class Runtime {
     }
 
     /**
-     * Loads a cache entry, refusing any change: every file but
-     * {@code program.json} must match the digests it records, and every
-     * binding it records must equal what is derived again from Core's raw
-     * outputs, which are among those verified files.
+     * Loads a cache entry, refusing an accidental or partial change: the
+     * entry and everything in it must be owned by this user and writable by
+     * no one else (on POSIX), every file but {@code program.json} must match
+     * the digests it records, and every binding it records must equal what is
+     * derived again from Core's raw outputs, which are among those verified
+     * files. A coordinated rewrite of several files is accepted: only the
+     * cache's owner can make one, and the owner is trusted.
      */
     private Program load(Path directory, Map<String, String> identity, Path executable, Cancel cancel) throws JacquardException {
         java.util.function.Function<String, JacquardException> fail = detail -> JacquardException.preparation("prepared cache "
@@ -500,7 +521,7 @@ public final class Runtime {
         TreeMap<String, String> observed;
         try {
             // Regular files only, bounded, so no read below can block.
-            observed = Core.tree(directory, cancel);
+            observed = Core.tree(directory, cancel, Core.Access.OWNER_ONLY);
         } catch (JacquardException error) {
             throw fail.apply(error.getMessage());
         }

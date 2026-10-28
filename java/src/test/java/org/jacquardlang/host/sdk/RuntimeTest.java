@@ -7,11 +7,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import org.jacquardlang.host.Compat;
 import org.jacquardlang.host.carrier.Cancel;
@@ -380,7 +384,8 @@ class RuntimeTest {
             } finally {
                 Core.treeFileHook = null;
             }
-            assertEquals(List.of(fake.root.resolve("prelude/01-prim.jqd")), digested);
+            // The walk streams each directory, so either file may come first.
+            assertEquals(1, digested.size(), digested.toString());
             assertEquals(0, fake.calls("check"));
         }
     }
@@ -435,6 +440,153 @@ class RuntimeTest {
             JacquardException rewritten = assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options()));
             assertTrue(rewritten.getMessage().contains("program.json bindings differ"), rewritten.getMessage());
             assertEquals(commands, fake.runtime.coreCommands());
+        }
+    }
+
+    private static Set<PosixFilePermission> addGroupWrite(Path path) throws Exception {
+        Set<PosixFilePermission> original = Files.getPosixFilePermissions(path, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+        Set<PosixFilePermission> widened = java.util.EnumSet.copyOf(original);
+        widened.add(PosixFilePermission.GROUP_WRITE);
+        Files.setPosixFilePermissions(path, widened);
+        return original;
+    }
+
+    /**
+     * A new cache entry is owner-only throughout (Core's store included), and
+     * the cache root, the entry, or any file or directory in it that its
+     * group may write is refused on load; restoring the permission makes the
+     * entry load again.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aGroupWritableCacheEntryIsRefused() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("owner"))) {
+            List<Path> sources = List.of(fake.source("rules.jac"));
+            Program program = fake.runtime.prepare(sources, fake.options());
+            Path entry = program.directory();
+            List<Path> targets;
+            try (Stream<Path> walk = Files.walk(entry)) {
+                targets = walk.toList();
+            }
+            assertTrue(targets.contains(entry.resolve("store/objects")), targets.toString());
+            for (Path path : targets) {
+                Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(path, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                assertTrue(permissions.stream().allMatch(permission -> permission.name().startsWith("OWNER")),
+                        path + " is not owner-only: " + permissions);
+            }
+            List<Path> checked = new ArrayList<>(List.of(fake.options().cacheDir().toAbsolutePath()));
+            checked.addAll(List.of(entry, entry.resolve("program.json"), entry.resolve(Runtime.HASH_OUTPUT), entry.resolve("core"),
+                    entry.resolve("store"), entry.resolve("store/objects")));
+            for (Path path : checked) {
+                Set<PosixFilePermission> original = addGroupWrite(path);
+                JacquardException error = assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options()),
+                        "a group-writable " + path + " was accepted");
+                assertTrue(error.getMessage().contains(path + " is group- or world-writable"), error.getMessage());
+                Files.setPosixFilePermissions(path, original);
+            }
+            assertEquals(entry, fake.runtime.prepare(sources, fake.options()).directory());
+        }
+    }
+
+    /**
+     * A cache root this user does not own is refused before anything is
+     * written to it. The root directory stands in for a foreign owner (root);
+     * a foreign-owned entry inside an owned root would need another account,
+     * so it is not tested.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aForeignOwnedCacheRootIsRefused() throws Exception {
+        // The test's own directory is owned by the user running it.
+        org.junit.jupiter.api.Assumptions.assumeFalse(Integer.valueOf(0).equals(Files.getAttribute(scratch, "unix:uid")), "running as root");
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("foreign"))) {
+            JacquardException error = assertThrows(JacquardException.class,
+                    () -> fake.runtime.prepare(List.of(fake.source("rules.jac")), new PrepareOptions(Path.of("/"))));
+            assertTrue(error.getMessage().contains("cache path / is not owned by the current user"), error.getMessage());
+            assertEquals(0, fake.calls("check"));
+        }
+    }
+
+    /** A runtime whose Core is {@code binary}, over {@code fake}'s prelude. */
+    private static Runtime runtimeFor(FakeCore fake, Path binary) throws Exception {
+        return new Runtime(RuntimeOptions.defaults().withBinary(binary.toString()).withPrelude(fake.root.resolve("prelude")));
+    }
+
+    /**
+     * An executable over the 512 MiB fingerprint ceiling is refused from its
+     * size: it is sparse and unreadable, so a read would fail with "cannot
+     * read" instead.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void anExecutableOverTheFingerprintCeilingIsRefusedBeforeItIsRead() throws Exception {
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("huge"), Compat.CORE_VERSION)) {
+            Path huge = sparse(fake.root.resolve("huge-jacquard"), Core.EXECUTABLE_LIMIT + 1);
+            Files.setPosixFilePermissions(huge, PosixFilePermissions.fromString("-wx------"));
+            JacquardException error = assertThrows(JacquardException.class,
+                    () -> runtimeFor(fake, huge).prepare(List.of(fake.source("rules.jac")), fake.options()));
+            assertTrue(error.getMessage().startsWith("Core executable ") && error.getMessage().endsWith(" exceeds 512 MiB"), error.getMessage());
+        }
+    }
+
+    /**
+     * A cancel or an interrupt during fingerprinting stops it after the piece
+     * being read (a test seam counts the pieces of a 16 MiB executable), the
+     * interrupt kept.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aStopDuringFingerprintingIsObserved() throws Exception {
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("digest"), Compat.CORE_VERSION)) {
+            Path big = sparse(fake.root.resolve("big-jacquard"), 16L << 20);
+            Files.setPosixFilePermissions(big, PosixFilePermissions.fromString("rwx------"));
+            java.util.concurrent.atomic.AtomicInteger pieces = new java.util.concurrent.atomic.AtomicInteger();
+            Cancel cancel = new Cancel();
+            try {
+                Core.digestChunkHook = () -> {
+                    pieces.incrementAndGet();
+                    cancel.cancel();
+                };
+                JacquardException error = assertThrows(JacquardException.class,
+                        () -> runtimeFor(fake, big).prepare(List.of(fake.source("rules.jac")), fake.options(), cancel));
+                assertEquals(Core.ABORTED, error.getMessage());
+                assertEquals(1, pieces.get());
+                pieces.set(0);
+                Core.digestChunkHook = () -> {
+                    pieces.incrementAndGet();
+                    Thread.currentThread().interrupt();
+                };
+                error = assertThrows(JacquardException.class,
+                        () -> runtimeFor(fake, big).prepare(List.of(fake.source("rules.jac")), fake.options()));
+                assertTrue(Thread.interrupted(), "the interrupt status was cleared");
+                assertEquals(Core.ABORTED, error.getMessage());
+                assertEquals(1, pieces.get());
+            } finally {
+                Core.digestChunkHook = null;
+                Thread.interrupted();
+            }
+            assertEquals(0, fake.calls("--version"));
+        }
+    }
+
+    /** A tree over the entry cap is refused, zero-byte files counted (a test seam lowers the cap to 3). */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aTreeOverTheEntryCapIsRefused() throws Exception {
+        assertEquals(100_000, Core.TREE_ENTRIES);
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("entries"), Compat.CORE_VERSION)) {
+            for (String name : List.of("a.jqd", "b.jqd", "c.jqd")) {
+                Files.createFile(fake.root.resolve("prelude").resolve(name));
+            }
+            Core.treeEntries = 3;
+            try {
+                String message = fake.prepareFails().getMessage();
+                assertTrue(message.startsWith("cannot read prelude") && message.endsWith("more than 3 entries under " + fake.root.resolve("prelude")),
+                        message);
+            } finally {
+                Core.treeEntries = Core.TREE_ENTRIES;
+            }
+            assertEquals(0, fake.calls("check"));
         }
     }
 }

@@ -94,13 +94,44 @@ final class Core {
         return HexFormat.of().formatHex(sha256().digest(data));
     }
 
-    /** The SHA-256 digest of a file's bytes, read in pieces. */
-    static String fileDigest(Path path) throws IOException {
+    /** The most bytes of the Core executable that are fingerprinted. */
+    static final long EXECUTABLE_LIMIT = 512L << 20;
+    /** Test seam: runs after each chunk {@link #fileDigest} reads. Null outside tests. */
+    static volatile Runnable digestChunkHook;
+
+    /**
+     * The SHA-256 digest of the Core executable's bytes, read in pieces. A
+     * file larger than {@link #EXECUTABLE_LIMIT} is refused from its size
+     * before it is read, and the limit is enforced again while it is read.
+     * Between pieces it observes {@code cancel} and the caller's interrupt,
+     * which it never clears.
+     */
+    static String fileDigest(Path path, Cancel cancel) throws IOException, JacquardException {
+        JacquardException over = JacquardException.preparation("Core executable " + path + " exceeds " + (EXECUTABLE_LIMIT >> 20) + " MiB");
+        if (Files.size(path) > EXECUTABLE_LIMIT) {
+            throw over;
+        }
         MessageDigest digest = sha256();
         byte[] buffer = new byte[1 << 16];
+        long read = 0;
         try (InputStream in = Files.newInputStream(path)) {
-            for (int n; (n = in.read(buffer)) > 0; ) {
+            while (true) {
+                if (cancel.isCancelled() || Thread.currentThread().isInterrupted()) {
+                    throw JacquardException.preparation(ABORTED);
+                }
+                int n = in.read(buffer);
+                if (n < 0) {
+                    break;
+                }
+                read += n;
+                if (read > EXECUTABLE_LIMIT) {
+                    throw over;
+                }
                 digest.update(buffer, 0, n);
+                Runnable hook = digestChunkHook;
+                if (hook != null) {
+                    hook.run();
+                }
             }
         }
         return HexFormat.of().formatHex(digest.digest());
@@ -108,6 +139,10 @@ final class Core {
 
     /** The most bytes {@link #tree} reads under one root. */
     static final long TREE_LIMIT = 256L << 20;
+    /** The most entries (files and directories, empty ones included) {@link #tree} visits under one root. */
+    static final int TREE_ENTRIES = 100_000;
+    /** Test seam: the entry cap {@link #tree} applies. */
+    static volatile int treeEntries = TREE_ENTRIES;
 
     /**
      * Test seam: runs after {@link #tree} digests each file, with its path.
@@ -115,73 +150,96 @@ final class Core {
      */
     static volatile java.util.function.Consumer<Path> treeFileHook;
 
+    /** What {@link #tree} does about who may write what it walks. */
+    enum Access {
+        /** Nothing: a Core installation's prelude. */
+        ANY,
+        /** Removes every group and other permission, as each new cache entry's files are made owner-only. */
+        RESTRICT,
+        /** Refuses the root or any entry that this user does not own or that its group or others may write (POSIX only). */
+        OWNER_ONLY
+    }
+
     /**
      * Digests every regular file under {@code root}, keyed by
      * {@code /}-separated relative path, refusing other entry kinds (symbolic
-     * links, FIFOs, and devices included, so no read can block on one) and
-     * more than {@link #TREE_LIMIT} bytes in all, which is checked against
-     * each file's size before it is read and again while it is read. Between
-     * files it observes {@code cancel} and the caller's interrupt, which it
-     * never clears.
+     * links, FIFOs, and devices included, so no read can block on one), more
+     * than {@link #TREE_ENTRIES} entries, and more than {@link #TREE_LIMIT}
+     * bytes in all, which is checked against each file's size before it is
+     * read and again while it is read. The walk streams each directory, so
+     * nothing beyond the entry cap is held, and before each entry and each
+     * piece of a file it observes {@code cancel} and the caller's interrupt,
+     * which it never clears. The result is sorted as it is collected, within
+     * the cap. {@code access} says whether entries are also checked for
+     * owner-only access, or made owner-only.
      */
-    static TreeMap<String, String> tree(Path root, Cancel cancel) throws JacquardException {
+    static TreeMap<String, String> tree(Path root, Cancel cancel, Access access) throws JacquardException {
         TreeMap<String, String> files = new TreeMap<>(Json.CODE_POINT_ORDER);
-        walk(root, root, files, new long[1], cancel);
+        Owner.check(root, access);
+        walk(root, root, files, new long[2], cancel, access);
         return files;
     }
 
-    private static void walk(Path root, Path directory, Map<String, String> files, long[] total, Cancel cancel) throws JacquardException {
-        List<Path> entries;
-        try (Stream<Path> list = Files.list(directory)) {
-            entries = new ArrayList<>(list.toList());
-        } catch (IOException | RuntimeException error) {
-            throw JacquardException.preparation("cannot read " + directory + ": " + error.getMessage());
-        }
-        entries.sort((a, b) -> Json.CODE_POINT_ORDER.compare(a.getFileName().toString(), b.getFileName().toString()));
-        for (Path path : entries) {
-            if (cancel.isCancelled() || Thread.currentThread().isInterrupted()) {
-                throw JacquardException.preparation(ABORTED);
-            }
-            List<String> parts = new ArrayList<>();
-            for (Path part : root.relativize(path)) {
-                parts.add(part.toString());
-            }
-            String relative = String.join("/", parts);
-            BasicFileAttributes attributes;
-            try {
-                attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-            } catch (IOException error) {
-                throw JacquardException.preparation("cannot read " + path + ": " + error.getMessage());
-            }
-            if (attributes.isDirectory()) {
-                walk(root, path, files, total, cancel);
-            } else if (attributes.isRegularFile()) {
-                JacquardException over = JacquardException.preparation("files under " + root + " exceed " + (TREE_LIMIT >> 20) + " MiB");
-                if (attributes.size() > TREE_LIMIT - total[0]) {
-                    throw over;
+    private static void walk(Path root, Path directory, Map<String, String> files, long[] total, Cancel cancel, Access access)
+            throws JacquardException {
+        try (java.nio.file.DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
+            for (Path path : entries) {
+                if (cancel.isCancelled() || Thread.currentThread().isInterrupted()) {
+                    throw JacquardException.preparation(ABORTED);
                 }
+                int cap = treeEntries;
+                if (++total[1] > cap) {
+                    throw JacquardException.preparation("more than " + cap + " entries under " + root);
+                }
+                List<String> parts = new ArrayList<>();
+                for (Path part : root.relativize(path)) {
+                    parts.add(part.toString());
+                }
+                String relative = String.join("/", parts);
+                BasicFileAttributes attributes;
                 try {
-                    files.put(relative, boundedDigest(path, TREE_LIMIT - total[0], total, over));
+                    attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
                 } catch (IOException error) {
                     throw JacquardException.preparation("cannot read " + path + ": " + error.getMessage());
                 }
-                java.util.function.Consumer<Path> hook = treeFileHook;
-                if (hook != null) {
-                    hook.accept(path);
+                if (attributes.isDirectory()) {
+                    Owner.check(path, access);
+                    walk(root, path, files, total, cancel, access);
+                } else if (attributes.isRegularFile()) {
+                    Owner.check(path, access);
+                    JacquardException over = JacquardException.preparation("files under " + root + " exceed " + (TREE_LIMIT >> 20) + " MiB");
+                    if (attributes.size() > TREE_LIMIT - total[0]) {
+                        throw over;
+                    }
+                    try {
+                        files.put(relative, boundedDigest(path, TREE_LIMIT - total[0], total, over, cancel));
+                    } catch (IOException error) {
+                        throw JacquardException.preparation("cannot read " + path + ": " + error.getMessage());
+                    }
+                    java.util.function.Consumer<Path> hook = treeFileHook;
+                    if (hook != null) {
+                        hook.accept(path);
+                    }
+                } else {
+                    throw JacquardException.preparation("unsupported filesystem entry in prepared artifacts: " + relative);
                 }
-            } else {
-                throw JacquardException.preparation("unsupported filesystem entry in prepared artifacts: " + relative);
             }
+        } catch (IOException | java.nio.file.DirectoryIteratorException error) {
+            throw JacquardException.preparation("cannot read " + directory + ": " + error.getMessage());
         }
     }
 
     /** The digest of at most {@code room} bytes of a file, adding what it read to {@code total[0]}; {@code over} once it is longer. */
-    private static String boundedDigest(Path path, long room, long[] total, JacquardException over) throws IOException, JacquardException {
+    private static String boundedDigest(Path path, long room, long[] total, JacquardException over, Cancel cancel)
+            throws IOException, JacquardException {
         MessageDigest digest = sha256();
         byte[] buffer = new byte[1 << 16];
         long read = 0;
         try (InputStream in = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
             for (int n; (n = in.read(buffer)) > 0; ) {
+                if (cancel.isCancelled() || Thread.currentThread().isInterrupted()) {
+                    throw JacquardException.preparation(ABORTED);
+                }
                 read += n;
                 if (read > room) {
                     throw over;
