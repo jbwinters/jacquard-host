@@ -1,5 +1,7 @@
 package org.jacquardlang.host.sdk;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import org.jacquardlang.host.Failure;
@@ -77,10 +79,14 @@ public final class JacquardException extends Exception {
         return new JacquardException(Kind.INVOCATION, result.message(), result, cause, -1, List.of());
     }
 
-    /** {@code error} as the failure of batch {@code index}, after the decoded values of the batches before it. */
+    /**
+     * {@code error} as the failure of batch {@code index}, after the decoded
+     * values of the batches before it. The copy keeps null items, which is how
+     * {@link Codec#UNIT} decodes unit.
+     */
     static JacquardException batch(int index, List<Object> completed, JacquardException error) {
         return new JacquardException(error.kind, "batch " + index + ": " + error.getMessage(), error.result, error.getCause(), index,
-                List.copyOf(completed));
+                Collections.unmodifiableList(new ArrayList<>(completed)));
     }
 
     /** What failed. */
@@ -109,7 +115,8 @@ public final class JacquardException extends Exception {
 
     /**
      * For {@link Function#mapBatches}: the decoded values of the batches that
-     * completed before the failed one, in order. Nothing is retried.
+     * completed before the failed one, in order, unmodifiable; a unit item is
+     * null. Nothing is retried.
      */
     public List<Object> completed() {
         return completed;

@@ -431,6 +431,20 @@ class SdkLiveTest {
         assertEquals("E1602", error.result().code());
     }
 
+    /** Batch 0 decodes to {@code [null]} (unit); batch 1's result exceeds the limits (E1602). */
+    @Test
+    void aLaterBatchFailureKeepsEarlierUnitResults() throws Exception {
+        String many = String.join(",", Collections.nCopies(40, "()"));
+        Function units = prepare(source("units.jac", "units : (List Int) ->{} List ()\n"
+                + "units(xs) = match xs { | Cons(n, _) -> if eq(n, 1) then [()] else [" + many + "] | Nil -> [] }\n")).function("units");
+        assertEquals(java.util.Arrays.asList((Object) null), units.mapBatches(Codec.UNIT, List.of(1L), 1));
+        JacquardException error = assertThrows(JacquardException.class, () -> units.mapBatches(Codec.UNIT, List.of(1L, 2L), 1));
+        assertEquals(1, error.batchIndex(), error.getMessage());
+        assertEquals(java.util.Arrays.asList((Object) null), error.completed());
+        assertEquals(JacquardException.Kind.INVOCATION, error.kind());
+        assertEquals("E1602", error.result().code());
+    }
+
     @Test
     void resultMappingFailureRetainsTheSuccessfulResult() throws Exception {
         Invocation invocation = prepare(example("quickstart")).function("shipping-cost").invoke(35);
