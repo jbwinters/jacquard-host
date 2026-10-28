@@ -17,6 +17,15 @@ public final class HandlerContext {
     }
 
     /**
+     * A context for calling a handler outside an invocation, such as in a
+     * test: it is cancelled once {@code cancel} is.
+     */
+    public static HandlerContext of(Cancel cancel) {
+        java.util.Objects.requireNonNull(cancel, "cancel");
+        return new HandlerContext(() -> false, () -> false, cancel);
+    }
+
+    /**
      * Whether the worker expired, the caller cancelled, or the invocation
      * ended. Handlers should stop; the host no longer waits for them.
      */
