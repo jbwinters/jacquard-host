@@ -189,7 +189,7 @@ public final class Program {
             throw JacquardException.binding(name + ": missing handlers: " + String.join(", ", missing)
                     + ". Bind every operation in each declared effect before calling");
         }
-        return new Function(name, signature, target, registry, host, data, runtime.deadline());
+        return new Function(name, signature, target, registry, host, data);
     }
 
     @Override

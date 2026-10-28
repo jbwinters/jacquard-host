@@ -5,9 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.lang.ref.WeakReference;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -29,10 +27,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * {@link Function#mapBatches} preflight with synthetic identities and no
- * Core: a stop or the deadline ends validation between batches, and each
- * batch's encoding is released once it is checked. Rows go through a codec
- * that counts its encodings, so each bound is an exact count. The worker
- * command does not exist; no test here reaches a worker.
+ * Core: a stop ends validation between batches and after the last, there is
+ * no validation deadline, and no batch's encoding is kept once it is
+ * checked. Rows go through a codec that counts its encodings, so each bound
+ * is an exact count. The worker command does not exist, so a call that gets
+ * past validation fails at batch 0.
  */
 class BatchesTest {
     @TempDir
@@ -44,13 +43,13 @@ class BatchesTest {
     }
 
     /** {@code ints : (List Int) ->{} List Int} over the {@link DataTest} fixture. */
-    private Function ints(Duration deadline) {
+    private Function ints() {
         Data data = DataTest.fixture(Limits.HARD);
         BoundaryType list = DataTest.nominal(data.name("list"), DataTest.nominal(data.name("int")));
         Interface signature = new Interface(List.of(list), list, List.of());
         Host host = new Host(scratch.resolve("store").toString(),
                 new HostOptions(new Options(List.of(scratch.resolve("no-such-jacquard").toString()), null, null), Limits.HARD));
-        return new Function("ints", signature, DataTest.numbered(99), new OperationRegistry(), host, data, deadline);
+        return new Function("ints", signature, DataTest.numbered(99), new OperationRegistry(), host, data);
     }
 
     /** Encodes Ints, counting each encoding and running {@code each} with the count first. */
@@ -86,7 +85,7 @@ class BatchesTest {
         Counting codec = new Counting(n -> null);
         Cancel cancel = new Cancel();
         cancel.cancel();
-        JacquardException error = assertThrows(JacquardException.class, () -> ints(null).mapBatches(cancel, Codec.INT, rows(codec, 10_000), 10));
+        JacquardException error = assertThrows(JacquardException.class, () -> ints().mapBatches(cancel, Codec.INT, rows(codec, 10_000), 10));
         assertEquals(0, codec.encodes.get(), "rows were encoded after the stop");
         assertEquals(-1, error.batchIndex());
         assertEquals(JacquardException.Kind.INVOCATION, error.kind(), error.getMessage());
@@ -99,7 +98,7 @@ class BatchesTest {
         Counting codec = new Counting(n -> null);
         Thread.currentThread().interrupt();
         JacquardException error = assertThrows(JacquardException.class,
-                () -> ints(null).mapBatches(new Cancel(), Codec.INT, rows(codec, 10_000), 10));
+                () -> ints().mapBatches(new Cancel(), Codec.INT, rows(codec, 10_000), 10));
         assertTrue(Thread.interrupted(), "the interrupt status was cleared");
         assertEquals(0, codec.encodes.get(), "rows were encoded after the interrupt");
         assertEquals(-1, error.batchIndex());
@@ -111,68 +110,54 @@ class BatchesTest {
         Cancel cancel = new Cancel();
         // Cancelled while batch 2 (rows 21 to 30) is being encoded.
         Counting codec = new Counting(n -> n == 25 ? cancel::cancel : null);
-        JacquardException error = assertThrows(JacquardException.class, () -> ints(null).mapBatches(cancel, Codec.INT, rows(codec, 10_000), 10));
+        JacquardException error = assertThrows(JacquardException.class, () -> ints().mapBatches(cancel, Codec.INT, rows(codec, 10_000), 10));
         assertEquals(30, codec.encodes.get());
         assertEquals(-1, error.batchIndex());
         assertEquals(Json.of("aborted"), error.result().hostEvidence().get("reason"));
     }
 
+    /**
+     * A cancel while the last batch is validated is observed before any
+     * worker starts: the refusal is the host's aborted result at batch index
+     * -1, and no batch is encoded again to run.
+     */
     @Test
-    void validationOutlivingTheDeadlineIsRefused() throws Exception {
-        Counting codec = new Counting(n -> n == 15 ? () -> {
-            try {
-                Thread.sleep(200);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        } : null);
-        JacquardException error = assertThrows(JacquardException.class,
-                () -> ints(Duration.ofMillis(50)).mapBatches(new Cancel(), Codec.INT, rows(codec, 10_000), 10));
-        assertEquals(20, codec.encodes.get());
-        assertEquals(JacquardException.Kind.INVALID_ARGUMENT, error.kind());
+    void aStopDuringTheLastBatchsValidationStartsNoWorker() throws Exception {
+        Cancel cancel = new Cancel();
+        Counting codec = new Counting(n -> n == 30 ? cancel::cancel : null);
+        JacquardException error = assertThrows(JacquardException.class, () -> ints().mapBatches(cancel, Codec.INT, rows(codec, 30), 10));
+        assertEquals(30, codec.encodes.get(), "a batch was encoded again after the stop");
         assertEquals(-1, error.batchIndex());
-        assertTrue(error.getMessage().contains("outlived the deadline"), error.getMessage());
+        assertEquals(Json.of("aborted"), error.result().hostEvidence().get("reason"));
     }
 
     /**
-     * While batch 2 is encoded, nothing holds batch 0's encoding: a weak
-     * reference to its first value is cleared by a collection. Keeping every
-     * batch's encoding until the first runs would hold it.
+     * Validation has no deadline of its own (as in the other SDKs), so it
+     * does not depend on the machine's speed: every batch is validated, and
+     * the call goes on to the worker (here a missing executable, reported at
+     * batch 0), encoding batch 0 again to run it.
      */
     @Test
-    void eachBatchEncodingIsReleasedOnceChecked() throws Exception {
-        Cancel cancel = new Cancel();
-        Object[] first = new Object[1];
-        boolean[] released = new boolean[1];
-        Codec<Long> codec = new Codec<>() {
-            int encodes;
+    void everyBatchIsValidatedAndTheFirstEncodedAgainToRun() throws Exception {
+        Counting codec = new Counting(n -> null);
+        JacquardException error = assertThrows(JacquardException.class, () -> ints().mapBatches(new Cancel(), Codec.INT, rows(codec, 30), 10));
+        assertEquals(0, error.batchIndex(), error.getMessage());
+        assertEquals(40, codec.encodes.get());
+    }
 
-            @Override
-            public Value encode(Encoder encoder, Long value) throws JacquardException {
-                encodes++;
-                if (encodes == 21) {
-                    @SuppressWarnings("unchecked")
-                    WeakReference<Value> reference = (WeakReference<Value>) first[0];
-                    for (int i = 0; i < 20 && reference.get() != null; i++) {
-                        System.gc();
-                    }
-                    released[0] = reference.get() == null;
-                    cancel.cancel();
-                }
-                Value encoded = Codec.INT.encode(encoder, value);
-                if (encodes == 1) {
-                    first[0] = new WeakReference<>(encoded);
-                }
-                return encoded;
-            }
-
-            @Override
-            public Long decode(Decoder decoder, Value value) throws JacquardException {
-                return Codec.INT.decode(decoder, value);
-            }
-        };
-        assertThrows(JacquardException.class, () -> ints(null).mapBatches(cancel, Codec.INT, Collections.nCopies(1_000, codec.arg(1L)), 10));
-        assertTrue(released[0], "batch 0's encoding was still held while batch 2 was validated");
+    /**
+     * Retention is structurally impossible: the validation step returns
+     * nothing, so no caller can keep a batch's encoding, and no field of a
+     * function can hold one.
+     */
+    @Test
+    void validationKeepsNoEncoding() throws Exception {
+        java.lang.reflect.Method validate = Function.class.getDeclaredMethod("validate", Object[].class, List.class);
+        assertEquals(void.class, validate.getReturnType());
+        for (java.lang.reflect.Field field : Function.class.getDeclaredFields()) {
+            assertTrue(!java.util.Collection.class.isAssignableFrom(field.getType()) && !Value.class.isAssignableFrom(field.getType())
+                    && !field.getType().isArray(), "a field could hold encodings: " + field);
+        }
     }
 
     @Test
