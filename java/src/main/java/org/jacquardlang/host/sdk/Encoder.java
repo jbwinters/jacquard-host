@@ -124,6 +124,8 @@ public final class Encoder {
      * {@link Codec#list}, and {@link Codec#optional}.
      */
     public Value constructor(String name, List<Value> fields) throws JacquardException {
+        // Counted before the fields are copied into the value.
+        checkCount(fields.size(), "constructor");
         if (Data.BUILTINS.contains(Identities.displayToStore(name))) {
             throw invalid("use the native form of builtin constructor " + Identities.excerpt(name));
         }

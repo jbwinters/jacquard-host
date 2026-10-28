@@ -518,7 +518,45 @@ class DataTest {
         String path = assertThrows(JacquardException.class, () -> data.encode(named, 1L)).getMessage();
         assertTrue(path.startsWith("value." + "X".repeat(64) + "... (1000000 chars): null has no Jacquard value"), path.substring(0, 100));
         String bounded = JacquardException.binding(huge).getMessage();
-        assertEquals("X".repeat(JacquardException.MESSAGE_LIMIT) + "... (1000000 chars)", bounded);
+        assertEquals(JacquardException.MESSAGE_LIMIT, bounded.length(), "the cap is exact, its suffix included");
+        assertTrue(bounded.endsWith("X... (1000000 chars)"), bounded.substring(bounded.length() - 40));
+        // A caller's message through the public helpers is bounded before it is joined to a path.
+        Codec<Long> invalidating = new Codec<>() {
+            @Override
+            public Value encode(Encoder encoder, Long value) throws JacquardException {
+                throw encoder.invalid(huge);
+            }
+
+            @Override
+            public Long decode(Decoder decoder, Value value) throws JacquardException {
+                throw decoder.mapping(huge);
+            }
+        };
+        String invalid = assertThrows(JacquardException.class, () -> data.encode(invalidating, 1L)).getMessage();
+        assertTrue(invalid.length() <= JacquardException.MESSAGE_LIMIT, invalid.length() + " chars");
+        assertTrue(invalid.startsWith("value: XXXX"), invalid.substring(0, 20));
+        String mapping = assertThrows(JacquardException.class, () -> data.decode(invalidating, data.encode(Codec.INT, 1L))).getMessage();
+        assertEquals(JacquardException.MESSAGE_LIMIT, mapping.length());
+    }
+
+    /** A codec building a constructor by name has its fields counted before they are copied. */
+    @Test
+    void aConstructorWithTooManyFieldsIsRefusedBeforeItIsBuilt() throws Exception {
+        Data data = fixture(Limits.HARD);
+        Value one = data.encode(Codec.INT, 1L);
+        Codec<Long> wide = new Codec<>() {
+            @Override
+            public Value encode(Encoder encoder, Long value) throws JacquardException {
+                return encoder.constructor("routed", Collections.nCopies(value.intValue(), one));
+            }
+
+            @Override
+            public Long decode(Decoder decoder, Value value) {
+                return 0L;
+            }
+        };
+        assertEquals("value: constructor exceeds max_collection_items", refusal(() -> data.encode(wide, 20_000_000L)));
+        assertEquals("value: constructor exceeds max_collection_items", refusal(() -> data.encode(wide, (long) Limits.HARD.maxCollectionItems() + 1)));
     }
 
     @Test

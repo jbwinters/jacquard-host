@@ -269,6 +269,11 @@ final class Core {
 
     /** Finds an executable the way a shell would, then resolves symbolic links. */
     static Path executable(String binary) throws JacquardException {
+        // No path is this long (PATH_MAX is 4096 on Linux), so a longer name is refused before it is used.
+        if (binary.length() > Identities.NAME_LIMIT) {
+            throw JacquardException.preparation("cannot find Core executable " + Identities.excerpt(binary)
+                    + "; configure JACQUARD_BIN using the setup guide");
+        }
         JacquardException missing = JacquardException.preparation(
                 "cannot find Core executable " + binary + "; configure JACQUARD_BIN using the setup guide");
         Path candidate = null;

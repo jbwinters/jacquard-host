@@ -52,6 +52,10 @@ class RuntimeTest {
         JacquardException missing = assertThrows(JacquardException.class, () -> runtime.prepare(List.of(Path.of("rules.jac")), PrepareOptions.defaults()));
         assertTrue(missing.getMessage().contains("cannot find Core executable /no/such/jacquard"), missing.getMessage());
         assertEquals(0, runtime.coreCommands());
+        // A name longer than any path is refused with an excerpt, never used or copied whole.
+        Runtime huge = new Runtime(base.withBinary("/" + "x".repeat(1_000_000)));
+        String refused = assertThrows(JacquardException.class, () -> huge.prepare(List.of(Path.of("rules.jac")), PrepareOptions.defaults())).getMessage();
+        assertTrue(refused.startsWith("cannot find Core executable /" + "x".repeat(63) + "... (1000001 chars)"), refused.substring(0, 100));
     }
 
     @Test

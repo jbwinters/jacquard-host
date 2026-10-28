@@ -48,12 +48,17 @@ public final class JacquardException extends Exception {
         this.completed = completed;
     }
 
-    private static String bounded(String message) {
+    /** {@code message} in at most {@link #MESSAGE_LIMIT} chars, its start kept and its length noted. */
+    static String bounded(String message) {
         if (message == null || message.length() <= MESSAGE_LIMIT) {
             return message;
         }
-        int end = Character.isHighSurrogate(message.charAt(MESSAGE_LIMIT - 1)) ? MESSAGE_LIMIT - 1 : MESSAGE_LIMIT;
-        return message.substring(0, end) + "... (" + message.length() + " chars)";
+        String suffix = "... (" + message.length() + " chars)";
+        int end = MESSAGE_LIMIT - suffix.length();
+        if (Character.isHighSurrogate(message.charAt(end - 1))) {
+            end--;
+        }
+        return message.substring(0, end) + suffix;
     }
 
     static JacquardException preparation(String message) {
@@ -85,12 +90,13 @@ public final class JacquardException extends Exception {
 
     /** An invalid argument at a value's location, such as {@code shipping-cost.argument[0]}. */
     static JacquardException invalidAt(String path, String message) {
-        return invalid(path + ": " + message);
+        // Bounded before it is joined, so a caller's huge message is never copied whole.
+        return invalid(bounded(path) + ": " + bounded(message));
     }
 
     /** As {@link #invalidAt(String, String)}, keeping the exception that caused it. */
     static JacquardException invalidAt(String path, String message, Throwable cause) {
-        return new JacquardException(Kind.INVALID_ARGUMENT, path + ": " + message, null, cause, -1, List.of());
+        return new JacquardException(Kind.INVALID_ARGUMENT, bounded(path) + ": " + bounded(message), null, cause, -1, List.of());
     }
 
     /** A failed invocation; {@code result} is not ok. */

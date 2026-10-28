@@ -320,16 +320,20 @@ deadline (default 30 s) that bounds each worker lifetime; see
 ## Errors
 
 Every failure to prepare, bind, encode, call, or decode is a checked
-`JacquardException`, including an unchecked exception thrown by your own codec,
-record accessor, or record constructor: while a value is encoded, by a
+`JacquardException`, including a `RuntimeException` thrown by your own codec
+and any exception a record's accessor or canonical constructor throws (an
+`Error` thrown by your codec itself, such as `OutOfMemoryError`, is left to
+propagate): while a value is encoded, by a
 function or by `Data.encode`, it is an `INVALID_ARGUMENT` naming the value,
 and while a value is decoded, by `Data.decode`, `Invocation.decode`, `call`,
 or `mapBatches`, a `BINDING` failure (from `Invocation.decode`, `call`, and
 `mapBatches`, with the raw result kept); either way your exception is its
 `getCause()`.
-Messages quote your text, such as a name or your codec's message, as an
-excerpt of at most 64 chars and its length, and no message is kept past 8,192
-chars. Two others are left to their usual types: building a
+Names and exception messages the SDK quotes (a constructor, type, field,
+effect, operation, or executable name, or your exception's message) appear
+as an excerpt of at most 64 chars and its length. A message you pass to
+`Encoder.invalid` or `Decoder.mapping` is kept as written, and no message is
+longer than 8,192 chars, the start kept and the length noted. Two others are left to their usual types: building a
 codec from a type it cannot map (for example `Codec.of(Object.class)`) throws
 `IllegalArgumentException` at construction, before any call, and
 `Invocation.save` throws `IOException`. A `JacquardException`'s `kind()` is:
@@ -340,8 +344,8 @@ codec from a type it cannot map (for example `Codec.of(Object.class)`) throws
   `Invocation.decode`, and `mapBatches`. `failure()` classifies it as
   `DEADLINE_EXCEEDED`, `WORKER_LOST`, `OPERATION_FAILED`, or `OTHER`, and
   `result()` keeps the raw result.
-- `BINDING`: an unknown name, a missing handler, or a result that does not
-  decode into the requested type. In the decode case, `result()` keeps the
+- `BINDING`: such as an unknown name, a missing handler, invalid runtime
+  options, or a result that does not decode into the requested type. In the decode case, `result()` keeps the
   successful Core result.
 - `PREPARATION`: checking, the cache, and the Core commands.
 

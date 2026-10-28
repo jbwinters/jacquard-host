@@ -157,6 +157,26 @@ class SdkLiveTest {
         }
         List<Triage> results = route.mapBatches(TRIAGE, rows, 8, policy);
         assertEquals(rows.size(), results.size());
+        // An item codec that throws on the second batch: the failure names that batch, keeps the first, and has the codec's exception as its cause.
+        int[] decoded = {0};
+        Codec<Triage> failing = new Codec<>() {
+            @Override
+            public org.jacquardlang.host.protocol.Value encode(Encoder encoder, Triage value) throws JacquardException {
+                return TRIAGE.encode(encoder, value);
+            }
+
+            @Override
+            public Triage decode(Decoder decoder, org.jacquardlang.host.protocol.Value value) throws JacquardException {
+                if (++decoded[0] > 8) {
+                    throw new IllegalStateException("second batch");
+                }
+                return TRIAGE.decode(decoder, value);
+            }
+        };
+        JacquardException batch = assertThrows(JacquardException.class, () -> route.mapBatches(failing, rows.subList(0, 16), 8, policy));
+        assertEquals(1, batch.batchIndex());
+        assertEquals(8, batch.completed().size());
+        assertTrue(batch.getCause() instanceof IllegalStateException, "the codec's exception is not the cause: " + batch.getCause());
         for (int i = 0; i < rows.size(); i++) {
             Incident row = rows.get(i);
             boolean page = row.visible() && row.severity() >= 4;
