@@ -106,12 +106,35 @@ public final class Data {
     }
 
     /**
-     * Decodes a boundary value into a native value.
+     * Decodes a boundary value into a native value. The value is first
+     * measured, within the selected {@code max_value_nodes} and nesting
+     * limits, so a shared or deep value cannot make decoding unbounded; every
+     * value Core sends is within them.
      *
      * @throws JacquardException a binding failure when it does not decode
      */
     public <T> T decode(Codec<T> codec, Value value) throws JacquardException {
+        measure(value, 0, new int[1]);
         return codec.decode(new Decoder(this), value);
+    }
+
+    /** Refuses a value with more nodes than {@code max_value_nodes}, or nested past the JSON depth. */
+    private void measure(Value value, int level, int[] nodes) throws JacquardException {
+        if (++nodes[0] > limits.maxValueNodes()) {
+            throw JacquardException.binding("value exceeds max_value_nodes");
+        }
+        // A value at the top of a frame's payload is at JSON depth 3, and each level adds 2.
+        if (3L + 2L * level > limits.maxJsonDepth()) {
+            throw JacquardException.binding("value exceeds the v0 JSON depth");
+        }
+        List<Value> children = switch (value) {
+            case Value.Tuple tuple -> tuple.items();
+            case Value.Constructor constructor -> constructor.arguments();
+            default -> List.of();
+        };
+        for (Value child : children) {
+            measure(child, level + 1, nodes);
+        }
     }
 
     String primitive(BoundaryType expected) {

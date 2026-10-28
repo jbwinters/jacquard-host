@@ -295,6 +295,16 @@ class DataTest {
         Value rawTop = new Value.Tuple(Collections.nCopies(1024, new Value.Tuple(Collections.nCopies(1024, rawLeaf))));
         String raw = assertTimeoutPreemptively(Duration.ofSeconds(30), () -> refusal(() -> data.encode(Codec.VALUE, rawTop)));
         assertEquals("value: value exceeds max_value_nodes; use smaller independent batches", raw);
+        // Decoding a supplied value is measured first, within the same bounds.
+        JacquardException decoded = assertTimeoutPreemptively(Duration.ofSeconds(30),
+                () -> assertThrows(JacquardException.class, () -> data.decode(Codec.DYNAMIC, rawTop)));
+        assertEquals("value exceeds max_value_nodes", decoded.getMessage());
+        Value deep = new Value.Int(1);
+        for (int i = 0; i < 100_000; i++) {
+            deep = new Value.Tuple(List.of(deep));
+        }
+        Value nested = deep;
+        assertEquals("value exceeds the v0 JSON depth", assertThrows(JacquardException.class, () -> data.decode(Codec.DYNAMIC, nested)).getMessage());
     }
 
     /**
