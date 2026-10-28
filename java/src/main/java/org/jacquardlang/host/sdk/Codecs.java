@@ -568,8 +568,17 @@ final class Codecs {
             this.leaves = List.copyOf(flat);
         }
 
+        /** {@code codec}, or what a finished lazy one stands for. */
+        private static Cases<?> resolved(Cases<?> codec) {
+            while (codec instanceof Lazy lazy && lazy.target != null) {
+                codec = lazy.target;
+            }
+            return codec;
+        }
+
         private static void flatten(List<Cases<?>> cases, java.util.Set<Object> seen, List<Cases<?>> out) {
-            for (Cases<?> each : cases) {
+            for (Cases<?> given : cases) {
+                Cases<?> each = resolved(given);
                 if (!seen.add(each)) {
                     continue;
                 }
@@ -620,6 +629,11 @@ final class Codecs {
             }
             throw decoder.mismatch(type.getSimpleName());
         }
+    }
+
+    /** Test seam: how many distinct cases a union codec decodes through, or -1 for another codec. */
+    static int unionCases(Codec<?> codec) {
+        return codec instanceof UnionCodec<?> union ? union.leaves.size() : -1;
     }
 
     @SuppressWarnings("unchecked")
@@ -749,7 +763,9 @@ final class Codecs {
         }
         Lazy pending = seen.get(plain);
         if (pending != null) {
-            return pending;
+            // A finished type is shared as itself, so unions can flatten it;
+            // only a type still being derived (a recursive field) stays lazy.
+            return pending.target != null ? pending.target : pending;
         }
         Lazy lazy = new Lazy();
         seen.put(plain, lazy);

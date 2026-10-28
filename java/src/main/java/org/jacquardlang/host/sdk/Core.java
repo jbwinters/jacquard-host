@@ -278,10 +278,19 @@ final class Core {
         String text = path.toString();
         // As given first, so a huge path is not copied again; then as the
         // file system will see it, since a relative path grows.
-        if (text.length() > PATH_LIMIT || path.toAbsolutePath().toString().length() > PATH_LIMIT) {
+        if (text.length() > PATH_LIMIT || absoluteLength(path) > PATH_LIMIT) {
             throw JacquardException.preparation(what + " " + Identities.excerpt(text) + " is longer than any path");
         }
         return path;
+    }
+
+    /** The length of {@code path} made absolute, or one past the limit when it cannot be (the JDK throws unchecked then). */
+    static int absoluteLength(Path path) {
+        try {
+            return path.toAbsolutePath().toString().length();
+        } catch (java.io.IOError | SecurityException error) {
+            return PATH_LIMIT + 1;
+        }
     }
 
     /** Finds an executable the way a shell would, then resolves symbolic links. */
