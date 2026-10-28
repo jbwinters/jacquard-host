@@ -69,7 +69,8 @@ final class Owner {
         }
         Set<PosixFilePermission> permissions = attributes.permissions();
         if (permissions.contains(PosixFilePermission.GROUP_WRITE) || permissions.contains(PosixFilePermission.OTHERS_WRITE)) {
-            throw JacquardException.preparation("cache path " + path + " is group- or world-writable; only its owner may write the cache");
+            throw JacquardException.preparation("cache path " + path + " is group- or world-writable; only its owner may write the cache"
+                    + " (make it owner-only, for example chmod " + (attributes.isDirectory() ? "700 " : "600 ") + path + ")");
         }
     }
 

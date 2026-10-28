@@ -178,7 +178,8 @@ class RuntimeTest {
             assertEquals("Core check failed: preparation was cancelled or interrupted", error.getMessage());
             FakeCore.dies("the cancelled command's child", fake.pid("child.pid"));
             canceller.join();
-            assertFalse(fake.stagingLeft());
+            // The cleanup observes the stop too, so the unpublished staging directory stays.
+            assertTrue(fake.stagingLeft());
         }
     }
 
@@ -614,6 +615,225 @@ class RuntimeTest {
                 Core.treeEntries = Core.TREE_ENTRIES;
             }
             assertEquals(0, fake.calls("check"));
+        }
+    }
+
+    /** A source list that counts the elements read, and fails a read past {@code limit}. */
+    private static final class CountingList extends java.util.AbstractList<Path> {
+        final java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        final List<Integer> indices = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private final int size;
+        private final Path element;
+        private final int limit;
+        private final java.util.function.IntConsumer onRead;
+
+        CountingList(int size, Path element, int limit, java.util.function.IntConsumer onRead) {
+            this.size = size;
+            this.element = element;
+            this.limit = limit;
+            this.onRead = onRead;
+        }
+
+        @Override
+        public Path get(int index) {
+            if (reads.incrementAndGet() > limit) {
+                throw new AssertionError("read past the source cap");
+            }
+            indices.add(index);
+            onRead.accept(index);
+            return element;
+        }
+
+        @Override
+        public int size() {
+            return size;
+        }
+    }
+
+    /**
+     * A source list over 1,024 is refused from its size, before any element
+     * is read; {@code Collections.nCopies(Integer.MAX_VALUE, ...)} hung the
+     * extension scan before. A list of exactly 1,024 passes that check.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aHugeSourceListIsRefusedBeforeAnyElementIsRead() throws Exception {
+        assertEquals(1024, Runtime.SOURCE_FILES);
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("count"))) {
+            Path source = fake.source("rules.jac");
+            CountingList huge = new CountingList(Integer.MAX_VALUE, source, 2048, index -> {});
+            JacquardException error = assertThrows(JacquardException.class, () -> fake.runtime.prepare(huge, fake.options()));
+            assertEquals("more than 1024 sources", error.getMessage());
+            assertEquals(JacquardException.Kind.PREPARATION, error.kind());
+            assertEquals(0, huge.reads.get());
+            CountingList over = new CountingList(1025, source, 2048, index -> {});
+            assertEquals("more than 1024 sources", assertThrows(JacquardException.class, () -> fake.runtime.prepare(over, fake.options())).getMessage());
+            assertEquals(0, over.reads.get());
+            CountingList most = new CountingList(1024, source, 2048, index -> {});
+            fake.runtime.prepare(most, fake.options());
+            assertEquals(1024, most.reads.get());
+        }
+    }
+
+    /** A cancel or an interrupt set while the list is validated stops it before the next element is read. */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aStopDuringSourceValidationIsObserved() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("validate"))) {
+            Path source = fake.source("rules.jac");
+            Cancel cancel = new Cancel();
+            CountingList cancelled = new CountingList(3, source, 3, index -> {
+                if (index == 1) {
+                    cancel.cancel();
+                }
+            });
+            assertEquals(Core.ABORTED, assertThrows(JacquardException.class, () -> fake.runtime.prepare(cancelled, fake.options(), cancel)).getMessage());
+            assertEquals(List.of(0, 1), cancelled.indices);
+            CountingList interrupted = new CountingList(3, source, 3, index -> {
+                if (index == 1) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            try {
+                assertEquals(Core.ABORTED, assertThrows(JacquardException.class, () -> fake.runtime.prepare(interrupted, fake.options())).getMessage());
+                assertTrue(Thread.interrupted(), "the interrupt status was cleared");
+            } finally {
+                Thread.interrupted();
+            }
+            assertEquals(List.of(0, 1), interrupted.indices);
+            assertEquals(0, fake.calls("--version"));
+        }
+    }
+
+    /** A fake whose {@code run} leaves ten files in its store and fails. */
+    private static FakeCore failingStore(Path scratch) throws Exception {
+        return FakeCore.create(scratch, Compat.CORE_VERSION, null, "check) echo 'first : () ->{} Int' ;;\n"
+                + "hash) echo '0:first " + FakeCore.FIRST + "' ;;\n"
+                + "run) mkdir -p \"$4\" && for i in 0 1 2 3 4 5 6 7 8 9; do : > \"$4/f$i\"; done; exit 4 ;;");
+    }
+
+    /** The cache's entries, each a staging directory or a published entry. */
+    private static List<String> cacheEntries(FakeCore fake) throws Exception {
+        try (Stream<Path> entries = Files.list(fake.root.resolve("cache"))) {
+            return entries.map(path -> path.getFileName().toString()).sorted().toList();
+        }
+    }
+
+    /**
+     * A failed preparation's cleanup removes its staging directory, but a
+     * cancel or an interrupt during the cleanup ends it at once (a test seam
+     * sets the stop after the second removal), leaving the unpublished
+     * staging directory; nothing is published either way.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aStopDuringTheFailureCleanupEndsIt() throws Exception {
+        try (FakeCore fake = failingStore(scratch.resolve("cleanup"))) {
+            List<Path> removed = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Runtime.cleanupHook = removed::add;
+            try {
+                assertTrue(fake.prepareFails().getMessage().endsWith("Core run failed: exit status 4"));
+                assertEquals(13, removed.size(), removed.toString());
+                assertEquals(List.of(), cacheEntries(fake));
+                removed.clear();
+                Cancel cancel = new Cancel();
+                Runtime.cleanupHook = path -> {
+                    removed.add(path);
+                    if (removed.size() == 2) {
+                        cancel.cancel();
+                    }
+                };
+                assertEquals(Core.ABORTED, fake.prepareFails("rules.jac", cancel).getMessage());
+                assertEquals(2, removed.size(), removed.toString());
+                List<String> left = cacheEntries(fake);
+                assertEquals(1, left.size(), left.toString());
+                assertTrue(left.get(0).startsWith("prepare-"), left.toString());
+                assertTrue(Files.exists(fake.root.resolve("cache").resolve(left.get(0)).resolve("store")));
+                removed.clear();
+                Runtime.cleanupHook = path -> {
+                    removed.add(path);
+                    if (removed.size() == 2) {
+                        Thread.currentThread().interrupt();
+                    }
+                };
+                assertEquals(Core.ABORTED, fake.prepareFails().getMessage());
+                assertTrue(Thread.interrupted(), "the interrupt status was cleared");
+                assertEquals(2, removed.size(), removed.toString());
+                assertEquals(2, cacheEntries(fake).size());
+                assertTrue(cacheEntries(fake).stream().allMatch(name -> name.startsWith("prepare-")), cacheEntries(fake).toString());
+            } finally {
+                Runtime.cleanupHook = null;
+                Thread.interrupted();
+            }
+        }
+    }
+
+    /** The failure cleanup removes at most the tree cap's entries (a test seam lowers it to 3), leaving the rest unpublished. */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void theFailureCleanupStopsAtTheCap() throws Exception {
+        try (FakeCore fake = failingStore(scratch.resolve("capped"))) {
+            List<Path> removed = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Runtime.cleanupHook = removed::add;
+            Core.treeEntries = 3;
+            try {
+                assertTrue(fake.prepareFails().getMessage().endsWith("Core run failed: exit status 4"));
+            } finally {
+                Core.treeEntries = Core.TREE_ENTRIES;
+                Runtime.cleanupHook = null;
+            }
+            assertEquals(3, removed.size(), removed.toString());
+            List<String> left = cacheEntries(fake);
+            assertEquals(1, left.size(), left.toString());
+            assertTrue(left.get(0).startsWith("prepare-"), left.toString());
+        }
+    }
+
+    /**
+     * A cache root reached through a symbolic link is checked as the real
+     * directory it names (the link's own mode reads 0777), and its entries
+     * live there; a group-writable real root is refused with a hint.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aSymlinkedCacheRootIsFollowedToItsRealDirectory() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("link"))) {
+            Path real = Files.createDirectory(fake.root.resolve("real-cache"), PosixFilePermissions.asFileAttribute(Owner.DIRECTORY));
+            Path link = Files.createSymbolicLink(fake.root.resolve("linked-cache"), real);
+            Program program = fake.runtime.prepare(List.of(fake.source("rules.jac")), new PrepareOptions(link));
+            assertEquals(real.toRealPath(), program.directory().getParent());
+            try (Stream<Path> entries = Files.list(real)) {
+                assertEquals(1L, entries.count());
+            }
+            assertEquals(program.directory(), fake.runtime.prepare(List.of(fake.source("rules.jac")), new PrepareOptions(link)).directory());
+            Files.setPosixFilePermissions(real, PosixFilePermissions.fromString("rwxrwx---"));
+            JacquardException error = assertThrows(JacquardException.class,
+                    () -> fake.runtime.prepare(List.of(fake.source("rules.jac")), new PrepareOptions(link)));
+            assertEquals("cache path " + real.toRealPath() + " is group- or world-writable; only its owner may write the cache"
+                    + " (make it owner-only, for example chmod 700 " + real.toRealPath() + ")", error.getMessage());
+        }
+    }
+
+    /**
+     * A later preparation removes a staging directory left over an hour ago,
+     * and keeps a younger one, which may belong to a live preparation.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aLaterPreparationRemovesStaleStaging() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("stale"))) {
+            Path cache = Files.createDirectories(fake.root.resolve("cache"));
+            Files.setPosixFilePermissions(cache, Owner.DIRECTORY);
+            Path stale = Files.createDirectories(cache.resolve("prepare-1-00000000-0/store/objects"));
+            Files.writeString(stale.resolve("f"), "left");
+            Path old = cache.resolve("prepare-1-00000000-0");
+            Files.setLastModifiedTime(old, java.nio.file.attribute.FileTime.fromMillis(
+                    System.currentTimeMillis() - Runtime.STALE_STAGING.toMillis() - 60_000));
+            Path young = Files.createDirectories(cache.resolve("prepare-1-00000000-1"));
+            Path entry = fake.runtime.prepare(List.of(fake.source("rules.jac")), fake.options()).directory();
+            assertFalse(Files.exists(old), "the stale staging directory was kept");
+            assertTrue(Files.exists(young), "a young staging directory was removed");
+            assertEquals(List.of(young.getFileName().toString(), entry.getFileName().toString()).stream().sorted().toList(), cacheEntries(fake));
         }
     }
 }

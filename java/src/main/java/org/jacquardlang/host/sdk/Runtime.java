@@ -13,7 +13,6 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,7 +24,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
-import java.util.stream.Stream;
 
 import org.jacquardlang.host.Compat;
 import org.jacquardlang.host.ProtocolException;
@@ -51,6 +49,8 @@ public final class Runtime {
     private static final long POLL_MAX = TimeUnit.MILLISECONDS.toNanos(10);
     /** The most source bytes one preparation reads, separators included. */
     public static final long SOURCE_LIMIT = 16L << 20;
+    /** The most source files one preparation takes; a longer list is refused from its size before any element is read. */
+    public static final int SOURCE_FILES = 1024;
     private static final List<String> PRELUDE_FILES = List.of("01-prim.jqd", "02-data.jqd", "19-audit.jqd");
     /** Core's raw outputs, kept as verified files of each cache entry, from which every binding is derived. */
     static final String CHECK_OUTPUT = "core/check.out";
@@ -311,14 +311,32 @@ public final class Runtime {
 
     private Program prepareChecked(List<Path> sources, PrepareOptions options, Cancel cancel) throws JacquardException {
         JacquardException usage = JacquardException.preparation("pass .jac files or .jqd files in dependency order");
-        if (sources.isEmpty()) {
+        // The count comes from size() alone, before any element is read.
+        int count = sources.size();
+        if (count == 0) {
             throw usage;
         }
-        String syntax = extension(sources.get(0));
-        if (!(".jac".equals(syntax) || ".jqd".equals(syntax)) || sources.stream().anyMatch(source -> !syntax.equals(extension(source)))) {
-            throw usage;
+        if (count > SOURCE_FILES) {
+            throw JacquardException.preparation("more than " + SOURCE_FILES + " sources");
         }
-        Path cache = (options.cacheDir() == null ? Path.of(DEFAULT_CACHE_DIR) : options.cacheDir()).toAbsolutePath();
+        String syntax = null;
+        // Each element is read once, so the files read below are the ones checked here.
+        List<Path> checked = new ArrayList<>(Math.min(count, SOURCE_FILES));
+        for (int i = 0; i < count; i++) {
+            if (stopped(cancel)) {
+                throw JacquardException.preparation(Core.ABORTED);
+            }
+            Path source = java.util.Objects.requireNonNull(sources.get(i), "source");
+            checked.add(source);
+            String kind = extension(source);
+            if (syntax == null) {
+                syntax = kind;
+            }
+            if (!(".jac".equals(kind) || ".jqd".equals(kind)) || !syntax.equals(kind)) {
+                throw usage;
+            }
+        }
+        Path configured = (options.cacheDir() == null ? Path.of(DEFAULT_CACHE_DIR) : options.cacheDir()).toAbsolutePath();
         Path executable = Core.executable(binary);
         String binaryHash;
         try {
@@ -333,7 +351,7 @@ public final class Runtime {
         } catch (JacquardException error) {
             throw JacquardException.preparation("cannot read prelude " + prelude + ": " + error.getMessage());
         }
-        byte[] bytes = readSources(sources, cancel);
+        byte[] bytes = readSources(checked, cancel);
         TreeMap<String, String> identity = new TreeMap<>(Json.CODE_POINT_ORDER);
         identity.put("binary", binaryHash);
         identity.put("prelude", preludeHash);
@@ -341,22 +359,27 @@ public final class Runtime {
         identity.put("schema", PROGRAM_SCHEMA);
         identity.put("source", Core.digest(bytes));
         identity.put("syntax", syntax);
-        Path directory = cache.resolve(Core.mapDigest(identity));
+        Path cache;
         try {
             if (Owner.posix()) {
-                Files.createDirectories(cache, PosixFilePermissions.asFileAttribute(Owner.DIRECTORY));
+                Files.createDirectories(configured, PosixFilePermissions.asFileAttribute(Owner.DIRECTORY));
             } else {
-                Files.createDirectories(cache);
+                Files.createDirectories(configured);
             }
+            // A symbolic link to the cache root is followed once, here; the
+            // real directory is checked, and nothing inside it is followed.
+            cache = configured.toRealPath();
         } catch (IOException error) {
-            throw JacquardException.preparation("cannot create " + cache + ": " + error.getMessage());
+            throw JacquardException.preparation("cannot create " + configured + ": " + error.getMessage());
         }
+        Path directory = cache.resolve(Core.mapDigest(identity));
         // Only the cache's owner may write it; nothing inside it can resist
         // someone else who may.
         Owner.check(cache, Core.Access.OWNER_ONLY);
         if (Files.exists(directory)) {
             return load(directory, identity, executable, cancel);
         }
+        removeStaleStaging(cache, cancel);
         Path staging = stagingDirectory(cache);
         try {
             Path snapshot = staging.resolve("source" + syntax);
@@ -389,7 +412,7 @@ public final class Runtime {
                 }
             }
         } finally {
-            removeTree(staging);
+            removeTree(staging, cancel);
         }
         return load(directory, identity, executable, cancel);
     }
@@ -492,17 +515,99 @@ public final class Runtime {
         throw JacquardException.preparation("cannot create a staging directory");
     }
 
-    /** Removes a staging directory unless it was published (and so no longer exists). */
-    private static void removeTree(Path root) {
-        if (!Files.exists(root)) {
+    /** Test seam: runs after the failure cleanup removes each entry, with its path. Null outside tests. */
+    static volatile java.util.function.Consumer<Path> cleanupHook;
+
+    /**
+     * Removes a staging directory unless it was published (and so no longer
+     * exists), in a streamed post-order walk that holds one directory
+     * iterator per level. It removes at most {@link Core#TREE_ENTRIES}
+     * entries, and ends at the first cancel or interrupt (which it never
+     * clears), checked before each entry. What it leaves is an unpublished
+     * {@code prepare-*} directory, which is never loaded as a cache entry:
+     * entries are named by their identity digest.
+     */
+    static void removeTree(Path root, Cancel cancel) {
+        removeTree(root, cancel, new int[] {Core.treeEntries});
+    }
+
+    /** {@link #removeTree(Path, Cancel)}, removing at most {@code budget[0]} entries and charging each removal to it. */
+    private static void removeTree(Path root, Cancel cancel, int[] budget) {
+        if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
             return;
         }
-        try (Stream<Path> walk = Files.walk(root)) {
-            for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
-                Files.deleteIfExists(path);
-            }
+        int[] removed = {0};
+        int cap = budget[0];
+        try {
+            Files.walkFileTree(root, new java.nio.file.SimpleFileVisitor<>() {
+                private java.nio.file.FileVisitResult remove(Path path) throws IOException {
+                    if (stopped(cancel) || removed[0] >= cap) {
+                        return java.nio.file.FileVisitResult.TERMINATE;
+                    }
+                    Files.deleteIfExists(path);
+                    removed[0]++;
+                    java.util.function.Consumer<Path> hook = cleanupHook;
+                    if (hook != null) {
+                        hook.accept(path);
+                    }
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attributes) {
+                    return stopped(cancel) || removed[0] >= cap ? java.nio.file.FileVisitResult.TERMINATE
+                            : java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult visitFile(Path file, BasicFileAttributes attributes) throws IOException {
+                    return remove(file);
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult postVisitDirectory(Path directory, IOException error) throws IOException {
+                    if (error != null) {
+                        throw error;
+                    }
+                    return remove(directory);
+                }
+            });
         } catch (IOException | RuntimeException ignored) {
             // Left for the user to remove; it never becomes a cache entry.
+        } finally {
+            budget[0] -= removed[0];
+        }
+    }
+
+    /** How old a staging directory must be before a later preparation removes it. */
+    static final Duration STALE_STAGING = Duration.ofHours(1);
+
+    /**
+     * Removes staging directories that an earlier preparation left (a stop
+     * ended its cleanup) and that were last modified over
+     * {@link #STALE_STAGING} ago, best effort: the cache root's listing and
+     * the removals together visit at most {@link Core#TREE_ENTRIES} entries,
+     * and a cancel or interrupt ends it. A live preparation's staging
+     * directory is younger: each Core command is bounded by 30 seconds.
+     */
+    private static void removeStaleStaging(Path cache, Cancel cancel) {
+        int[] budget = {Core.treeEntries};
+        long cutoff = System.currentTimeMillis() - STALE_STAGING.toMillis();
+        try (java.nio.file.DirectoryStream<Path> entries = Files.newDirectoryStream(cache)) {
+            for (Path entry : entries) {
+                if (stopped(cancel) || --budget[0] <= 0) {
+                    return;
+                }
+                if (!entry.getFileName().toString().startsWith("prepare-")) {
+                    continue;
+                }
+                BasicFileAttributes attributes = Files.readAttributes(entry, BasicFileAttributes.class, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                if (attributes.isDirectory() && attributes.lastModifiedTime().toMillis() < cutoff) {
+                    removeTree(entry, cancel, budget);
+                }
+            }
+        } catch (IOException | RuntimeException ignored) {
+            // Best effort; what is left is never loaded.
         }
     }
 
