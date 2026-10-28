@@ -25,9 +25,12 @@ import java.util.concurrent.locks.LockSupport;
  * the timeout, the {@link Cancel}, and the caller's interrupt status, which is
  * never cleared. Its stdin is the null device.
  *
- * <p>On Linux, when util-linux {@code setsid} is installed (at
- * {@code /usr/bin/setsid} or {@code /bin/setsid}), the command runs as
- * {@code setsid -- <command>}. The JDK's child is never a process group
+ * <p>On Linux, when a {@code setsid} is installed at {@code /usr/bin/setsid}
+ * or {@code /bin/setsid} (util-linux's, or a compatible one such as
+ * BusyBox's; any executable there is used), the command runs as
+ * {@code setsid -- <command>}. When {@code setsid} cannot exec the command
+ * (exit status 126 or 127 with its own {@code "setsid: "} message), the run
+ * is reported as a start failure, as without {@code setsid}. The JDK's child is never a process group
  * leader, so {@code setsid} starts a new session and execs the command
  * without forking: the command keeps the child's pid and leads a new process
  * group whose id is that pid. Every descendant that does not leave the group
@@ -38,7 +41,10 @@ import java.util.concurrent.locks.LockSupport;
  * group id is the command's. The JDK checks the handle's start time before
  * signalling, so a pid reused after the handle was acquired is not killed,
  * and a group with a live member keeps its id, so a matching id proves
- * membership. A pass always runs to the end, and passes repeat (at most
+ * membership unless the id was reused after the group emptied: a process
+ * that took Core's pid after a full pid wraparound, made its own group, and
+ * forked a child before exiting itself can have that child killed by a pass
+ * still running (the same window as Rust's {@code kill(-pgid)}). A pass always runs to the end, and passes repeat (at most
  * {@link #GROUP_PASSES}) until one finds no live member. A descendant that
  * leaves the group (calls {@code setsid} itself) is neither detected nor
  * killed; the host closes its ends of the output after the exit, so its next
@@ -236,6 +242,18 @@ public final class Command {
     }
 
     /**
+     * Whether {@code setsid} itself failed to exec the command: it exits
+     * 126 (cannot execute) or 127 (not found) and its message, unlike the
+     * command's, starts with {@code "setsid: "} (util-linux and BusyBox both
+     * print that prefix). The command never ran then.
+     */
+    static boolean setsidFailed(Output output) {
+        int status = output.exitStatus();
+        return (status == 126 || status == 127)
+                && new String(output.stderr(), java.nio.charset.StandardCharsets.UTF_8).startsWith("setsid: ");
+    }
+
+    /**
      * The command's executable, resolved on the {@code PATH} when it names no
      * directory, so that one {@code setsid} cannot exec is reported as a
      * start failure, as without {@code setsid}.
@@ -420,7 +438,13 @@ public final class Command {
         Recorded recorded = grouped ? null : new Recorded();
         boolean[] cleaned = {false};
         try {
-            return await(process, pipes, grouped, recorded, cleaned, expires, cancel, stdoutLimit, stderrLimit);
+            Output output = await(process, pipes, grouped, recorded, cleaned, expires, cancel, stdoutLimit, stderrLimit);
+            if (grouped && setsidFailed(output)) {
+                String detail = new String(output.stderr(), java.nio.charset.StandardCharsets.UTF_8).strip();
+                int line = detail.indexOf('\n');
+                throw CarrierException.loss("could not start " + command.get(0) + " (" + (line < 0 ? detail : detail.substring(0, line)) + ")");
+            }
+            return output;
         } finally {
             if (!cleaned[0]) {
                 if (grouped) {

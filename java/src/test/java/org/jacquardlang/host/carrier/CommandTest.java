@@ -479,6 +479,30 @@ class CommandTest {
         assertTrue(error.getMessage().startsWith("could not start"), error.getMessage());
     }
 
+    /**
+     * A command that {@code setsid} cannot exec (its interpreter is missing)
+     * is a start failure, as it is for the JDK without {@code setsid}, not an
+     * exit status 127 from a command that never ran.
+     */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void aCommandSetsidCannotExecIsALoss() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(Command.grouped(), "no setsid");
+        Path script = scratch.resolve("no-interpreter");
+        Files.writeString(script, "#!" + scratch.resolve("missing-interpreter") + "\n");
+        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwx------"));
+        CarrierException error = assertThrows(CarrierException.class,
+                () -> Command.run(List.of(script.toString()), Map.of(), MINUTE, 10, 4096, new Cancel()));
+        assertTrue(error.isLoss() && !error.isTimeout() && !error.isAborted(), error.getMessage());
+        assertTrue(error.getMessage().startsWith("could not start " + script + " (setsid: "), error.getMessage());
+        Command.withoutGroups = true;
+        error = assertThrows(CarrierException.class, () -> Command.run(List.of(script.toString()), Map.of(), MINUTE, 10, 4096, new Cancel()));
+        assertTrue(error.isLoss() && error.getMessage().startsWith("could not start " + script), error.getMessage());
+        // The command's own exit status 127 is still its result.
+        Command.withoutGroups = false;
+        assertEquals(127, sh("echo 'setsid-like' >&2; exit 127", MINUTE, new Cancel()).exitStatus());
+    }
+
     private static List<String> commandDirectories() throws IOException {
         try (Stream<Path> entries = Files.list(Path.of(System.getProperty("java.io.tmpdir")))) {
             return entries.map(path -> path.getFileName().toString()).filter(name -> name.startsWith("jacquard-command-")).sorted().toList();
