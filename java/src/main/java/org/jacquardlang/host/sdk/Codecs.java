@@ -448,6 +448,7 @@ final class Codecs {
 
         @Override
         public Value encode(Encoder encoder, R value) throws JacquardException {
+            encoder.checkCount(items.size(), "tuple");
             List<Value> encoded = new ArrayList<>();
             for (int i = 0; i < items.size(); i++) {
                 Object component;

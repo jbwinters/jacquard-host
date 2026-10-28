@@ -378,4 +378,78 @@ class DataTest {
         assertEquals("value: tuple exceeds max_collection_items", refusal(() -> data.encode(triple, List.of(1L, 2L, 3L))));
         assertEquals(0, encodes.get());
     }
+
+    /** A record whose accessors count their reads. */
+    record Counted(long a, long b, long c) {
+        static final java.util.concurrent.atomic.AtomicInteger READS = new java.util.concurrent.atomic.AtomicInteger();
+
+        @Override
+        public long a() {
+            READS.incrementAndGet();
+            return a;
+        }
+
+        @Override
+        public long b() {
+            READS.incrementAndGet();
+            return b;
+        }
+
+        @Override
+        public long c() {
+            READS.incrementAndGet();
+            return c;
+        }
+    }
+
+    /** A record crossing as a tuple over the collection limit is refused before any component is read. */
+    @Test
+    void anOversizedRecordTupleIsRefusedBeforeItsComponentsAreRead() throws Exception {
+        Counted.READS.set(0);
+        Codec<Counted> triple = Codec.tuple(Counted.class);
+        assertEquals("value: tuple exceeds max_collection_items",
+                refusal(() -> fixture(Limits.HARD.with("max_collection_items", 2)).encode(triple, new Counted(1, 2, 3))));
+        assertEquals(0, Counted.READS.get());
+        fixture(Limits.HARD.with("max_collection_items", 3)).encode(triple, new Counted(1, 2, 3));
+        assertEquals(3, Counted.READS.get());
+    }
+
+    private static String nested(int depth) {
+        // depth - 1 Options around an Int, printed as Core prints them (no
+        // parentheses around the innermost Int): a type of the given depth.
+        return "(" + "Option (".repeat(depth - 2) + "Option Int" + ")".repeat(depth - 2) + ") ->{} Int";
+    }
+
+    /**
+     * A signature's types may nest 64 levels, the protocol's value depth, and
+     * no deeper. Nesting is refused before the parser recurses past it, so
+     * 5,000 parentheses, which overflowed the stack before, and 100,000 are
+     * refused with a binding failure rather than an Error.
+     */
+    @Test
+    void signatureNestingIsBounded() throws Exception {
+        Map<String, Hash> names = Map.of("int", id('1'), "option", id('7'));
+        assertEquals(64, Identities.SIGNATURE_DEPTH);
+        BoundaryType type = Identities.parseSignature(nested(64), names).parameters().get(0);
+        int depth = 1;
+        while (type instanceof BoundaryType.Nominal nominal && !nominal.arguments().isEmpty()) {
+            type = nominal.arguments().get(0);
+            depth++;
+        }
+        assertEquals(64, depth);
+        String deep = "signature nests types deeper than 64 levels, the protocol's value-depth limit (max_json_depth)";
+        for (String text : List.of(nested(65), nested(2500), "(" + "(".repeat(5000) + "Int" + ")".repeat(5000) + ") ->{} Int")) {
+            JacquardException error = assertThrows(JacquardException.class, () -> Identities.parseSignature(text, names));
+            assertEquals(JacquardException.Kind.BINDING, error.kind());
+            assertEquals(deep, error.getMessage());
+        }
+        JacquardException huge = assertThrows(JacquardException.class,
+                () -> Identities.parseSignature("(" + "Option (".repeat(100_000) + "Int" + ")".repeat(100_000) + ") ->{} Int", names));
+        assertEquals(JacquardException.Kind.BINDING, huge.kind());
+        assertEquals("signature is longer than " + Identities.SIGNATURE_TOKENS + " tokens", huge.getMessage());
+        // A wide signature within the depth is refused by its type count.
+        String wide = "(" + "Int, ".repeat(Identities.SIGNATURE_NODES) + "Int) ->{} Int";
+        assertEquals("signature names more than 4096 types",
+                assertThrows(JacquardException.class, () -> Identities.parseSignature(wide, names)).getMessage());
+    }
 }
