@@ -97,9 +97,26 @@ keyed by:
 - every prelude file;
 - the protocol and preparation format.
 
+Each source must be a regular file (a symbolic link to one is followed), and
+all of them together at most 16 MiB (`Runtime.SOURCE_LIMIT`); both are checked
+from the files' attributes before a source is read, so a FIFO or device is
+refused rather than opened. The prelude and cache walks read regular files
+only (no symbolic links, FIFOs, or devices), at most 256 MiB under one root,
+checked from each file's size before it is read. Between files these reads
+observe the `Cancel` and the caller's interrupt. A source replaced by a FIFO
+between that check and its open can still block the open.
+
 The cache defaults to `.scratch/jacquard-host-java` under the working
-directory; `PrepareOptions` changes it. A changed or incomplete cache entry is
-refused rather than repaired. The `--version` check and prelude discovery run
+directory; `PrepareOptions` changes it. A cache entry keeps Core's raw
+`check --print-sigs` output and the `hash` output for the source and each
+prelude file beside the store, and `program.json` records every file's digest.
+Every binding (names, constructors, signatures, and declaration groups) is
+derived from those outputs, on the first preparation and again on each load.
+A load refuses an entry whose files do not match the recorded digests, or
+whose `program.json` bindings differ from what the outputs give, rather than
+repairing it. This detects a changed or incomplete entry; it is not a defence
+against someone who can write the cache, who could rewrite an output and its
+recorded digest together with the bindings. The `--version` check and prelude discovery run
 once per Core executable and prelude in the JVM, shared by every `Runtime`
 and thread. Each call runs one fresh worker. Prepare only first-party
 declaration sources: preparation runs Core's `run` command, without service
@@ -114,10 +131,11 @@ the same host-owned output FIFOs as the worker (see
 cancelling it, or interrupting the calling thread, kills the running command
 and a snapshot of its process tree, and fails the preparation. The interrupt
 status stays set, and a preparation waiting for another thread's version
-check or prelude discovery stops waiting too. Once a command exits, at most
-4 MiB more of each output is read and the host closes its ends, so a
-descendant that keeps the output open holds neither the caller nor the heap;
-as for the worker, a descendant that was already reparented keeps running.
+check or prelude discovery stops waiting too. Once a command exits, the host
+waits up to one second for its output to close; on Linux a process still
+holding it fails the command ("its output did not close", as in the Rust
+SDK) and is killed. Descendants recorded while the command ran are killed
+when it returns (see [Core's commands](#process-carrier)).
 
 Arguments are Java values encoded by their runtime class (see [data](#data)),
 or `codec.arg(value)` where the runtime class does not say enough, such as a
@@ -190,12 +208,19 @@ and its `Real` is a binary64 `double`, and there is no decimal type.
 
 Every encoding is bounded by the selected limits as it goes: the JSON depth
 the wire form needs, `max_collection_items` for each list and tuple,
-`max_value_nodes` values, `max_text_bytes` for each text, and
-`max_frame_bytes` for all texts together. A list or text over its limit is
-refused before its elements or characters are read, so a small Java value
+`max_value_nodes` values, `max_text_bytes` (in UTF-8 bytes) for each text, and
+`max_frame_bytes` for all texts together. A list, tuple, or text over its
+limit is refused before its items or characters are read, so a small Java value
 that denotes a huge one (1024 references to one tuple of 1024 references,
 say) costs no more than one frame. `Data.decode` measures a value within the
-same node and depth limits before it decodes it. `Program.data()` gives each
+same node and depth limits before it decodes it. Only what passes through the
+`Encoder` is charged: `Codec.VALUE` and `Value` arguments are walked within
+the same bounds, but a custom codec that returns a `Value` it built itself
+bypasses that budget. Such a value is still measured before it is sent: a
+function call renders the invoke frame, charging every argument's nodes,
+collection items, text bytes, depth, and frame size, before any worker
+starts, and the host measures a handler's result the same way. A value
+returned by `Data.encode` is not measured again. `Program.data()` gives each
 public name's exact identity. `Data.make` builds a `Dynamic.Variant` after
 checking that its constructor exists, and `Invocation.value` decodes any
 result into `Dynamic`.
@@ -270,9 +295,16 @@ Every SDK failure is a checked `JacquardException`, whose `kind()` is:
 
 `mapBatches` runs a pure function whose final parameter and result are Lists
 over explicit chunks of rows. It validates every batch before the first runs
-and retries nothing. A failed batch's exception names it in `batchIndex()`
-(-1 when a batch was refused before any worker started) and keeps the decoded
-values of the batches that completed in `completed()`.
+and retries nothing. Validation holds one batch's encoding at a time: each
+batch is encoded and checked, then discarded, and encoded and checked again
+just before it runs. Between batches it observes the `Cancel`, the caller's
+interrupt (which stays set), and the runtime's deadline (30 seconds by
+default), which bounds the whole validation. A stop there is reported as the
+host's aborted invocation, without a worker; a validation past the deadline
+is an `INVALID_ARGUMENT`. A failed batch's exception names it in
+`batchIndex()` (-1 when nothing ran: a batch was refused, or validation
+stopped) and keeps the decoded values of the batches that completed in
+`completed()`, in an unmodifiable list in which a unit result is `null`.
 
 A request argument that does not decode into a handler's parameter, or a
 wrong argument count, is reported as an outside failure, and that handler
@@ -502,16 +534,31 @@ cancellation.
 
 **Core's commands.** The SDK runs Core's `--version`, `check`, `hash`, and
 `run` through `Command`, with the same output FIFOs and polls, its stdin the
-null device. It waits for the command's exit, not for its output to close:
-once the command has exited, it reads at most 4 MiB more of each stream and
-closes its ends. A timeout, a cancellation, or the caller's interrupt kills
-a snapshot of the command's process tree, as for the worker; a descendant
-already reparented keeps running. Tests show that a reparented descendant
-flooding stderr after the command exits holds neither the caller nor the heap
-(on the JDK's own pipes the same test took 6.4 s in a local run), that
-timeout, cancellation, and interruption kill the command's child, the last
-keeping the interrupt status, and, on Linux, that repeated preparations with
-an escaped descendant holding Core's output leak no descriptor or thread.
+null device. While the command runs, its descendants are recorded about every
+10 ms, by pid and start time. Once it has exited, the host waits up to one
+second for the output to close. On Linux that means no other process of this
+user holds either FIFO, which the host finds by scanning `/proc/<pid>/fd`; a
+process still holding one fails the command with "its output did not close"
+(the Rust SDK's message) and is killed if it started no earlier than the
+command and still has the start time it was found with. Then at most 4 MiB
+more of each stream is read and the host closes its ends. Whatever the
+outcome, every recorded descendant still alive with its recorded start time
+is killed, so a reused pid is never signalled. A timeout, a cancellation, or
+the caller's interrupt also kills a snapshot of the command's process tree,
+as for the worker. A descendant that was never recorded (started and
+reparented between two records) and that holds no output keeps running. On
+macOS there is no `/proc`: a descendant holding the output is not detected,
+only recorded descendants are killed, and a holder's next write fails once
+the host closes its ends. Tests show, on Linux, that `sh -c 'sleep 300 & echo
+$!'` fails and its child is killed (also with recording off, so the `/proc`
+search alone finds it), that a sleeper and a reparented descendant flooding
+stderr fail the command within the grace and are both killed while the heap
+stays bounded (on the JDK's own pipes the flood held the caller for 6.4 s in
+a local run), and that an escaped (`setsid`) descendant holding Core's output
+is killed and repeated preparations leak no descriptor or thread; and, on
+Unix, that a recorded descendant that closed its output is killed when the
+command returns, and that timeout, cancellation, and interruption kill the
+command's child, the last keeping the interrupt status.
 
 ## Conformance kit
 

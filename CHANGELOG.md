@@ -43,13 +43,21 @@
   the selected limits before a worker starts, and keeps each invocation's raw
   evidence. Encoding is bounded by the selected limits as it goes, so a small
   Java value that denotes a huge one is refused after about one frame's work.
-  `mapBatches` runs explicit
-  batches. Preparation takes a `Cancel` and stops on the caller's interrupt.
-  The four example projects run through the `JacquardExamples` command. The
-  low-level adapter gains `carrier.Command`, the bounded runner the SDK uses
-  for Core's commands, which shares the worker's output FIFOs, and
-  `HandlerContext.of` for calling a handler outside an invocation. CI runs
-  the SDK's offline and live tests and the four projects.
+  `mapBatches` runs explicit batches, validating every batch first while
+  holding one batch's encoding at a time and observing the `Cancel`, the
+  interrupt, and the deadline between batches. Preparation takes a `Cancel`
+  and stops on the caller's interrupt; it reads only regular files, at most
+  16 MiB of sources and 256 MiB under the prelude or a cache entry. A cache
+  entry keeps Core's raw `check` and `hash` output, and every binding is
+  derived from it again on load, so a changed `program.json` is refused. A
+  Core command whose output stays open after it exits fails with "its output
+  did not close", and its holders (found through `/proc` on Linux) and its
+  recorded descendants are killed. The four example projects run through the
+  `JacquardExamples` command. The low-level adapter gains `carrier.Command`,
+  the bounded runner the SDK uses for Core's commands, which shares the
+  worker's output FIFOs, and `HandlerContext.of` for calling a handler
+  outside an invocation. CI runs the SDK's offline and live tests and the
+  four projects.
 
 ## 0.2.0 — 2026-10-25
 
