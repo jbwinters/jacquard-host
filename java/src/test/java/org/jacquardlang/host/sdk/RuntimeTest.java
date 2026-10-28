@@ -815,25 +815,49 @@ class RuntimeTest {
     }
 
     /**
-     * A later preparation removes a staging directory left over an hour ago,
-     * and keeps a younger one, which may belong to a live preparation.
+     * A preparation removes only its own staging directory: directories it
+     * did not make, whatever their names or ages, are left alone.
      */
     @DisabledOnOs(OS.WINDOWS)
     @Test
-    void aLaterPreparationRemovesStaleStaging() throws Exception {
-        try (FakeCore fake = FakeCore.programs(scratch.resolve("stale"))) {
+    void aPreparationLeavesDirectoriesItDidNotMake() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("foreign"))) {
             Path cache = Files.createDirectories(fake.root.resolve("cache"));
             Files.setPosixFilePermissions(cache, Owner.DIRECTORY);
-            Path stale = Files.createDirectories(cache.resolve("prepare-1-00000000-0/store/objects"));
-            Files.writeString(stale.resolve("f"), "left");
-            Path old = cache.resolve("prepare-1-00000000-0");
-            Files.setLastModifiedTime(old, java.nio.file.attribute.FileTime.fromMillis(
-                    System.currentTimeMillis() - Runtime.STALE_STAGING.toMillis() - 60_000));
-            Path young = Files.createDirectories(cache.resolve("prepare-1-00000000-1"));
+            Path notes = Files.createDirectories(cache.resolve("prepare-release-notes"));
+            Files.writeString(notes.resolve("draft.txt"), "keep");
+            Path left = Files.createDirectories(cache.resolve("prepare-1-00000000-0"));
+            java.nio.file.attribute.FileTime old = java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() - 86_400_000L);
+            Files.setLastModifiedTime(notes, old);
+            Files.setLastModifiedTime(left, old);
             Path entry = fake.runtime.prepare(List.of(fake.source("rules.jac")), fake.options()).directory();
-            assertFalse(Files.exists(old), "the stale staging directory was kept");
-            assertTrue(Files.exists(young), "a young staging directory was removed");
-            assertEquals(List.of(young.getFileName().toString(), entry.getFileName().toString()).stream().sorted().toList(), cacheEntries(fake));
+            assertEquals("keep", Files.readString(notes.resolve("draft.txt")));
+            assertTrue(Files.exists(left), "a directory the preparation did not make was removed");
+            assertEquals(List.of(entry.getFileName().toString(), left.getFileName().toString(), notes.getFileName().toString())
+                    .stream().sorted().toList(), cacheEntries(fake));
+        }
+    }
+
+    /** A cancel or interrupt that lands as a warm load finishes fails the preparation instead of returning a program. */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aStopAsAWarmLoadFinishesIsReported() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("loaded"))) {
+            List<Path> sources = List.of(fake.source("rules.jac"));
+            fake.runtime.prepare(sources, fake.options());
+            Cancel cancel = new Cancel();
+            try {
+                Runtime.loadedHook = cancel::cancel;
+                assertEquals(Core.ABORTED, assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options(), cancel)).getMessage());
+                Runtime.loadedHook = () -> Thread.currentThread().interrupt();
+                assertEquals(Core.ABORTED, assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options())).getMessage());
+                assertTrue(Thread.interrupted(), "the interrupt status was cleared");
+            } finally {
+                Runtime.loadedHook = null;
+                Thread.interrupted();
+            }
+            // Without a stop the same entry loads.
+            fake.runtime.prepare(sources, fake.options());
         }
     }
 }

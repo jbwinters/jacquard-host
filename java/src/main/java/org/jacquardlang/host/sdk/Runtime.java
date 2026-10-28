@@ -86,6 +86,8 @@ public final class Runtime {
     static volatile Runnable flightWaitHook;
     /** Test seam: runs after each source file is read, with its path. Null outside tests. */
     static volatile java.util.function.Consumer<Path> sourceReadHook;
+    /** Test seam: runs when a cache entry has been loaded, just before its program is returned. Null outside tests. */
+    static volatile Runnable loadedHook;
 
     /**
      * Validates options; Core does not run yet.
@@ -293,7 +295,12 @@ public final class Runtime {
             throw JacquardException.preparation(Core.ABORTED);
         }
         try {
-            return prepareChecked(sources, options, cancel);
+            Program program = prepareChecked(sources, options, cancel);
+            // A stop during the last of the work is reported, not a program.
+            if (stopped(cancel)) {
+                throw JacquardException.preparation(Core.ABORTED);
+            }
+            return program;
         } catch (JacquardException error) {
             // An interrupt also fails file reads (ClosedByInterruptException);
             // report the stop, not a misleading read or cache failure.
@@ -379,7 +386,6 @@ public final class Runtime {
         if (Files.exists(directory)) {
             return load(directory, identity, executable, cancel);
         }
-        removeStaleStaging(cache, cancel);
         Path staging = stagingDirectory(cache);
         try {
             Path snapshot = staging.resolve("source" + syntax);
@@ -580,37 +586,6 @@ public final class Runtime {
     }
 
     /** How old a staging directory must be before a later preparation removes it. */
-    static final Duration STALE_STAGING = Duration.ofHours(1);
-
-    /**
-     * Removes staging directories that an earlier preparation left (a stop
-     * ended its cleanup) and that were last modified over
-     * {@link #STALE_STAGING} ago, best effort: the cache root's listing and
-     * the removals together visit at most {@link Core#TREE_ENTRIES} entries,
-     * and a cancel or interrupt ends it. A live preparation's staging
-     * directory is younger: each Core command is bounded by 30 seconds.
-     */
-    private static void removeStaleStaging(Path cache, Cancel cancel) {
-        int[] budget = {Core.treeEntries};
-        long cutoff = System.currentTimeMillis() - STALE_STAGING.toMillis();
-        try (java.nio.file.DirectoryStream<Path> entries = Files.newDirectoryStream(cache)) {
-            for (Path entry : entries) {
-                if (stopped(cancel) || --budget[0] <= 0) {
-                    return;
-                }
-                if (!entry.getFileName().toString().startsWith("prepare-")) {
-                    continue;
-                }
-                BasicFileAttributes attributes = Files.readAttributes(entry, BasicFileAttributes.class, java.nio.file.LinkOption.NOFOLLOW_LINKS);
-                if (attributes.isDirectory() && attributes.lastModifiedTime().toMillis() < cutoff) {
-                    removeTree(entry, cancel, budget);
-                }
-            }
-        } catch (IOException | RuntimeException ignored) {
-            // Best effort; what is left is never loaded.
-        }
-    }
-
     /**
      * Loads a cache entry, refusing an accidental or partial change: the
      * entry and everything in it must be owned by this user and writable by
@@ -630,6 +605,9 @@ public final class Runtime {
         } catch (JacquardException error) {
             throw fail.apply(error.getMessage());
         }
+        if (stopped(cancel)) {
+            throw JacquardException.preparation(Core.ABORTED);
+        }
         if (!observed.containsKey("program.json")) {
             throw fail.apply("no program.json");
         }
@@ -640,6 +618,9 @@ public final class Runtime {
         observed.remove("program.json");
         if (!metadata.identity().equals(identity) || !observed.equals(metadata.files())) {
             throw fail.apply("cached artifact digests do not match");
+        }
+        if (stopped(cancel)) {
+            throw JacquardException.preparation(Core.ABORTED);
         }
         Bindings derived;
         try {
@@ -655,11 +636,19 @@ public final class Runtime {
             }
             throw fail.apply("Core's cached output does not parse: " + error.getMessage());
         }
+        if (stopped(cancel)) {
+            throw JacquardException.preparation(Core.ABORTED);
+        }
         Bindings recorded = new Bindings(metadata.names(), metadata.constructors(), metadata.signatures(), metadata.groups());
         if (!derived.equals(recorded)) {
             throw fail.apply("program.json bindings differ from Core's cached output");
         }
-        return new Program(this, directory, metadata, executable);
+        Program program = new Program(this, directory, metadata, executable);
+        Runnable hook = loadedHook;
+        if (hook != null) {
+            hook.run();
+        }
+        return program;
     }
 
     /**

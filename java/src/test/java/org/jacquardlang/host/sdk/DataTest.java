@@ -271,7 +271,10 @@ class DataTest {
         assertTrue(refusal(() -> data.encode(Codec.TEXT, "four")).contains("max_text_bytes"));
         Value longList = fixture(Limits.HARD).encode(Codec.list(Codec.INT), List.of(1L, 2L, 3L));
         assertTrue(assertThrows(JacquardException.class, () -> data.decode(Codec.list(Codec.INT), longList)).getMessage().contains("selected limit"));
-        assertEquals("value.id: text exceeds max_text_bytes", refusal(() -> data.encode(INCIDENT, new Incident("abcd", 1, Optional.empty()))));
+        // A record's fields count against max_collection_items too, so this one needs three.
+        Data fields = fixture(Limits.HARD.with("max_collection_items", 3).with("max_text_bytes", 3));
+        assertEquals("value.id: text exceeds max_text_bytes", refusal(() -> fields.encode(INCIDENT, new Incident("abcd", 1, Optional.empty()))));
+        assertEquals("value: constructor exceeds max_collection_items", refusal(() -> data.encode(INCIDENT, new Incident("abc", 1, Optional.empty()))));
     }
 
     /**
@@ -411,6 +414,19 @@ class DataTest {
                 refusal(() -> fixture(Limits.HARD.with("max_collection_items", 2)).encode(triple, new Counted(1, 2, 3))));
         assertEquals(0, Counted.READS.get());
         fixture(Limits.HARD.with("max_collection_items", 3)).encode(triple, new Counted(1, 2, 3));
+        assertEquals(3, Counted.READS.get());
+    }
+
+    @Test
+    void anOversizedRecordIsRefusedBeforeItsComponentsAreRead() throws Exception {
+        Hash counted = id('c');
+        Codec<Counted> record = Codec.record(Counted.class);
+        Counted.READS.set(0);
+        Data narrow = new Data(Map.of("counted", counted), Map.of("counted", counted), List.of(), Limits.HARD.with("max_collection_items", 2));
+        assertEquals("value: constructor exceeds max_collection_items", refusal(() -> narrow.encode(record, new Counted(1, 2, 3))));
+        assertEquals(0, Counted.READS.get());
+        Data wide = new Data(Map.of("counted", counted), Map.of("counted", counted), List.of(), Limits.HARD.with("max_collection_items", 3));
+        wide.encode(record, new Counted(1, 2, 3));
         assertEquals(3, Counted.READS.get());
     }
 

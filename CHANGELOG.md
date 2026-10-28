@@ -61,7 +61,8 @@
   elsewhere its recorded descendants are killed. Preparation takes at most
   1,024 sources, refused from the list's size; a failed preparation's
   cleanup is bounded and ends at a stop, leaving an unpublished staging
-  directory that a later preparation removes after an hour; and a symbolic
+  directory, which nothing removes later; a preparation that finishes as a
+  stop arrives reports the stop; and a symbolic
   link to the cache root is followed to the directory it names. A function
   whose signature nests types deeper than 64 levels, the protocol's value
   depth, is left unbound with a binding failure naming the limit, while the

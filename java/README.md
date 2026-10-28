@@ -119,9 +119,11 @@ A preparation that fails removes its unpublished staging directory
 (`prepare-*` in the cache root) in a streamed walk of at most 100,000 entries
 that ends at the first `Cancel` or interrupt, so a stopped preparation leaves
 its staging directory behind. Such a directory is never loaded: entries are
-named by their identity digest. A later preparation that makes a new entry removes
-`prepare-*` directories last modified over an hour ago, within the same
-entry cap and stop checks, best effort.
+named by their identity digest. Nothing removes it later, because a name and
+an age cannot show that the SDK made a directory or that no preparation is
+using it; remove leftover `prepare-*` directories yourself when no
+preparation is running. A cancel or interrupt that arrives as a preparation
+finishes, a warm load included, is reported as the stop, not as a program.
 
 A function whose checked signature nests types deeper than 64 levels (the
 protocol's value-depth limit, `max_json_depth`, so no such value could be

@@ -349,6 +349,8 @@ final class Codecs {
 
         @Override
         public Value encode(Encoder encoder, R value) throws JacquardException {
+            // Counted before any component is read, as for a tuple.
+            encoder.checkCount(components.length, "constructor");
             List<Value> encoded = new ArrayList<>(components.length);
             for (int i = 0; i < components.length; i++) {
                 encoded.add(field(encoder, components[i].getName(), fields.get(i), component(encoder, value, i)));
