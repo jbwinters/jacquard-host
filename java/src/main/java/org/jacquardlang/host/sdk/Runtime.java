@@ -2,12 +2,14 @@ package org.jacquardlang.host.sdk;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -46,6 +48,8 @@ public final class Runtime {
     static final String PROGRAM_SCHEMA = "jacquard-java-program-v1";
     private static final long POLL_MIN = TimeUnit.MICROSECONDS.toNanos(100);
     private static final long POLL_MAX = TimeUnit.MILLISECONDS.toNanos(10);
+    /** The most source bytes one preparation reads, separators included. */
+    public static final long SOURCE_LIMIT = 16L << 20;
     private static final List<String> PRELUDE_FILES = List.of("01-prim.jqd", "02-data.jqd", "19-audit.jqd");
 
     /** One discovery: empty until a run succeeds; a failed run leaves it empty for the next caller. */
@@ -70,6 +74,8 @@ public final class Runtime {
      * thread's version check or prelude discovery. Null outside tests.
      */
     static volatile Runnable flightWaitHook;
+    /** Test seam: runs after each source file is read, with its path. Null outside tests. */
+    static volatile java.util.function.Consumer<Path> sourceReadHook;
 
     /**
      * Validates options; Core does not run yet.
@@ -267,22 +273,11 @@ public final class Runtime {
         checkVersion(executable, binaryHash, cancel);
         String preludeHash;
         try {
-            preludeHash = Core.mapDigest(Core.tree(prelude));
+            preludeHash = Core.mapDigest(Core.tree(prelude, cancel));
         } catch (JacquardException error) {
             throw JacquardException.preparation("cannot read prelude " + prelude + ": " + error.getMessage());
         }
-        ByteArrayOutputStream content = new ByteArrayOutputStream();
-        for (int i = 0; i < sources.size(); i++) {
-            if (i > 0) {
-                content.write('\n');
-            }
-            try {
-                content.write(Files.readAllBytes(sources.get(i)));
-            } catch (IOException error) {
-                throw JacquardException.preparation("cannot read " + sources.get(i) + ": " + error.getMessage());
-            }
-        }
-        byte[] bytes = content.toByteArray();
+        byte[] bytes = readSources(sources, cancel);
         TreeMap<String, String> identity = new TreeMap<>(Json.CODE_POINT_ORDER);
         identity.put("binary", binaryHash);
         identity.put("prelude", preludeHash);
@@ -297,7 +292,7 @@ public final class Runtime {
             throw JacquardException.preparation("cannot create " + cache + ": " + error.getMessage());
         }
         if (Files.exists(directory)) {
-            return load(directory, identity, executable);
+            return load(directory, identity, executable, cancel);
         }
         Path staging = stagingDirectory(cache);
         try {
@@ -333,7 +328,7 @@ public final class Runtime {
             }
             List<Identities.Entry> constructorList = new ArrayList<>();
             constructors.forEach((name, hash) -> constructorList.add(new Identities.Entry(name, hash)));
-            Metadata metadata = new Metadata(identity, names, constructorList, signatures, groups, Core.tree(staging));
+            Metadata metadata = new Metadata(identity, names, constructorList, signatures, groups, Core.tree(staging, cancel));
             write(staging.resolve("program.json"), metadata.toJson().getBytes(StandardCharsets.UTF_8), "cannot write program.json");
             try {
                 Files.move(staging, directory, StandardCopyOption.ATOMIC_MOVE);
@@ -348,7 +343,58 @@ public final class Runtime {
         } finally {
             removeTree(staging);
         }
-        return load(directory, identity, executable);
+        return load(directory, identity, executable, cancel);
+    }
+
+    /**
+     * The sources joined by newlines. Each must be a regular file (a symbolic
+     * link to one is followed); the total is checked against
+     * {@link #SOURCE_LIMIT} from the files' sizes before each is read, and no
+     * read goes past it. Between files the cancel and the interrupt, which
+     * stays set, are observed.
+     */
+    private static byte[] readSources(List<Path> sources, Cancel cancel) throws JacquardException {
+        ByteArrayOutputStream content = new ByteArrayOutputStream();
+        JacquardException over = JacquardException.preparation("sources exceed " + (SOURCE_LIMIT >> 20) + " MiB in total");
+        long total = 0;
+        for (int i = 0; i < sources.size(); i++) {
+            if (stopped(cancel)) {
+                throw JacquardException.preparation(Core.ABORTED);
+            }
+            Path source = sources.get(i);
+            BasicFileAttributes attributes;
+            try {
+                attributes = Files.readAttributes(source, BasicFileAttributes.class);
+            } catch (IOException error) {
+                throw JacquardException.preparation("cannot read " + source + ": " + error.getMessage());
+            }
+            if (!attributes.isRegularFile()) {
+                throw JacquardException.preparation("cannot read " + source + ": not a regular file");
+            }
+            total += (i > 0 ? 1 : 0) + attributes.size();
+            if (total > SOURCE_LIMIT) {
+                throw over;
+            }
+            if (i > 0) {
+                content.write('\n');
+            }
+            int room = (int) (SOURCE_LIMIT - content.size());
+            byte[] read;
+            try (InputStream in = Files.newInputStream(source)) {
+                read = in.readNBytes(room + 1);
+            } catch (IOException error) {
+                throw JacquardException.preparation("cannot read " + source + ": " + error.getMessage());
+            }
+            if (read.length > room) {
+                throw over;
+            }
+            content.write(read, 0, read.length);
+            java.util.function.Consumer<Path> hook = sourceReadHook;
+            if (hook != null) {
+                hook.accept(source);
+            }
+        }
+        return content.toByteArray();
     }
 
     private static String extension(Path source) {
@@ -395,7 +441,7 @@ public final class Runtime {
         }
     }
 
-    private Program load(Path directory, Map<String, String> identity, Path executable) throws JacquardException {
+    private Program load(Path directory, Map<String, String> identity, Path executable, Cancel cancel) throws JacquardException {
         java.util.function.Function<String, JacquardException> fail = detail -> JacquardException.preparation("prepared cache "
                 + directory + " is incomplete or changed (" + detail + "); remove that cache entry and prepare again");
         byte[] text;
@@ -410,7 +456,7 @@ public final class Runtime {
         }
         TreeMap<String, String> observed;
         try {
-            observed = Core.tree(directory);
+            observed = Core.tree(directory, cancel);
         } catch (JacquardException error) {
             throw fail.apply(error.getMessage());
         }

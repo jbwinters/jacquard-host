@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -219,6 +220,152 @@ class RuntimeTest {
             first.cancel();
             assertEquals("Core --version failed: preparation was cancelled or interrupted", owner.get(60, TimeUnit.SECONDS).getMessage());
             FakeCore.dies("the first preparation's command", sleeper);
+        }
+    }
+    private static void mkfifo(Path path) throws Exception {
+        Process mkfifo = new ProcessBuilder("mkfifo", path.toString()).redirectErrorStream(true).start();
+        assertTrue(mkfifo.waitFor(30, TimeUnit.SECONDS) && mkfifo.exitValue() == 0, "mkfifo failed");
+    }
+
+    /**
+     * Prepares on another thread, which must finish within a minute. If it is
+     * blocked opening {@code fifo}, a writer is opened to release it and the
+     * test fails.
+     */
+    private static JacquardException preparesWithoutBlocking(FakeCore fake, List<Path> sources, Path fifo) throws Exception {
+        CompletableFuture<JacquardException> preparing = CompletableFuture.supplyAsync(() -> {
+            try {
+                fake.runtime.prepare(sources, fake.options());
+                return null;
+            } catch (JacquardException error) {
+                return error;
+            }
+        });
+        try {
+            JacquardException error = preparing.get(60, TimeUnit.SECONDS);
+            assertTrue(error != null, "the preparation succeeded");
+            return error;
+        } catch (java.util.concurrent.TimeoutException blocked) {
+            try (var writer = Files.newOutputStream(fifo)) {
+                writer.write('\n');
+            }
+            preparing.get(60, TimeUnit.SECONDS);
+            throw new AssertionError("the preparation blocked on " + fifo);
+        }
+    }
+
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aSourceThatIsNotARegularFileIsRefusedWithoutBlocking() throws Exception {
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("kinds"), Compat.CORE_VERSION)) {
+            Path fifo = fake.root.resolve("fifo.jac");
+            mkfifo(fifo);
+            JacquardException error = preparesWithoutBlocking(fake, List.of(fifo), fifo);
+            assertEquals("cannot read " + fifo + ": not a regular file", error.getMessage());
+            Path directory = Files.createDirectory(fake.root.resolve("directory.jac"));
+            assertEquals("cannot read " + directory + ": not a regular file",
+                    assertThrows(JacquardException.class, () -> fake.runtime.prepare(List.of(directory), fake.options())).getMessage());
+            assertEquals(0, fake.calls("check"));
+            // A symbolic link to a regular file is read.
+            Path link = Files.createSymbolicLink(fake.root.resolve("link.jac"), fake.source("rules.jac"));
+            assertEquals("Core check failed: boom",
+                    assertThrows(JacquardException.class, () -> fake.runtime.prepare(List.of(link), fake.options())).getMessage());
+        }
+    }
+
+    /**
+     * A sparse file of {@code length} bytes that nobody may read, so a
+     * refusal that is not "cannot read" was made from its size alone.
+     */
+    private static Path sparse(Path path, long length) throws Exception {
+        try (java.io.RandomAccessFile file = new java.io.RandomAccessFile(path.toFile(), "rw")) {
+            file.setLength(length);
+        }
+        Files.setPosixFilePermissions(path, java.util.Set.of());
+        return path;
+    }
+
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void sourcesOverTheCeilingAreRefusedBeforeTheyAreRead() throws Exception {
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("ceiling"), Compat.CORE_VERSION)) {
+            List<Path> read = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Runtime.sourceReadHook = read::add;
+            try {
+                Path one = sparse(fake.root.resolve("one.jac"), Runtime.SOURCE_LIMIT + 1);
+                assertEquals("sources exceed 16 MiB in total",
+                        assertThrows(JacquardException.class, () -> fake.runtime.prepare(List.of(one), fake.options())).getMessage());
+                Path half = sparse(fake.root.resolve("half.jac"), Runtime.SOURCE_LIMIT / 2);
+                Files.setPosixFilePermissions(half, java.util.Set.of(java.nio.file.attribute.PosixFilePermission.OWNER_READ));
+                Path other = sparse(fake.root.resolve("other.jac"), Runtime.SOURCE_LIMIT / 2);
+                assertEquals("sources exceed 16 MiB in total",
+                        assertThrows(JacquardException.class, () -> fake.runtime.prepare(List.of(half, other), fake.options())).getMessage());
+                assertEquals(List.of(half), read, "a source past the ceiling was read");
+                assertEquals(0, fake.calls("check"));
+            } finally {
+                Runtime.sourceReadHook = null;
+            }
+        }
+    }
+
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aCancelOrInterruptIsObservedBetweenSourceFiles() throws Exception {
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("between"), Compat.CORE_VERSION)) {
+            List<Path> sources = List.of(fake.source("a.jac"), fake.source("b.jac"));
+            List<Path> read = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Cancel cancel = new Cancel();
+            try {
+                Runtime.sourceReadHook = path -> {
+                    read.add(path);
+                    cancel.cancel();
+                };
+                assertEquals(Core.ABORTED, assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options(), cancel)).getMessage());
+                assertEquals(List.of(sources.get(0)), read);
+                read.clear();
+                Runtime.sourceReadHook = path -> {
+                    read.add(path);
+                    Thread.currentThread().interrupt();
+                };
+                assertEquals(Core.ABORTED, assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options())).getMessage());
+                assertTrue(Thread.interrupted(), "the interrupt status was cleared");
+                assertEquals(List.of(sources.get(0)), read);
+            } finally {
+                Runtime.sourceReadHook = null;
+                Thread.interrupted();
+            }
+            assertEquals(0, fake.calls("check"));
+        }
+    }
+
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void thePreludeWalkReadsOnlyBoundedRegularFiles() throws Exception {
+        try (FakeCore fake = FakeCore.failing(scratch.resolve("walk"), Compat.CORE_VERSION)) {
+            Path big = sparse(fake.root.resolve("prelude/zz-big.jqd"), Core.TREE_LIMIT + 1);
+            String message = fake.prepareFails().getMessage();
+            assertTrue(message.startsWith("cannot read prelude") && message.endsWith("exceed 256 MiB"), message);
+            Files.delete(big);
+            Path fifo = fake.root.resolve("prelude/zz-fifo.jqd");
+            mkfifo(fifo);
+            message = preparesWithoutBlocking(fake, List.of(fake.source("rules.jac")), fifo).getMessage();
+            assertTrue(message.endsWith("unsupported filesystem entry in prepared artifacts: zz-fifo.jqd"), message);
+            Files.delete(fifo);
+            Files.writeString(fake.root.resolve("prelude/02-more.jqd"), "more\n");
+            List<Path> digested = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Cancel cancel = new Cancel();
+            Core.treeFileHook = path -> {
+                digested.add(path);
+                cancel.cancel();
+            };
+            try {
+                String stopped = fake.prepareFails("rules.jac", cancel).getMessage();
+                assertTrue(stopped.endsWith(Core.ABORTED), stopped);
+            } finally {
+                Core.treeFileHook = null;
+            }
+            assertEquals(List.of(fake.root.resolve("prelude/01-prim.jqd")), digested);
+            assertEquals(0, fake.calls("check"));
         }
     }
 }

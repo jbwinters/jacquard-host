@@ -106,18 +106,31 @@ final class Core {
         return HexFormat.of().formatHex(digest.digest());
     }
 
+    /** The most bytes {@link #tree} reads under one root. */
+    static final long TREE_LIMIT = 256L << 20;
+
+    /**
+     * Test seam: runs after {@link #tree} digests each file, with its path.
+     * Null outside tests.
+     */
+    static volatile java.util.function.Consumer<Path> treeFileHook;
+
     /**
      * Digests every regular file under {@code root}, keyed by
      * {@code /}-separated relative path, refusing other entry kinds (symbolic
-     * links included).
+     * links, FIFOs, and devices included, so no read can block on one) and
+     * more than {@link #TREE_LIMIT} bytes in all, which is checked against
+     * each file's size before it is read and again while it is read. Between
+     * files it observes {@code cancel} and the caller's interrupt, which it
+     * never clears.
      */
-    static TreeMap<String, String> tree(Path root) throws JacquardException {
+    static TreeMap<String, String> tree(Path root, Cancel cancel) throws JacquardException {
         TreeMap<String, String> files = new TreeMap<>(Json.CODE_POINT_ORDER);
-        walk(root, root, files);
+        walk(root, root, files, new long[1], cancel);
         return files;
     }
 
-    private static void walk(Path root, Path directory, Map<String, String> files) throws JacquardException {
+    private static void walk(Path root, Path directory, Map<String, String> files, long[] total, Cancel cancel) throws JacquardException {
         List<Path> entries;
         try (Stream<Path> list = Files.list(directory)) {
             entries = new ArrayList<>(list.toList());
@@ -126,6 +139,9 @@ final class Core {
         }
         entries.sort((a, b) -> Json.CODE_POINT_ORDER.compare(a.getFileName().toString(), b.getFileName().toString()));
         for (Path path : entries) {
+            if (cancel.isCancelled() || Thread.currentThread().isInterrupted()) {
+                throw JacquardException.preparation(ABORTED);
+            }
             List<String> parts = new ArrayList<>();
             for (Path part : root.relativize(path)) {
                 parts.add(part.toString());
@@ -138,17 +154,43 @@ final class Core {
                 throw JacquardException.preparation("cannot read " + path + ": " + error.getMessage());
             }
             if (attributes.isDirectory()) {
-                walk(root, path, files);
+                walk(root, path, files, total, cancel);
             } else if (attributes.isRegularFile()) {
+                JacquardException over = JacquardException.preparation("files under " + root + " exceed " + (TREE_LIMIT >> 20) + " MiB");
+                if (attributes.size() > TREE_LIMIT - total[0]) {
+                    throw over;
+                }
                 try {
-                    files.put(relative, fileDigest(path));
+                    files.put(relative, boundedDigest(path, TREE_LIMIT - total[0], total, over));
                 } catch (IOException error) {
                     throw JacquardException.preparation("cannot read " + path + ": " + error.getMessage());
+                }
+                java.util.function.Consumer<Path> hook = treeFileHook;
+                if (hook != null) {
+                    hook.accept(path);
                 }
             } else {
                 throw JacquardException.preparation("unsupported filesystem entry in prepared artifacts: " + relative);
             }
         }
+    }
+
+    /** The digest of at most {@code room} bytes of a file, adding what it read to {@code total[0]}; {@code over} once it is longer. */
+    private static String boundedDigest(Path path, long room, long[] total, JacquardException over) throws IOException, JacquardException {
+        MessageDigest digest = sha256();
+        byte[] buffer = new byte[1 << 16];
+        long read = 0;
+        try (InputStream in = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+            for (int n; (n = in.read(buffer)) > 0; ) {
+                read += n;
+                if (read > room) {
+                    throw over;
+                }
+                digest.update(buffer, 0, n);
+            }
+        }
+        total[0] += read;
+        return HexFormat.of().formatHex(digest.digest());
     }
 
     /** Canonical JSON for a string map: keys in code-point order. */
