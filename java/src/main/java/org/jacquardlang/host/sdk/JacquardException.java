@@ -50,15 +50,47 @@ public final class JacquardException extends Exception {
 
     /** {@code message} in at most {@link #MESSAGE_LIMIT} chars, its start kept and its length noted. */
     static String bounded(String message) {
-        if (message == null || message.length() <= MESSAGE_LIMIT) {
-            return message;
+        return message == null ? null : joined("", message);
+    }
+
+    /** The noted length of a message already cut by {@link #bounded}, or -1. */
+    private static long notedLength(String message) {
+        if (message.length() != MESSAGE_LIMIT || !message.endsWith(" chars)")) {
+            return -1;
         }
-        String suffix = "... (" + message.length() + " chars)";
-        int end = MESSAGE_LIMIT - suffix.length();
-        if (Character.isHighSurrogate(message.charAt(end - 1))) {
+        int open = message.lastIndexOf("... (");
+        try {
+            return open < 0 ? -1 : Long.parseLong(message.substring(open + 5, message.length() - 7));
+        } catch (NumberFormatException error) {
+            return -1;
+        }
+    }
+
+    /**
+     * {@code prefix} followed by {@code message}, in at most
+     * {@link #MESSAGE_LIMIT} chars, noting the whole length once. A message
+     * that was already cut keeps its own noted length, plus the prefix, so
+     * it is never cut twice or noted wrongly. Nothing longer than the limit is copied.
+     */
+    static String joined(String prefix, String message) {
+        long noted = notedLength(message);
+        long total = prefix.length() + (noted < 0 ? message.length() : noted);
+        if (noted < 0 && total <= MESSAGE_LIMIT) {
+            return prefix + message;
+        }
+        String body = noted < 0 ? message : message.substring(0, message.lastIndexOf("... ("));
+        String suffix = "... (" + total + " chars)";
+        int room = MESSAGE_LIMIT - suffix.length() - prefix.length();
+        if (room <= 0) {
+            // A prefix past the limit (not one the SDK builds): keep its start.
+            String start = prefix.substring(0, MESSAGE_LIMIT - suffix.length());
+            return (Character.isHighSurrogate(start.charAt(start.length() - 1)) ? start.substring(0, start.length() - 1) : start) + suffix;
+        }
+        int end = Math.min(room, body.length());
+        if (end > 0 && end < body.length() && Character.isHighSurrogate(body.charAt(end - 1))) {
             end--;
         }
-        return message.substring(0, end) + suffix;
+        return prefix + body.substring(0, end) + suffix;
     }
 
     static JacquardException preparation(String message) {
@@ -91,12 +123,12 @@ public final class JacquardException extends Exception {
     /** An invalid argument at a value's location, such as {@code shipping-cost.argument[0]}. */
     static JacquardException invalidAt(String path, String message) {
         // Bounded before it is joined, so a caller's huge message is never copied whole.
-        return invalid(bounded(path) + ": " + bounded(message));
+        return invalid(joined(path + ": ", message));
     }
 
     /** As {@link #invalidAt(String, String)}, keeping the exception that caused it. */
     static JacquardException invalidAt(String path, String message, Throwable cause) {
-        return new JacquardException(Kind.INVALID_ARGUMENT, bounded(path) + ": " + bounded(message), null, cause, -1, List.of());
+        return new JacquardException(Kind.INVALID_ARGUMENT, joined(path + ": ", message), null, cause, -1, List.of());
     }
 
     /** A failed invocation; {@code result} is not ok. */
@@ -117,7 +149,7 @@ public final class JacquardException extends Exception {
      * {@link Codec#UNIT} decodes unit.
      */
     static JacquardException batch(int index, List<Object> completed, JacquardException error) {
-        return new JacquardException(error.kind, "batch " + index + ": " + error.getMessage(), error.result, error.getCause(), index,
+        return new JacquardException(error.kind, joined("batch " + index + ": ", error.getMessage()), error.result, error.getCause(), index,
                 Collections.unmodifiableList(new ArrayList<>(completed)));
     }
 

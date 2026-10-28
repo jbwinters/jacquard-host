@@ -56,6 +56,16 @@ class RuntimeTest {
         Runtime huge = new Runtime(base.withBinary("/" + "x".repeat(1_000_000)));
         String refused = assertThrows(JacquardException.class, () -> huge.prepare(List.of(Path.of("rules.jac")), PrepareOptions.defaults())).getMessage();
         assertTrue(refused.startsWith("cannot find Core executable /" + "x".repeat(63) + "... (1000001 chars)"), refused.substring(0, 100));
+        // A shorter missing name is quoted as an excerpt too, and a NUL, which no path holds, is a preparation failure.
+        String longer = assertThrows(JacquardException.class, () -> new Runtime(base.withBinary("/no/such/" + "y".repeat(1000)))
+                .prepare(List.of(Path.of("rules.jac")), PrepareOptions.defaults())).getMessage();
+        assertTrue(longer.length() < 200 && longer.contains("... (1009 chars)"), longer);
+        for (String nul : List.of("jac\0quard", "/tmp/jac\0quard")) {
+            JacquardException error = assertThrows(JacquardException.class, () -> new Runtime(base.withBinary(nul))
+                    .prepare(List.of(Path.of("rules.jac")), PrepareOptions.defaults()));
+            assertEquals(JacquardException.Kind.PREPARATION, error.kind());
+            assertTrue(error.getMessage().startsWith("cannot find Core executable"), error.getMessage());
+        }
     }
 
     @Test

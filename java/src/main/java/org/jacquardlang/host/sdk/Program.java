@@ -155,6 +155,12 @@ public final class Program {
         if (selected.size() != signature.effects().size()) {
             throw JacquardException.binding(name + ": effect metadata is unavailable; use the low-level host package");
         }
+        // Each binding must name one of the function's effects, so more
+        // bindings than effects are refused from the count, before any is copied.
+        if (bindings.size() > selected.size()) {
+            throw JacquardException.binding(name + ": " + bindings.size() + " bindings given, but it uses " + selected.size()
+                    + " effect" + (selected.size() == 1 ? "" : "s") + (selected.isEmpty() ? "" : ": " + String.join(", ", selected.keySet())));
+        }
         Map<String, Operations> chosen = new TreeMap<>(services);
         for (Map.Entry<String, Operations> binding : new TreeMap<>(bindings).entrySet()) {
             if (!selected.containsKey(Identities.normal(binding.getKey()))) {

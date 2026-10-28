@@ -79,7 +79,8 @@ public final class Invocation {
             // Already bounded, and the SDK's own words. When the caller's
             // codec or record constructor failed, its exception is the cause.
             Throwable cause = mapping.getCause() != null ? mapping.getCause() : mapping;
-            throw JacquardException.binding(function.name() + ": Core completed, but result mapping failed: " + mapping.getMessage(), raw, cause);
+            throw JacquardException.binding(JacquardException.joined(function.name() + ": Core completed, but result mapping failed: ", mapping.getMessage()),
+                    raw, cause);
         }
     }
 

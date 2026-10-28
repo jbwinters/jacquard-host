@@ -535,8 +535,15 @@ class DataTest {
         String invalid = assertThrows(JacquardException.class, () -> data.encode(invalidating, 1L)).getMessage();
         assertTrue(invalid.length() <= JacquardException.MESSAGE_LIMIT, invalid.length() + " chars");
         assertTrue(invalid.startsWith("value: XXXX"), invalid.substring(0, 20));
+        // Joined to its path once, the whole length noted: the path's 7 chars and the million.
+        assertTrue(invalid.endsWith("X... (1000007 chars)"), invalid.substring(invalid.length() - 40));
         String mapping = assertThrows(JacquardException.class, () -> data.decode(invalidating, data.encode(Codec.INT, 1L))).getMessage();
         assertEquals(JacquardException.MESSAGE_LIMIT, mapping.length());
+        assertTrue(mapping.endsWith("X... (1000000 chars)"), mapping.substring(mapping.length() - 40));
+        // A cut message given a further prefix keeps its noted length, plus the prefix.
+        String again = JacquardException.joined("batch 1: ", mapping);
+        assertEquals(JacquardException.MESSAGE_LIMIT, again.length());
+        assertTrue(again.startsWith("batch 1: XXX") && again.endsWith("X... (1000009 chars)"), again.substring(again.length() - 40));
     }
 
     /** A codec building a constructor by name has its fields counted before they are copied. */

@@ -275,7 +275,28 @@ final class Core {
                     + "; configure JACQUARD_BIN using the setup guide");
         }
         JacquardException missing = JacquardException.preparation(
-                "cannot find Core executable " + binary + "; configure JACQUARD_BIN using the setup guide");
+                "cannot find Core executable " + Identities.excerpt(binary) + "; configure JACQUARD_BIN using the setup guide");
+        if (binary.indexOf('\0') >= 0) {
+            // No path holds a NUL; the JDK would refuse it unchecked.
+            throw missing;
+        }
+        Path candidate = null;
+        try {
+            candidate = lookUp(binary);
+        } catch (java.nio.file.InvalidPathException error) {
+            throw missing;
+        }
+        if (candidate == null || !isExecutable(candidate)) {
+            throw missing;
+        }
+        try {
+            return candidate.toRealPath();
+        } catch (IOException error) {
+            throw JacquardException.preparation("cannot resolve Core executable " + Identities.excerpt(binary) + ": " + error.getMessage());
+        }
+    }
+
+    private static Path lookUp(String binary) {
         Path candidate = null;
         if (binary.contains("/") || binary.contains(java.io.File.separator)) {
             candidate = Path.of(binary);
@@ -293,14 +314,7 @@ final class Core {
                 }
             }
         }
-        if (candidate == null || !isExecutable(candidate)) {
-            throw missing;
-        }
-        try {
-            return candidate.toRealPath();
-        } catch (IOException error) {
-            throw JacquardException.preparation("cannot resolve Core executable " + binary + ": " + error.getMessage());
-        }
+        return candidate;
     }
 
     private static boolean isExecutable(Path path) {

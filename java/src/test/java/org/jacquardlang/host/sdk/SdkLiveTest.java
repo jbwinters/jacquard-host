@@ -512,6 +512,26 @@ class SdkLiveTest {
         assertEquals("E1602", error.result().code());
     }
 
+    /** More bindings than the function has effects are refused from the count, before any binding is read. */
+    @Test
+    void tooManyBindingsAreRefusedBeforeAnyIsRead() throws Exception {
+        Program program = prepare(example("quickstart"));
+        Map<String, Operations> many = new java.util.AbstractMap<>() {
+            @Override
+            public int size() {
+                return 1_000_000;
+            }
+
+            @Override
+            public Set<Map.Entry<String, Operations>> entrySet() {
+                throw new AssertionError("a binding was read");
+            }
+        };
+        JacquardException error = assertThrows(JacquardException.class, () -> program.function("shipping-cost", many));
+        assertEquals(JacquardException.Kind.BINDING, error.kind());
+        assertEquals("shipping-cost: 1000000 bindings given, but it uses 0 effects", error.getMessage());
+    }
+
     /** A result codec that throws with a huge message gives a short binding failure that keeps the raw result and the exception. */
     @Test
     void aThrowingResultCodecKeepsTheResultAndQuotesAnExcerpt() throws Exception {
