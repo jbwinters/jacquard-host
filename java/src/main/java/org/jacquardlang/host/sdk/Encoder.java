@@ -17,14 +17,16 @@ import org.jacquardlang.host.protocol.Value;
  * together. A text longer in chars than either is refused before it is
  * scanned.
  *
- * <p>Only what goes through an encoder is charged: {@link Codec#VALUE} and
- * {@link Value}s passed as arguments are walked within the same bounds, but a
- * custom codec that returns a {@link Value} it built itself bypasses this
- * budget. Such a value is not unchecked: before any worker starts, a function
- * call measures every argument value again while it renders the invoke frame
- * (nodes, collection items, text bytes, JSON depth, and frame bytes), and the
- * host measures a handler's result the same way before sending it. A value
- * returned by {@link Data#encode} is not measured again.
+ * <p>Only what goes through an encoder is charged as it is built:
+ * {@link Codec#VALUE} and {@link Value}s passed as arguments are walked within
+ * the same bounds, but a custom codec may return a {@link Value} it built
+ * itself. Such a value is not unchecked: before its type is checked, and so
+ * before any worker starts, a function call measures every argument value
+ * again under one shared budget (nodes, JSON depth, collection items, and
+ * text bytes, alone and together), whatever codec built it; the invoke frame
+ * is then measured as it is rendered, and the host measures a handler's
+ * result the same way before sending it. A value returned by
+ * {@link Data#encode} is not measured again.
  */
 public final class Encoder {
     /** What one encoding has used, shared by every location in it. */

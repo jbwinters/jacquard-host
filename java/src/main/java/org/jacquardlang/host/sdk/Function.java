@@ -72,11 +72,28 @@ public final class Function {
         return values;
     }
 
-    /** Validates encoded arguments against the signature and the frame limits, before any worker starts. */
+    /** Test seam: runs after the arguments are measured, just before their types are checked. Null outside tests. */
+    static volatile Runnable conformHook;
+
+    /**
+     * Validates encoded arguments against the signature and the frame limits,
+     * before any worker starts. Every value is first measured under one
+     * shared budget (nodes, depth, text bytes, collection items), whatever
+     * codec built it, so the type check below walks at most one frame's
+     * worth of values.
+     */
     private List<Value> check(List<Value> values) throws JacquardException {
         int expected = signature.parameters().size();
         if (values.size() != expected) {
             throw JacquardException.invalid(name + ": expected " + expected + " arguments, received " + values.size());
+        }
+        Encoder.Budget measured = new Encoder.Budget();
+        for (int i = 0; i < values.size(); i++) {
+            Encoder.root(data, name + ".argument[" + i + "]", measured).raw(values.get(i));
+        }
+        Runnable hook = conformHook;
+        if (hook != null) {
+            hook.run();
         }
         for (int i = 0; i < values.size(); i++) {
             data.conform(values.get(i), signature.parameters().get(i), name + ".argument[" + i + "]");

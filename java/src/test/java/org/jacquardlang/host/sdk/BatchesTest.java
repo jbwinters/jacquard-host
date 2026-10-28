@@ -18,6 +18,7 @@ import org.jacquardlang.host.carrier.Cancel;
 import org.jacquardlang.host.carrier.Options;
 import org.jacquardlang.host.json.Json;
 import org.jacquardlang.host.protocol.BoundaryType;
+import org.jacquardlang.host.protocol.Hash;
 import org.jacquardlang.host.protocol.Interface;
 import org.jacquardlang.host.protocol.Limits;
 import org.jacquardlang.host.protocol.Value;
@@ -40,6 +41,7 @@ class BatchesTest {
     @AfterEach
     void clearInterrupt() {
         Thread.interrupted();
+        Function.conformHook = null;
     }
 
     /** {@code ints : (List Int) ->{} List Int} over the {@link DataTest} fixture. */
@@ -158,6 +160,70 @@ class BatchesTest {
             assertTrue(!java.util.Collection.class.isAssignableFrom(field.getType()) && !Value.class.isAssignableFrom(field.getType())
                     && !field.getType().isArray(), "a field could hold encodings: " + field);
         }
+    }
+
+    /** A codec that ignores its input and returns {@code shared} in constant time. */
+    private static Codec<Long> constant(Value shared) {
+        return new Codec<>() {
+            @Override
+            public Value encode(Encoder encoder, Long ignored) {
+                return shared;
+            }
+
+            @Override
+            public Long decode(Decoder decoder, Value ignored) {
+                return 0L;
+            }
+        };
+    }
+
+    /** Invokes a one-parameter function of {@code type} with {@code value}, failing the call if the type check is reached. */
+    private JacquardException refusedBeforeTheTypeCheck(Data data, BoundaryType type, Value value) {
+        Host host = new Host(scratch.resolve("store").toString(),
+                new HostOptions(new Options(List.of(scratch.resolve("no-such-jacquard").toString()), null, null), Limits.HARD));
+        Function function = new Function("deep", new Interface(List.of(type), type, List.of()), DataTest.numbered(98),
+                new OperationRegistry(), host, data);
+        boolean[] conformed = {false};
+        Function.conformHook = () -> {
+            conformed[0] = true;
+            throw new IllegalStateException("the type check ran");
+        };
+        JacquardException error = assertThrows(JacquardException.class, () -> function.invoke(constant(value).arg(0L)));
+        assertTrue(!conformed[0], "the type check ran before the value was measured");
+        assertEquals(JacquardException.Kind.INVALID_ARGUMENT, error.kind(), error.getMessage());
+        return error;
+    }
+
+    /**
+     * A constant-time custom codec returns a small shared graph standing for
+     * 2^28 leaves, and it is measured before its type is checked, under the
+     * shared budgets, so the type check never runs (a test seam fails the call
+     * if it is reached; on the old order the check walked the whole graph).
+     * As 28 levels of a two-item tuple (wire depth 59, within 64) it is
+     * refused by the node budget; as the reviewer's 28 levels of a two-item
+     * list it is refused by the JSON depth bound first.
+     */
+    @Test
+    void aSharedGraphFromACustomCodecIsMeasuredBeforeItsTypeIsChecked() throws Exception {
+        Data data = DataTest.fixture(Limits.HARD);
+        BoundaryType tupleType = DataTest.nominal(data.name("int"));
+        Value tuple = new Value.Int(1);
+        for (int i = 0; i < 28; i++) {
+            tupleType = new BoundaryType.Tuple(List.of(tupleType, tupleType));
+            tuple = new Value.Tuple(List.of(tuple, tuple));
+        }
+        assertTrue(refusedBeforeTheTypeCheck(data, tupleType, tuple).getMessage().endsWith("value exceeds max_value_nodes; use smaller independent batches"));
+
+        Hash list = data.name("list");
+        Hash cons = data.constructorId("cons");
+        Value nil = new Value.Constructor(data.constructorId("nil"), List.of());
+        BoundaryType listType = DataTest.nominal(data.name("int"));
+        Value lists = new Value.Int(1);
+        for (int i = 0; i < 28; i++) {
+            listType = DataTest.nominal(list, listType);
+            lists = new Value.Constructor(cons, List.of(lists, new Value.Constructor(cons, List.of(lists, nil))));
+        }
+        assertTrue(refusedBeforeTheTypeCheck(data, listType, lists).getMessage().endsWith("value exceeds the v0 JSON depth; use smaller independent batches"));
     }
 
     @Test
