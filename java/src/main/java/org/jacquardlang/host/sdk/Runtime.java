@@ -88,6 +88,8 @@ public final class Runtime {
     static volatile java.util.function.Consumer<Path> sourceReadHook;
     /** Test seam: runs when a cache entry has been loaded, just before its program is returned. Null outside tests. */
     static volatile Runnable loadedHook;
+    /** Test seam: runs with the vacated staging path once an entry is published. Null outside tests. */
+    static volatile java.util.function.Consumer<Path> publishedHook;
 
     /**
      * Validates options; Core does not run yet.
@@ -387,6 +389,7 @@ public final class Runtime {
             return load(directory, identity, executable, cancel);
         }
         Path staging = stagingDirectory(cache);
+        boolean published = false;
         try {
             Path snapshot = staging.resolve("source" + syntax);
             write(snapshot, bytes, "cannot write the source snapshot");
@@ -409,6 +412,12 @@ public final class Runtime {
             write(staging.resolve("program.json"), metadata.toJson().getBytes(StandardCharsets.UTF_8), "cannot write program.json");
             try {
                 Files.move(staging, directory, StandardCopyOption.ATOMIC_MOVE);
+                // The staging path is vacated; whatever appears there later is not this call's.
+                published = true;
+                java.util.function.Consumer<Path> hook = publishedHook;
+                if (hook != null) {
+                    hook.accept(staging);
+                }
             } catch (AtomicMoveNotSupportedException error) {
                 throw JacquardException.preparation("cannot publish " + directory + ": " + error.getMessage());
             } catch (IOException error) {
@@ -418,7 +427,9 @@ public final class Runtime {
                 }
             }
         } finally {
-            removeTree(staging, cancel);
+            if (!published) {
+                removeTree(staging, cancel);
+            }
         }
         return load(directory, identity, executable, cancel);
     }

@@ -838,6 +838,32 @@ class RuntimeTest {
         }
     }
 
+    /**
+     * Once an entry is published its staging path is vacated, and whatever
+     * appears there afterwards is not the preparation's: it is left alone.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aDirectoryAtTheVacatedStagingPathIsLeftAlone() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("vacated"))) {
+            Path[] replacement = new Path[1];
+            try {
+                Runtime.publishedHook = staging -> {
+                    try {
+                        replacement[0] = Files.createDirectory(staging);
+                        Files.writeString(staging.resolve("unrelated.txt"), "keep");
+                    } catch (java.io.IOException error) {
+                        throw new java.io.UncheckedIOException(error);
+                    }
+                };
+                fake.runtime.prepare(List.of(fake.source("rules.jac")), fake.options());
+            } finally {
+                Runtime.publishedHook = null;
+            }
+            assertEquals("keep", Files.readString(replacement[0].resolve("unrelated.txt")), "the preparation removed a directory it did not make");
+        }
+    }
+
     /** A cancel or interrupt that lands as a warm load finishes fails the preparation instead of returning a program. */
     @DisabledOnOs(OS.WINDOWS)
     @Test

@@ -64,6 +64,16 @@ public final class JacquardException extends Exception {
         return new JacquardException(Kind.BINDING, message, null, null, -1, List.of());
     }
 
+    /** A binding failure caused by {@code cause}, such as a caller's codec that threw. */
+    static JacquardException binding(String message, Throwable cause) {
+        return new JacquardException(Kind.BINDING, message, null, cause, -1, List.of());
+    }
+
+    /** A successful Core result that could not be mapped, caused by {@code cause}; the result is kept. */
+    static JacquardException binding(String message, InvocationResult result, Throwable cause) {
+        return new JacquardException(Kind.BINDING, message, result, cause, -1, List.of());
+    }
+
     /** A successful Core result that could not be mapped; the result is kept. */
     static JacquardException binding(String message, InvocationResult result) {
         return new JacquardException(Kind.BINDING, message, result, null, -1, List.of());

@@ -492,6 +492,30 @@ class SdkLiveTest {
         assertEquals("E1602", error.result().code());
     }
 
+    /** A result codec that throws with a huge message gives a short binding failure that keeps the raw result and the exception. */
+    @Test
+    void aThrowingResultCodecKeepsTheResultAndQuotesAnExcerpt() throws Exception {
+        Invocation invocation = prepare(example("quickstart")).function("shipping-cost").invoke(35);
+        assertTrue(invocation.ok());
+        Codec<Long> throwing = new Codec<>() {
+            @Override
+            public org.jacquardlang.host.protocol.Value encode(Encoder encoder, Long value) throws JacquardException {
+                return Codec.INT.encode(encoder, value);
+            }
+
+            @Override
+            public Long decode(Decoder decoder, org.jacquardlang.host.protocol.Value value) {
+                throw new IllegalStateException("X".repeat(1_000_000));
+            }
+        };
+        JacquardException error = assertThrows(JacquardException.class, () -> invocation.decode(throwing));
+        assertEquals(JacquardException.Kind.BINDING, error.kind());
+        assertTrue(error.getMessage().length() < 400, error.getMessage().length() + " chars");
+        assertTrue(error.getMessage().endsWith("... (1000000 chars)"), error.getMessage().substring(0, 120));
+        assertTrue(error.result().ok(), "the raw result was not kept");
+        assertTrue(error.getCause() != null, "the codec's exception was not kept");
+    }
+
     @Test
     void resultMappingFailureRetainsTheSuccessfulResult() throws Exception {
         Invocation invocation = prepare(example("quickstart")).function("shipping-cost").invoke(35);

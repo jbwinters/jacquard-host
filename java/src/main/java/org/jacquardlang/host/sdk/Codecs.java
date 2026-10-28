@@ -381,9 +381,10 @@ final class Codecs {
         try {
             return canonical.newInstance(arguments);
         } catch (InvocationTargetException error) {
-            throw decoder.mapping(type.getSimpleName() + " refused the decoded fields: " + error.getCause());
+            Throwable refusal = error.getCause() == null ? error : error.getCause();
+            throw JacquardException.binding(type.getSimpleName() + " refused the decoded fields: " + Identities.describe(refusal), refusal);
         } catch (ReflectiveOperationException | IllegalArgumentException error) {
-            throw decoder.mapping("cannot construct " + type.getSimpleName() + ": " + error);
+            throw JacquardException.binding("cannot construct " + type.getSimpleName() + ": " + Identities.describe(error), error);
         }
     }
 

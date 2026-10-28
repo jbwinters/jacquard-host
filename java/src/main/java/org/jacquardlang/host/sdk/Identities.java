@@ -116,6 +116,12 @@ final class Identities {
         return name.substring(0, end) + "... (" + name.length() + " chars)";
     }
 
+    /** {@code error} for a message: its class and an excerpt of its message, never its whole text. */
+    static String describe(Throwable error) {
+        String message = error.getMessage();
+        return error.getClass().getName() + (message == null ? "" : ": " + excerpt(message));
+    }
+
     /** The form used to look up effects and operations: store spelling, with {@code _} accepted for {@code -}. */
     static String normal(String name) {
         if (name.length() > NAME_LIMIT) {

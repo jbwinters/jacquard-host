@@ -434,6 +434,12 @@ class DataTest {
 
     record Empty() {}
 
+    record Refusing(String id, long severity, Optional<String> owner) {
+        Refusing {
+            throw new IllegalArgumentException("X".repeat(1_000_000));
+        }
+    }
+
     /**
      * Messages quote caller text as an excerpt, and no message is kept past
      * 8,192 chars: a result codec naming a constructor of a million chars,
@@ -464,6 +470,42 @@ class DataTest {
         assertEquals(JacquardException.Kind.INVALID_ARGUMENT, encode.kind());
         assertEquals("value: its codec failed: java.lang.IllegalStateException: " + "X".repeat(64) + "... (1000000 chars)", encode.getMessage());
         assertTrue(encode.getCause() instanceof IllegalStateException, "the codec's exception was not kept");
+        // Decoding: a codec that throws, and a record constructor that refuses its fields.
+        Codec<Long> throwingDecode = new Codec<>() {
+            @Override
+            public Value encode(Encoder encoder, Long value) throws JacquardException {
+                return Codec.INT.encode(encoder, value);
+            }
+
+            @Override
+            public Long decode(Decoder decoder, Value value) {
+                throw new IllegalStateException(huge);
+            }
+        };
+        JacquardException decoded = assertThrows(JacquardException.class, () -> data.decode(throwingDecode, data.encode(Codec.INT, 1L)));
+        assertEquals(JacquardException.Kind.BINDING, decoded.kind());
+        assertEquals("value: its codec failed: java.lang.IllegalStateException: " + "X".repeat(64) + "... (1000000 chars)", decoded.getMessage());
+        assertTrue(decoded.getCause() instanceof IllegalStateException, "the codec's exception was not kept");
+        Value incident = data.encode(INCIDENT, new Incident("ok", 1, Optional.empty()));
+        Codec<Refusing> refusing = Codec.record(Refusing.class, "incident", Codec.TEXT, Codec.INT, Codec.optional(Codec.TEXT));
+        JacquardException refused = assertThrows(JacquardException.class, () -> data.decode(refusing, incident));
+        assertEquals("Refusing refused the decoded fields: java.lang.IllegalArgumentException: " + "X".repeat(64) + "... (1000000 chars)",
+                refused.getMessage());
+        assertTrue(refused.getCause() instanceof IllegalArgumentException, "the constructor's refusal was not kept");
+        // A caller's field name in a path.
+        Codec<Long> named = new Codec<>() {
+            @Override
+            public Value encode(Encoder encoder, Long value) throws JacquardException {
+                return encoder.field(huge, Codec.TEXT, null);
+            }
+
+            @Override
+            public Long decode(Decoder decoder, Value value) {
+                return 0L;
+            }
+        };
+        String path = assertThrows(JacquardException.class, () -> data.encode(named, 1L)).getMessage();
+        assertTrue(path.startsWith("value." + "X".repeat(64) + "... (1000000 chars): null has no Jacquard value"), path.substring(0, 100));
         String bounded = JacquardException.binding(huge).getMessage();
         assertEquals("X".repeat(JacquardException.MESSAGE_LIMIT) + "... (1000000 chars)", bounded);
     }

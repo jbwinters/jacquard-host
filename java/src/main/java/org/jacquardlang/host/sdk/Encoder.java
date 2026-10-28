@@ -105,7 +105,7 @@ public final class Encoder {
 
     /** Encodes a named field of a record or variant. */
     public <T> Value field(String name, Codec<T> codec, T value) throws JacquardException {
-        return child("." + name, 2).encode(codec, value);
+        return child("." + Identities.excerpt(name), 2).encode(codec, value);
     }
 
     /** Encodes a positional item of a tuple. */

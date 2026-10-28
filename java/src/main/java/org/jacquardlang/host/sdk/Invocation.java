@@ -75,8 +75,11 @@ public final class Invocation {
         }
         try {
             return function.data().decode(codec, value);
-        } catch (JacquardException | RuntimeException mapping) {
-            throw JacquardException.binding(function.name() + ": Core completed, but result mapping failed: " + mapping.getMessage(), raw);
+        } catch (JacquardException mapping) {
+            // Already bounded, and the SDK's own words.
+            throw JacquardException.binding(function.name() + ": Core completed, but result mapping failed: " + mapping.getMessage(), raw, mapping);
+        } catch (RuntimeException mapping) {
+            throw JacquardException.binding(function.name() + ": Core completed, but result mapping failed: " + Identities.describe(mapping), raw, mapping);
         }
     }
 

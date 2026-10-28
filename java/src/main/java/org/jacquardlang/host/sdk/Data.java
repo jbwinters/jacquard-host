@@ -111,8 +111,7 @@ public final class Data {
 
     /** A caller's codec that threw while encoding at {@code path}: an invalid argument quoting an excerpt, the exception kept as its cause. */
     static JacquardException codecFailed(String path, RuntimeException error) {
-        return JacquardException.invalidAt(path, "its codec failed: " + error.getClass().getName()
-                + (error.getMessage() == null ? "" : ": " + Identities.excerpt(error.getMessage())), error);
+        return JacquardException.invalidAt(path, "its codec failed: " + Identities.describe(error), error);
     }
 
     /**
@@ -125,7 +124,12 @@ public final class Data {
      */
     public <T> T decode(Codec<T> codec, Value value) throws JacquardException {
         measure(value, 0, new int[1]);
-        return codec.decode(new Decoder(this), value);
+        try {
+            return codec.decode(new Decoder(this), value);
+        } catch (RuntimeException error) {
+            // A caller's codec failed; reported as any mapping failure, the exception kept.
+            throw JacquardException.binding("value: its codec failed: " + Identities.describe(error), error);
+        }
     }
 
     /** Refuses a value with more nodes than {@code max_value_nodes}, or nested past the JSON depth. */
