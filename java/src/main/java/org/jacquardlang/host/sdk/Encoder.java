@@ -13,8 +13,18 @@ import org.jacquardlang.host.protocol.Value;
  * many times, say), costs more than about one frame of work and memory: the
  * JSON depth Core's wire form will need, {@code max_collection_items} for each
  * list and tuple, {@code max_value_nodes} values, and {@code max_text_bytes}
- * for each text and {@code max_frame_bytes} for all of them together. A text
- * longer in chars than either is refused before it is scanned.
+ * for each text (in UTF-8 bytes) and {@code max_frame_bytes} for all of them
+ * together. A text longer in chars than either is refused before it is
+ * scanned.
+ *
+ * <p>Only what goes through an encoder is charged: {@link Codec#VALUE} and
+ * {@link Value}s passed as arguments are walked within the same bounds, but a
+ * custom codec that returns a {@link Value} it built itself bypasses this
+ * budget. Such a value is not unchecked: before any worker starts, a function
+ * call measures every argument value again while it renders the invoke frame
+ * (nodes, collection items, text bytes, JSON depth, and frame bytes), and the
+ * host measures a handler's result the same way before sending it. A value
+ * returned by {@link Data#encode} is not measured again.
  */
 public final class Encoder {
     /** What one encoding has used, shared by every location in it. */
@@ -149,6 +159,12 @@ public final class Encoder {
     }
 
     Value text(String text) throws JacquardException {
+        chargeText(text);
+        return node(new Value.Text(text));
+    }
+
+    /** Charges a text by its UTF-8 bytes, refusing before it is scanned when its length in chars already exceeds a limit. */
+    private void chargeText(String text) throws JacquardException {
         int limit = data.limits().maxTextBytes();
         // A text's UTF-8 length is at least its length in chars, so these
         // refuse before it is scanned.
@@ -166,7 +182,9 @@ public final class Encoder {
             throw invalid("text exceeds max_text_bytes");
         }
         budget.textBytes += length;
-        return node(new Value.Text(text));
+        if (budget.textBytes > data.limits().maxFrameBytes()) {
+            throw invalid("value exceeds max_frame_bytes; use smaller independent batches");
+        }
     }
 
     Value hash(org.jacquardlang.host.protocol.Hash hash) throws JacquardException {
@@ -214,15 +232,7 @@ public final class Encoder {
         }
         node(value);
         switch (value) {
-            case Value.Text text -> {
-                if (text.value().length() > data.limits().maxTextBytes()) {
-                    throw invalid("text exceeds max_text_bytes");
-                }
-                budget.textBytes += text.value().length();
-                if (budget.textBytes > data.limits().maxFrameBytes()) {
-                    throw invalid("value exceeds max_frame_bytes; use smaller independent batches");
-                }
-            }
+            case Value.Text text -> chargeText(text.value());
             case Value.Tuple tuple -> {
                 checkCount(tuple.items().size(), "tuple");
                 for (Value item : tuple.items()) {

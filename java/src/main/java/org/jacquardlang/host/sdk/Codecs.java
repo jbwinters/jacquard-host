@@ -206,6 +206,7 @@ final class Codecs {
             if (value.size() != items.size()) {
                 throw encoder.invalid("expected a " + items.size() + "-item tuple, found " + value.size() + " items");
             }
+            encoder.checkCount(value.size(), "tuple");
             List<Value> encoded = new ArrayList<>();
             for (int i = 0; i < items.size(); i++) {
                 encoded.add(item(encoder, i, items.get(i), value.get(i)));

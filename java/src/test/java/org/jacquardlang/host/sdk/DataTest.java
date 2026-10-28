@@ -347,4 +347,35 @@ class DataTest {
         assertEquals("value: list exceeds max_collection_items", refusal(() -> data.encode(Codec.list(Codec.INT), huge)));
         assertEquals("value: list exceeds max_collection_items", refusal(() -> data.encode(Codecs.RUNTIME, huge)));
     }
+    /** A raw text is charged by its UTF-8 bytes: three two-byte chars exceed a four-byte limit. */
+    @Test
+    void aRawTextIsChargedByItsUtf8Bytes() throws Exception {
+        Data data = fixture(Limits.HARD.with("max_text_bytes", 4));
+        assertEquals(new Value.Text("\u00e9\u00e9"), data.encode(Codec.VALUE, new Value.Text("\u00e9\u00e9")));
+        assertEquals("value: text exceeds max_text_bytes", refusal(() -> data.encode(Codec.VALUE, new Value.Text("\u00e9\u00e9\u00e9"))));
+        assertEquals("value: text contains a lone surrogate, which has no Jacquard encoding",
+                refusal(() -> data.encode(Codec.VALUE, new Value.Text("\ud800"))));
+    }
+
+    /** A tuple over the collection limit is refused before any item is encoded. */
+    @Test
+    void anOversizedTupleIsRefusedBeforeItsItemsAreEncoded() {
+        Data data = fixture(Limits.HARD.with("max_collection_items", 2));
+        java.util.concurrent.atomic.AtomicInteger encodes = new java.util.concurrent.atomic.AtomicInteger();
+        Codec<Long> counted = new Codec<>() {
+            @Override
+            public Value encode(Encoder encoder, Long value) throws JacquardException {
+                encodes.incrementAndGet();
+                return Codec.INT.encode(encoder, value);
+            }
+
+            @Override
+            public Long decode(Decoder decoder, Value value) throws JacquardException {
+                return Codec.INT.decode(decoder, value);
+            }
+        };
+        Codec<List<Object>> triple = Codec.tuple(counted, counted, counted);
+        assertEquals("value: tuple exceeds max_collection_items", refusal(() -> data.encode(triple, List.of(1L, 2L, 3L))));
+        assertEquals(0, encodes.get());
+    }
 }
