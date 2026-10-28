@@ -80,7 +80,13 @@ public final class Function {
         Encoder.Budget budget = new Encoder.Budget();
         List<Value> values = new ArrayList<>(args.size());
         for (int i = 0; i < args.size(); i++) {
-            values.add(Encoder.root(data, name + ".argument[" + i + "]", budget).encode(Codecs.RUNTIME, args.get(i)));
+            String path = name + ".argument[" + i + "]";
+            try {
+                values.add(Encoder.root(data, path, budget).encode(Codecs.RUNTIME, args.get(i)));
+            } catch (RuntimeException error) {
+                // A caller's codec failed; no worker starts, as for any refusal.
+                throw JacquardException.invalidAt(path, "its codec failed: " + error);
+            }
         }
         return values;
     }

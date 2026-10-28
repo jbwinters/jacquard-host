@@ -417,6 +417,21 @@ class DataTest {
         assertEquals(3, Counted.READS.get());
     }
 
+    /**
+     * A constructor name longer than any the SDK maps is neither expanded
+     * nor copied whole into a message: it names nothing, and the refusal
+     * quotes its first 64 chars and its length.
+     */
+    @Test
+    void aHugeConstructorNameIsRefusedWithoutBeingExpanded() throws Exception {
+        String huge = "X".repeat(1_000_000);
+        assertTrue(huge == Identities.displayToStore(huge), "the name was converted");
+        assertEquals("value: unknown constructor " + "X".repeat(64) + "... (1000000 chars)",
+                refusal(() -> fixture(Limits.HARD).encode(Codec.DYNAMIC, Dynamic.variant(huge))));
+        // A name within the limit is still converted.
+        assertEquals("job-ticket", Identities.displayToStore("JobTicket"));
+    }
+
     @Test
     void anOversizedRecordIsRefusedBeforeItsComponentsAreRead() throws Exception {
         Hash counted = id('c');

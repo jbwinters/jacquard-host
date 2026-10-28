@@ -99,6 +99,17 @@ class BatchesTest {
         assertEquals(0, codec.encodes.get(), "arguments were encoded before the count was checked");
     }
 
+    /** A caller's codec that throws is a local refusal, as any other: no worker starts. */
+    @Test
+    void aCodecThatThrowsIsAnInvalidArgument() throws Exception {
+        Codec<Long> broken = new Counting(n -> () -> {
+            throw new IllegalStateException("broken codec");
+        });
+        JacquardException error = assertThrows(JacquardException.class, () -> ints().invoke(Codec.list(broken).arg(List.of(1L))));
+        assertEquals(JacquardException.Kind.INVALID_ARGUMENT, error.kind());
+        assertEquals("ints.argument[0]: its codec failed: java.lang.IllegalStateException: broken codec", error.getMessage());
+    }
+
     @Test
     void anAlreadyCancelledCallEncodesNoBatch() throws Exception {
         Counting codec = new Counting(n -> null);

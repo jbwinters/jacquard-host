@@ -120,7 +120,7 @@ public final class Encoder {
      */
     public Value constructor(String name, List<Value> fields) throws JacquardException {
         if (Data.BUILTINS.contains(Identities.displayToStore(name))) {
-            throw invalid("use the native form of builtin constructor " + name);
+            throw invalid("use the native form of builtin constructor " + Identities.excerpt(name));
         }
         return builtin(name, fields);
     }
@@ -128,7 +128,7 @@ public final class Encoder {
     private Value builtin(String name, List<Value> fields) throws JacquardException {
         var identity = data.constructorId(name);
         if (identity == null) {
-            throw invalid("unknown constructor " + name);
+            throw invalid("unknown constructor " + Identities.excerpt(name));
         }
         return node(new Value.Constructor(identity, fields));
     }

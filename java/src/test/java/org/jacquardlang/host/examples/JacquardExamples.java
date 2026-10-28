@@ -393,7 +393,7 @@ public final class JacquardExamples {
      * each handler runs on its own thread.
      */
     public static final class Warehouse {
-        private static final AtomicLong NEXT = new AtomicLong();
+        static final AtomicLong NEXT = new AtomicLong();
         /** Injects {@code publish-failed}, {@code after-commit}, or {@code after-delivery}. */
         final String fault;
         private final Path path;
@@ -429,16 +429,23 @@ public final class JacquardExamples {
             return new Warehouse(path, fault, state.copy());
         }
 
+        /** Writes the current state again (tests). */
+        void save() throws IOException {
+            commit(state.copy());
+        }
+
         private void commit(Inventory next) throws IOException {
             Path parent = path.toAbsolutePath().getParent();
             Files.createDirectories(parent);
             String text = compact(next.toJson()) + "\n";
             // A fresh owner-only file, created exclusively, then renamed over the snapshot.
             Path temporary = parent.resolve(path.getFileName() + "." + ProcessHandle.current().pid() + "-" + NEXT.getAndIncrement() + ".tmp");
+            // Created exclusively here, so only a file this call made is ever removed.
+            OutputStream out = Channels.newOutputStream(Files.newByteChannel(temporary,
+                    Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW),
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))));
             try {
-                try (OutputStream out = Channels.newOutputStream(Files.newByteChannel(temporary,
-                        Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW),
-                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))))) {
+                try (out) {
                     out.write(text.getBytes(StandardCharsets.UTF_8));
                 }
                 Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);

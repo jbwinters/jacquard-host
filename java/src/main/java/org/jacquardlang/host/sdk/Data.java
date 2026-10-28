@@ -66,7 +66,7 @@ public final class Data {
     public Hash identity(String name) throws JacquardException {
         Hash identity = names.get(Identities.displayToStore(name));
         if (identity == null) {
-            throw JacquardException.binding("unknown name " + name);
+            throw JacquardException.binding("unknown name " + Identities.excerpt(name));
         }
         return identity;
     }
@@ -91,7 +91,7 @@ public final class Data {
      */
     public Dynamic make(String name, Dynamic... fields) throws JacquardException {
         if (constructorId(name) == null) {
-            throw JacquardException.binding("unknown constructor " + name);
+            throw JacquardException.binding("unknown constructor " + Identities.excerpt(name));
         }
         return new Dynamic.Variant(Identities.displayToStore(name), Arrays.asList(fields));
     }

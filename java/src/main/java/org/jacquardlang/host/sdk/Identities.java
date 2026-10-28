@@ -87,7 +87,9 @@ final class Identities {
 
     /** Converts a display name such as {@code WorkToday} to its store spelling, {@code work-today}; lowercase names are unchanged. */
     static String displayToStore(String name) {
-        if (name.isEmpty() || !Character.isUpperCase(name.codePointAt(0))) {
+        // A name longer than any the SDK maps is returned as given, so a huge
+        // one is never expanded; it then names nothing.
+        if (name.isEmpty() || name.length() > NAME_LIMIT || !Character.isUpperCase(name.codePointAt(0))) {
             return name;
         }
         StringBuilder out = new StringBuilder();
@@ -100,6 +102,18 @@ final class Identities {
             i += Character.charCount(point);
         }
         return out.toString();
+    }
+
+    /** The longest name, in chars, that is converted between spellings. */
+    static final int NAME_LIMIT = 4096;
+
+    /** {@code name} for a message: whole when short, otherwise its first 64 chars and its length. */
+    static String excerpt(String name) {
+        if (name.length() <= 64) {
+            return name;
+        }
+        int end = Character.isHighSurrogate(name.charAt(63)) ? 63 : 64;
+        return name.substring(0, end) + "... (" + name.length() + " chars)";
     }
 
     /** The form used to look up effects and operations: store spelling, with {@code _} accepted for {@code -}. */
