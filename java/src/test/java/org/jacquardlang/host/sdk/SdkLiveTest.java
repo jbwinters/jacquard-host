@@ -104,6 +104,27 @@ class SdkLiveTest {
         assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE), Files.getPosixFilePermissions(path));
     }
 
+    /** The README's SDK examples, compiled from {@code readme/}, against Core. */
+    @Test
+    void theReadmeExamplesRun() throws Exception {
+        Path saved = root.resolve("shipping.json");
+        assertEquals(5L, org.jacquardlang.host.readme.Shipping.shipping(example("quickstart"), root.resolve("cache"), saved));
+        assertTrue(Files.exists(saved));
+        Program documents = prepare(source("documents.jac",
+                "once effect Documents where {\n  read-document : (Text) -> Text\n}\n\nsummarize : (Text) ->{Documents} Text\nsummarize(key) = read-document(key)\n"));
+        Function summarize = org.jacquardlang.host.readme.Documents.summarize(documents);
+        assertEquals("A synthetic document supplied by Java.", summarize.call(Codec.TEXT, "example"));
+        JacquardException refused = assertThrows(JacquardException.class, () -> summarize.call(Codec.TEXT, "other"));
+        assertEquals(JacquardException.Kind.INVOCATION, refused.kind());
+        assertEquals(Failure.OPERATION_FAILED, refused.failure(), refused.getMessage());
+        Function route = prepare(example("triage")).function("triage.batch");
+        var incident = new org.jacquardlang.host.readme.Incidents.Incident("inc-1", "checkout", 5, 3, true, Optional.empty());
+        List<org.jacquardlang.host.readme.Incidents.Triage> routed = route.call(Codec.list(org.jacquardlang.host.readme.Incidents.TRIAGE),
+                new TriagePolicy(4, 60), Codec.list(org.jacquardlang.host.readme.Incidents.INCIDENT).arg(List.of(incident)));
+        assertEquals(List.of(new org.jacquardlang.host.readme.Incidents.Routed("inc-1", "checkout-oncall",
+                org.jacquardlang.host.readme.Incidents.Urgency.PAGE_NOW, List.of("unowned", "customer-impact"))), routed);
+    }
+
     record TriagePolicy(long page, long stale) {}
 
     record Incident(String id, String service, long severity, long age, boolean visible, Optional<String> owner) {}
