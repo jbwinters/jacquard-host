@@ -319,7 +319,11 @@ deadline (default 30 s) that bounds each worker lifetime; see
 
 ## Errors
 
-Every SDK failure is a checked `JacquardException`, whose `kind()` is:
+Every failure to prepare, bind, encode, call, or decode is a checked
+`JacquardException`. Two others are left to their usual types: building a
+codec from a type it cannot map (for example `Codec.of(Object.class)`) throws
+`IllegalArgumentException` at construction, before any call, and
+`Invocation.save` throws `IOException`. A `JacquardException`'s `kind()` is:
 - `INVALID_ARGUMENT`: a local refusal, such as a value of the wrong type or
   one too large or too deep for a frame. No worker starts. `invoke` throws
   only this; otherwise the `Invocation` holds the raw result.

@@ -62,8 +62,21 @@ public final class Function {
         return data;
     }
 
+    /**
+     * Refuses a call with the wrong number of arguments from the count alone,
+     * before anything is copied or encoded, so the work below is bounded by
+     * the checked signature, not by what the caller passed.
+     */
+    private void arity(int received) throws JacquardException {
+        int expected = signature.parameters().size();
+        if (received != expected) {
+            throw JacquardException.invalid(name + ": expected " + expected + " arguments, received " + received);
+        }
+    }
+
     /** Encodes {@code args}, one frame's worth, with one shared budget. */
     private List<Value> encode(List<?> args) throws JacquardException {
+        arity(args.size());
         Encoder.Budget budget = new Encoder.Budget();
         List<Value> values = new ArrayList<>(args.size());
         for (int i = 0; i < args.size(); i++) {
@@ -83,10 +96,7 @@ public final class Function {
      * worth of values.
      */
     private List<Value> check(List<Value> values) throws JacquardException {
-        int expected = signature.parameters().size();
-        if (values.size() != expected) {
-            throw JacquardException.invalid(name + ": expected " + expected + " arguments, received " + values.size());
-        }
+        arity(values.size());
         Encoder.Budget measured = new Encoder.Budget();
         for (int i = 0; i < values.size(); i++) {
             Encoder.root(data, name + ".argument[" + i + "]", measured).raw(values.get(i));
@@ -235,6 +245,7 @@ public final class Function {
     }
 
     private List<Value> batch(Object[] leading, List<?> chunk) throws JacquardException {
+        arity(leading.length + 1);
         List<Object> args = new ArrayList<>(Arrays.asList(leading));
         args.add(chunk);
         return check(encode(args));

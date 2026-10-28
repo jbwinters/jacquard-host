@@ -82,6 +82,23 @@ class BatchesTest {
         return Collections.nCopies(count, codec.arg(1L));
     }
 
+    /**
+     * The argument count is checked from the count alone: a million
+     * arguments to a one-parameter function, or a million leading arguments
+     * to a batch, are refused before one is copied or encoded.
+     */
+    @Test
+    void theWrongArgumentCountIsRefusedBeforeAnyArgumentIsEncoded() throws Exception {
+        Counting codec = new Counting(n -> null);
+        Object[] many = Collections.nCopies(1_000_000, codec.arg(1L)).toArray();
+        JacquardException call = assertThrows(JacquardException.class, () -> ints().invoke(many));
+        assertEquals(JacquardException.Kind.INVALID_ARGUMENT, call.kind());
+        assertEquals("ints: expected 1 arguments, received 1000000", call.getMessage());
+        JacquardException batches = assertThrows(JacquardException.class, () -> ints().mapBatches(Codec.INT, rows(codec, 10), 5, many));
+        assertEquals("ints: expected 1 arguments, received 1000001", batches.getMessage());
+        assertEquals(0, codec.encodes.get(), "arguments were encoded before the count was checked");
+    }
+
     @Test
     void anAlreadyCancelledCallEncodesNoBatch() throws Exception {
         Counting codec = new Counting(n -> null);
