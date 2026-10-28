@@ -320,11 +320,13 @@ deadline (default 30 s) that bounds each worker lifetime; see
 ## Errors
 
 Every failure to prepare, bind, encode, call, or decode is a checked
-`JacquardException`, including an unchecked exception thrown by your own codec
-or record constructor: while a value is encoded, by a function or by
-`Data.encode`, it is an `INVALID_ARGUMENT` naming the value, and while a value
-is decoded, by `Invocation.decode` or `Data.decode`, a `BINDING` failure (the
-raw result kept); either way your exception is its cause.
+`JacquardException`, including an unchecked exception thrown by your own codec,
+record accessor, or record constructor: while a value is encoded, by a
+function or by `Data.encode`, it is an `INVALID_ARGUMENT` naming the value,
+and while a value is decoded, by `Data.decode`, `Invocation.decode`, `call`,
+or `mapBatches`, a `BINDING` failure (from `Invocation.decode`, `call`, and
+`mapBatches`, with the raw result kept); either way your exception is its
+`getCause()`.
 Messages quote your text, such as a name or your codec's message, as an
 excerpt of at most 64 chars and its length, and no message is kept past 8,192
 chars. Two others are left to their usual types: building a

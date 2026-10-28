@@ -80,6 +80,11 @@ public final class Encoder {
         return JacquardException.invalidAt(path, message);
     }
 
+    /** An invalid-argument failure at this location, caused by {@code cause}. */
+    JacquardException invalid(String message, Throwable cause) {
+        return JacquardException.invalidAt(path, message, cause);
+    }
+
     private Encoder child(String segment, int extra) throws JacquardException {
         Encoder child = new Encoder(data, path + segment, depth + extra, budget);
         child.checkDepth(child.depth);

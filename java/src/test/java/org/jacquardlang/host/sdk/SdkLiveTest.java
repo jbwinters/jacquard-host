@@ -495,7 +495,8 @@ class SdkLiveTest {
     /** A result codec that throws with a huge message gives a short binding failure that keeps the raw result and the exception. */
     @Test
     void aThrowingResultCodecKeepsTheResultAndQuotesAnExcerpt() throws Exception {
-        Invocation invocation = prepare(example("quickstart")).function("shipping-cost").invoke(35);
+        Function shipping = prepare(example("quickstart")).function("shipping-cost");
+        Invocation invocation = shipping.invoke(35);
         assertTrue(invocation.ok());
         Codec<Long> throwing = new Codec<>() {
             @Override
@@ -513,7 +514,9 @@ class SdkLiveTest {
         assertTrue(error.getMessage().length() < 400, error.getMessage().length() + " chars");
         assertTrue(error.getMessage().endsWith("... (1000000 chars)"), error.getMessage().substring(0, 120));
         assertTrue(error.result().ok(), "the raw result was not kept");
-        assertTrue(error.getCause() != null, "the codec's exception was not kept");
+        assertTrue(error.getCause() instanceof IllegalStateException, "the codec's exception is not the cause: " + error.getCause());
+        JacquardException called = assertThrows(JacquardException.class, () -> shipping.call(throwing, 35));
+        assertTrue(called.getCause() instanceof IllegalStateException, "call: the codec's exception is not the cause: " + called.getCause());
     }
 
     @Test

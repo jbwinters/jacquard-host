@@ -434,6 +434,13 @@ class DataTest {
 
     record Empty() {}
 
+    record Throwing(String id, long severity, Optional<String> owner) {
+        @Override
+        public long severity() {
+            throw new IllegalStateException("X".repeat(1_000_000));
+        }
+    }
+
     record Refusing(String id, long severity, Optional<String> owner) {
         Refusing {
             throw new IllegalArgumentException("X".repeat(1_000_000));
@@ -492,6 +499,10 @@ class DataTest {
         assertEquals("Refusing refused the decoded fields: java.lang.IllegalArgumentException: " + "X".repeat(64) + "... (1000000 chars)",
                 refused.getMessage());
         assertTrue(refused.getCause() instanceof IllegalArgumentException, "the constructor's refusal was not kept");
+        // A record accessor that throws while encoding.
+        JacquardException accessor = assertThrows(JacquardException.class, () -> data.encode(Codec.record(Throwing.class, "incident"), new Throwing("ok", 1, Optional.empty())));
+        assertEquals("value: cannot read Throwing.severity: java.lang.IllegalStateException: " + "X".repeat(64) + "... (1000000 chars)", accessor.getMessage());
+        assertTrue(accessor.getCause() instanceof IllegalStateException, "the accessor's exception is not the cause");
         // A caller's field name in a path.
         Codec<Long> named = new Codec<>() {
             @Override

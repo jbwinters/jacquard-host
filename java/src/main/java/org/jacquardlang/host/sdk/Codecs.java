@@ -362,7 +362,9 @@ final class Codecs {
             try {
                 return accessors[index].invoke(value);
             } catch (IllegalAccessException | InvocationTargetException error) {
-                throw encoder.invalid("cannot read " + type.getSimpleName() + "." + components[index].getName());
+                Throwable failure = error.getCause() == null ? error : error.getCause();
+                throw encoder.invalid("cannot read " + type.getSimpleName() + "." + components[index].getName() + ": "
+                        + Identities.describe(failure), failure);
             }
         }
 
@@ -458,7 +460,9 @@ final class Codecs {
                 try {
                     component = shape.accessors()[i].invoke(value);
                 } catch (IllegalAccessException | InvocationTargetException error) {
-                    throw encoder.invalid("cannot read " + type.getSimpleName() + "." + shape.components()[i].getName());
+                    Throwable failure = error.getCause() == null ? error : error.getCause();
+                    throw encoder.invalid("cannot read " + type.getSimpleName() + "." + shape.components()[i].getName() + ": "
+                            + Identities.describe(failure), failure);
                 }
                 encoded.add(item(encoder, i, items.get(i), component));
             }
