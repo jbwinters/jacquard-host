@@ -178,6 +178,12 @@ public final class Program {
         List<String> missing = new ArrayList<>();
         for (Map.Entry<String, EffectGroup> effect : selected.entrySet()) {
             Operations service = chosen.get(effect.getKey());
+            // Every name a service binds must be an operation of the program,
+            // so a service binding more is refused from its count, before any is copied.
+            if (service != null && service.size() > operationNames.size()) {
+                throw JacquardException.binding(name + ": the service for " + effect.getKey() + " binds " + service.size()
+                        + " operations, but the program has " + operationNames.size());
+            }
             Map<String, Operations.Erased> handlers = service == null ? Map.of() : service.handlers();
             // One service may serve several effects, but every name it binds
             // must be some effect's operation.

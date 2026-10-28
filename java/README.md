@@ -333,10 +333,16 @@ Names and exception messages the SDK quotes (a constructor, type, field,
 effect, operation, or executable name, or your exception's message) appear
 as an excerpt of at most 64 chars and its length. A message you pass to
 `Encoder.invalid` or `Decoder.mapping` is kept as written, and no message is
-longer than 8,192 chars, the start kept and the length noted. Two others are left to their usual types: building a
-codec from a type it cannot map (for example `Codec.of(Object.class)`) throws
-`IllegalArgumentException` at construction, before any call, and
-`Invocation.save` throws `IOException`. A `JacquardException`'s `kind()` is:
+longer than 8,192 chars, the start kept and the length noted. A path longer
+than any path (4,096 chars), whether a source, the cache directory, the
+prelude, the executable, or a save path, is refused before the file system
+sees it. Some failures keep their usual Java types: building a codec from a
+type it cannot map (for example `Codec.of(Object.class)`), or a `Dynamic`
+list, tuple, or constructor with more items than the v0 hard limit allows,
+throws `IllegalArgumentException` at construction, before any call;
+`Invocation.save` throws `IOException`; and passing `null` where an object
+is required throws `NullPointerException`. A `JacquardException`'s `kind()`
+is:
 - `INVALID_ARGUMENT`: a local refusal, such as a value of the wrong type or
   one too large or too deep for a frame. No worker starts. `invoke` throws
   only this; otherwise the `Invocation` holds the raw result.

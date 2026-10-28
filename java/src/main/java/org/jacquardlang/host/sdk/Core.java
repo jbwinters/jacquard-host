@@ -267,10 +267,25 @@ final class Core {
         return digest(canonical(map).getBytes(StandardCharsets.UTF_8));
     }
 
+    /** The longest path, in chars, the SDK passes to the file system (Linux's PATH_MAX). */
+    static final int PATH_LIMIT = 4096;
+
+    /**
+     * {@code path}, refused when it is longer than any path, before the file
+     * system or any message sees it whole.
+     */
+    static Path checkedPath(Path path, String what) throws JacquardException {
+        String text = path.toString();
+        if (text.length() > PATH_LIMIT) {
+            throw JacquardException.preparation(what + " " + Identities.excerpt(text) + " is longer than any path");
+        }
+        return path;
+    }
+
     /** Finds an executable the way a shell would, then resolves symbolic links. */
     static Path executable(String binary) throws JacquardException {
         // No path is this long (PATH_MAX is 4096 on Linux), so a longer name is refused before it is used.
-        if (binary.length() > Identities.NAME_LIMIT) {
+        if (binary.length() > PATH_LIMIT) {
             throw JacquardException.preparation("cannot find Core executable " + Identities.excerpt(binary)
                     + "; configure JACQUARD_BIN using the setup guide");
         }

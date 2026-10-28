@@ -116,6 +116,9 @@ public final class Invocation {
      * an existing file keeps its permissions.
      */
     public void save(Path path) throws IOException {
+        if (path.toString().length() > Core.PATH_LIMIT) {
+            throw new IOException(Identities.excerpt(path.toString()) + " is longer than any path");
+        }
         Map<String, Json> host = Json.object(
                 "evidence", Json.of(raw.hostEvidence()),
                 "exit_status", raw.exitStatus() == null ? Json.NULL : Json.of(raw.exitStatus()),

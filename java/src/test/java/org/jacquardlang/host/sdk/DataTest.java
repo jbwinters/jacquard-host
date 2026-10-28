@@ -540,10 +540,32 @@ class DataTest {
         String mapping = assertThrows(JacquardException.class, () -> data.decode(invalidating, data.encode(Codec.INT, 1L))).getMessage();
         assertEquals(JacquardException.MESSAGE_LIMIT, mapping.length());
         assertTrue(mapping.endsWith("X... (1000000 chars)"), mapping.substring(mapping.length() - 40));
+        // A null message is joined as "null", not dereferenced.
+        assertEquals("p: null", JacquardException.joined("p: ", null));
+        // A cut that dropped a high surrogate at the boundary is still recognised as cut.
+        // The suffix "... (1008173 chars)" is 19 chars, so the cut lands at 8,173, inside the emoji.
+        String emoji = "X".repeat(JacquardException.MESSAGE_LIMIT - 20) + "\uD83D\uDE00" + "X".repeat(1_000_000);
+        String cut = JacquardException.bounded(emoji);
+        assertEquals(JacquardException.MESSAGE_LIMIT - 1, cut.length(), "the cut did not land on the surrogate");
+        String recut = JacquardException.joined("batch 1: ", cut);
+        assertTrue(recut.endsWith("... (" + (emoji.length() + 9) + " chars)"), recut.substring(recut.length() - 30));
         // A cut message given a further prefix keeps its noted length, plus the prefix.
         String again = JacquardException.joined("batch 1: ", mapping);
         assertEquals(JacquardException.MESSAGE_LIMIT, again.length());
         assertTrue(again.startsWith("batch 1: XXX") && again.endsWith("X... (1000009 chars)"), again.substring(again.length() - 40));
+    }
+
+    /** A Dynamic value over the hard limit is refused at construction, before its items are copied. */
+    @Test
+    void anOversizedDynamicIsRefusedBeforeItIsCopied() throws Exception {
+        int limit = Limits.HARD.maxCollectionItems();
+        java.util.List<Dynamic> many = Collections.nCopies(limit + 1, Dynamic.of(1L));
+        assertThrows(IllegalArgumentException.class, () -> new Dynamic.List(many));
+        assertThrows(IllegalArgumentException.class, () -> new Dynamic.Tuple(many));
+        assertThrows(IllegalArgumentException.class, () -> new Dynamic.Variant("routed", many));
+        JacquardException made = assertThrows(JacquardException.class, () -> fixture(Limits.HARD).make("routed", many.toArray(new Dynamic[0])));
+        assertEquals(JacquardException.Kind.BINDING, made.kind());
+        assertEquals(limit, new Dynamic.List(Collections.nCopies(limit, Dynamic.of(1L))).items().size());
     }
 
     /** A codec building a constructor by name has its fields counted before they are copied. */

@@ -90,6 +90,9 @@ public final class Data {
      * @throws JacquardException a binding failure for an unknown constructor
      */
     public Dynamic make(String name, Dynamic... fields) throws JacquardException {
+        if (fields.length > Limits.HARD.maxCollectionItems()) {
+            throw JacquardException.binding("constructor of " + fields.length + " fields exceeds the v0 hard limit of " + Limits.HARD.maxCollectionItems());
+        }
         if (constructorId(name) == null) {
             throw JacquardException.binding("unknown constructor " + Identities.excerpt(name));
         }

@@ -60,6 +60,16 @@ class RuntimeTest {
         String longer = assertThrows(JacquardException.class, () -> new Runtime(base.withBinary("/no/such/" + "y".repeat(1000)))
                 .prepare(List.of(Path.of("rules.jac")), PrepareOptions.defaults())).getMessage();
         assertTrue(longer.length() < 200 && longer.contains("... (1009 chars)"), longer);
+        // Paths longer than any path are refused with an excerpt before the file system sees them.
+        Path long1 = Path.of("/" + "s".repeat(1_000_000) + ".jac");
+        String source = assertThrows(JacquardException.class, () -> runtime.prepare(List.of(long1), PrepareOptions.defaults())).getMessage();
+        assertTrue(source.startsWith("source /sss") && source.endsWith("(1000005 chars) is longer than any path"), source.substring(0, 80));
+        String cache = assertThrows(JacquardException.class, () -> runtime.prepare(List.of(Path.of("rules.jac")),
+                new PrepareOptions(Path.of("/" + "c".repeat(1_000_000))))).getMessage();
+        assertTrue(cache.length() < 200 && cache.startsWith("cache directory /ccc"), cache.substring(0, 80));
+        JacquardException prelude = assertThrows(JacquardException.class, () -> new Runtime(base.withPrelude(Path.of("/" + "p".repeat(1_000_000)))));
+        assertEquals(JacquardException.Kind.BINDING, prelude.kind());
+        assertTrue(prelude.getMessage().length() < 200, prelude.getMessage().substring(0, 80));
         for (String nul : List.of("jac\0quard", "/tmp/jac\0quard")) {
             JacquardException error = assertThrows(JacquardException.class, () -> new Runtime(base.withBinary(nul))
                     .prepare(List.of(Path.of("rules.jac")), PrepareOptions.defaults()));

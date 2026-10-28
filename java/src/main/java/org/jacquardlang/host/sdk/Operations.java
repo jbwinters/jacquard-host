@@ -60,6 +60,11 @@ public final class Operations {
     /** An empty service. */
     public Operations() {}
 
+    /** How many operations this service binds, without copying them. */
+    synchronized int size() {
+        return handlers.size();
+    }
+
     /** The handlers by store-spelled operation name. */
     synchronized Map<String, Erased> handlers() {
         return Map.copyOf(handlers);

@@ -55,7 +55,8 @@ public final class JacquardException extends Exception {
 
     /** The noted length of a message already cut by {@link #bounded}, or -1. */
     private static long notedLength(String message) {
-        if (message.length() != MESSAGE_LIMIT || !message.endsWith(" chars)")) {
+        // A cut that dropped a high surrogate is one char shorter.
+        if (message.length() < MESSAGE_LIMIT - 1 || message.length() > MESSAGE_LIMIT || !message.endsWith(" chars)")) {
             return -1;
         }
         int open = message.lastIndexOf("... (");
@@ -73,6 +74,9 @@ public final class JacquardException extends Exception {
      * it is never cut twice or noted wrongly. Nothing longer than the limit is copied.
      */
     static String joined(String prefix, String message) {
+        if (message == null) {
+            message = "null";
+        }
         long noted = notedLength(message);
         long total = prefix.length() + (noted < 0 ? message.length() : noted);
         if (noted < 0 && total <= MESSAGE_LIMIT) {

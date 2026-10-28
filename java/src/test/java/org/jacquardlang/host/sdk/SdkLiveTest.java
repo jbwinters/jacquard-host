@@ -241,6 +241,13 @@ class SdkLiveTest {
         Operations typo = new Operations().on("lookup_stok", Codec.TEXT, Codec.UNIT, sku -> null);
         JacquardException unknown = assertThrows(JacquardException.class, () -> fulfillment.function("fulfillment.place", Map.of("Inventory", typo)));
         assertTrue(unknown.getMessage().contains("inventory has no operation lookup-stok"), unknown.getMessage());
+        // A service binding more names than the program has operations is refused from its count.
+        Operations wide = new Operations();
+        for (int i = 0; i < 100; i++) {
+            wide.on("not-an-operation-" + i, Codec.TEXT, Codec.UNIT, sku -> null);
+        }
+        JacquardException tooMany = assertThrows(JacquardException.class, () -> fulfillment.function("fulfillment.place", Map.of("Inventory", wide)));
+        assertTrue(tooMany.getMessage().contains("the service for inventory binds 100 operations, but the program has "), tooMany.getMessage());
         fulfillment.provide("Inventory", inventory);
         Function valid = fulfillment.function("order.valid-lines");
         assertTrue(valid.call(Codec.BOOL, Codec.list(Codec.DYNAMIC).arg(List.of()), List.of()));
@@ -556,6 +563,24 @@ class SdkLiveTest {
         assertTrue(error.result().ok(), "the raw result was not kept");
         assertTrue(error.getCause() instanceof IllegalStateException, "the codec's exception is not the cause: " + error.getCause());
         JacquardException called = assertThrows(JacquardException.class, () -> shipping.call(throwing, 35));
+        // A mapping failure with a null message is still a binding failure keeping the result.
+        Codec<Long> nullMessage = new Codec<>() {
+            @Override
+            public org.jacquardlang.host.protocol.Value encode(Encoder encoder, Long value) throws JacquardException {
+                return Codec.INT.encode(encoder, value);
+            }
+
+            @Override
+            public Long decode(Decoder decoder, org.jacquardlang.host.protocol.Value value) throws JacquardException {
+                throw decoder.mapping(null);
+            }
+        };
+        JacquardException nulled = assertThrows(JacquardException.class, () -> invocation.decode(nullMessage));
+        assertEquals(JacquardException.Kind.BINDING, nulled.kind());
+        assertTrue(nulled.result().ok(), "the raw result was not kept");
+        // A save path longer than any path is refused before the file system sees it.
+        java.io.IOException save = assertThrows(java.io.IOException.class, () -> invocation.save(Path.of("/" + "v".repeat(1_000_000))));
+        assertTrue(save.getMessage().length() < 200, save.getMessage().substring(0, 80));
         assertTrue(called.getCause() instanceof IllegalStateException, "call: the codec's exception is not the cause: " + called.getCause());
     }
 

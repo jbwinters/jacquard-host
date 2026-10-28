@@ -110,6 +110,9 @@ public final class Runtime {
             throw JacquardException.binding(
                     "set JACQUARD_PRELUDE or RuntimeOptions.prelude; Core and prelude must match the compatibility pin");
         }
+        if (preludePath.toString().length() > Core.PATH_LIMIT) {
+            throw JacquardException.binding("prelude " + Identities.excerpt(preludePath.toString()) + " is longer than any path");
+        }
         if (options.deadline() != null && (options.deadline().isZero() || options.deadline().isNegative())) {
             throw JacquardException.binding("deadline must be positive");
         }
@@ -335,7 +338,7 @@ public final class Runtime {
             if (stopped(cancel)) {
                 throw JacquardException.preparation(Core.ABORTED);
             }
-            Path source = java.util.Objects.requireNonNull(sources.get(i), "source");
+            Path source = Core.checkedPath(java.util.Objects.requireNonNull(sources.get(i), "source"), "source");
             checked.add(source);
             String kind = extension(source);
             if (syntax == null) {
@@ -345,7 +348,8 @@ public final class Runtime {
                 throw usage;
             }
         }
-        Path configured = (options.cacheDir() == null ? Path.of(DEFAULT_CACHE_DIR) : options.cacheDir()).toAbsolutePath();
+        Path configured = Core.checkedPath(options.cacheDir() == null ? Path.of(DEFAULT_CACHE_DIR) : options.cacheDir(), "cache directory")
+                .toAbsolutePath();
         Path executable = Core.executable(binary);
         String binaryHash;
         try {

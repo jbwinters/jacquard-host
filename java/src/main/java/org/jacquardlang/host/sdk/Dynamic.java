@@ -52,14 +52,14 @@ public sealed interface Dynamic
     /** A positional product; the empty tuple is unit. */
     record Tuple(java.util.List<Dynamic> items) implements Dynamic {
         public Tuple {
-            items = java.util.List.copyOf(items);
+            items = java.util.List.copyOf(limited(items, "tuple"));
         }
     }
 
     /** A Jacquard {@code List}. */
     record List(java.util.List<Dynamic> items) implements Dynamic {
         public List {
-            items = java.util.List.copyOf(items);
+            items = java.util.List.copyOf(limited(items, "list"));
         }
     }
 
@@ -73,7 +73,7 @@ public sealed interface Dynamic
     record Variant(String name, java.util.List<Dynamic> fields) implements Dynamic {
         public Variant {
             Objects.requireNonNull(name, "name");
-            fields = java.util.List.copyOf(fields);
+            fields = java.util.List.copyOf(limited(fields, "constructor"));
         }
     }
 
@@ -120,5 +120,14 @@ public sealed interface Dynamic
     /** A constructor value by public name; {@link Data#make} also checks that the constructor exists. */
     static Dynamic variant(String name, Dynamic... fields) {
         return new Variant(name, Arrays.asList(fields));
+    }
+
+    /** Refuses more items than any v0 frame admits, before they are copied. */
+    private static <T> java.util.List<T> limited(java.util.List<T> items, String what) {
+        int limit = org.jacquardlang.host.protocol.Limits.HARD.maxCollectionItems();
+        if (items.size() > limit) {
+            throw new IllegalArgumentException(what + " of " + items.size() + " items exceeds the v0 hard limit of " + limit);
+        }
+        return items;
     }
 }
