@@ -71,10 +71,12 @@ class CoreDescriptorsTest {
             // A JDK thread such as a process reaper can outlive a command
             // briefly; only one still there after two seconds is a leak.
             long deadline = System.nanoTime() + 2_000_000_000L;
-            while (threads() > threads && System.nanoTime() < deadline) {
+            boolean settled = threads() <= threads;
+            while (!settled && System.nanoTime() < deadline) {
                 Thread.sleep(20);
+                settled = threads() <= threads;
             }
-            assertTrue(threads() <= threads, "threads grew from " + named + " to " + names());
+            assertTrue(settled, "threads grew from " + named + " to " + names());
         }
     }
 }
