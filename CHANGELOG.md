@@ -55,9 +55,17 @@
   every binding is derived from it again on load, so a changed `program.json`
   is refused; on POSIX, a cache root or entry that another user owns or that
   others may write is refused, and new entries are owner-only. On Linux with
-  util-linux `setsid`, each Core command runs in its own process group, which
-  is killed when the command exits and on every stop; elsewhere its recorded
-  descendants are killed. The four example projects run through the
+  a `setsid` at `/usr/bin` or `/bin`, each Core command runs in its own
+  process group, which is killed when the command exits and on every stop,
+  and a `setsid` that cannot exec Core is reported as a start failure;
+  elsewhere its recorded descendants are killed. Preparation takes at most
+  1,024 sources, refused from the list's size; a failed preparation's
+  cleanup is bounded and ends at a stop, leaving an unpublished staging
+  directory that a later preparation removes after an hour; and a symbolic
+  link to the cache root is followed to the directory it names. A function
+  whose signature nests types deeper than 64 levels, the protocol's value
+  depth, is left unbound with a binding failure naming the limit, while the
+  program's other functions still bind. The four example projects run through the
   `JacquardExamples` command. The low-level adapter gains `carrier.Command`,
   the bounded runner the SDK uses for Core's commands, which shares the
   worker's output FIFOs, and `HandlerContext.of` for calling a handler
