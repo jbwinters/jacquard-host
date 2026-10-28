@@ -20,6 +20,21 @@
   handler reports completion unknown. As a consequence `HandlerError` cannot
   implement `std::error::Error`, and a downstream `From` impl for a type that
   implements `Error` conflicts with it.
+- Java adapter: an independent Maven project in `java/`
+  (`org.jacquardlang:jacquard-host`, Java 21+) with no third-party runtime
+  dependencies (on Unix it runs the system `mkfifo`).
+  It provides strict codecs, the session state machine, a bounded process
+  carrier for `jacquard host worker`, and a `Host` with a closed operation
+  registry. It carries the pinned kit as class-path resources and replays all
+  21 recordings. It is protocol-level only, with no SDK layer. Java cannot
+  start the worker in its own process group or interrupt a pipe read, so the
+  carrier never blocks on a read, reads the worker's output through FIFOs it
+  creates with `mkfifo` on Unix (so the JDK's exit-time pipe drain cannot hold
+  the caller), kills the worker's process tree from a `ProcessHandle`
+  snapshot, and documents what that misses in `docs/LIMITS.md`. `scripts/core_pin.py` now generates
+  `java/src/main/java/org/jacquardlang/host/Compat.java` and keeps the Java kit
+  copy in sync, and CI runs the offline tests on Java 21 and 25 and the live
+  tests against the pinned Core.
 
 ## 0.2.0 — 2026-10-25
 

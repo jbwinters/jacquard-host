@@ -71,6 +71,26 @@ jobs:
       - name: Offline tests
         run: cargo test --locked
 
+  java:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ["21", "25"]
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+          cache-dependency-path: java/pom.xml
+      - name: Offline tests
+        run: mvn -B -ntp verify
+
   bootstrap:
     runs-on: ubuntu-latest
     strategy:
@@ -135,5 +155,16 @@ jobs:
       - name: Run independent Rust adapter against Core
         run: cargo test --locked -- --nocapture
         working-directory: rust
+        env:
+          JACQUARD_REQUIRE_LIVE: "1"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: java/pom.xml
+      - name: Run independent Java adapter against Core
+        run: mvn -B -ntp verify
+        working-directory: java
         env:
           JACQUARD_REQUIRE_LIVE: "1"

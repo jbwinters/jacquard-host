@@ -38,9 +38,11 @@ REPO = Path(__file__).resolve().parents[1]
 PIN = REPO / "core-pin.json"
 SCHEMA = "jacquard-host-core-pin-v1"
 KIT_DIR = REPO / "src" / "jacquard_host" / "data" / "conformance" / "host-protocol-v0"
-# Go and Rust embed their own byte-identical copies; go:embed cannot reach
-# outside the module, and a published crate contains only its own directory.
-KIT_DIRS = (KIT_DIR, REPO / "go" / "kit" / "data" / "host-protocol-v0", REPO / "rust" / "kit" / "host-protocol-v0")
+# Go, Rust, and Java embed their own byte-identical copies; go:embed cannot
+# reach outside the module, a published crate contains only its own directory,
+# and a jar carries its kit as class-path resources.
+KIT_DIRS = (KIT_DIR, REPO / "go" / "kit" / "data" / "host-protocol-v0", REPO / "rust" / "kit" / "host-protocol-v0",
+            REPO / "java" / "src" / "main" / "resources" / "org" / "jacquardlang" / "host" / "kit" / "host-protocol-v0")
 KIT_FILES = ("kit/kit.json", "kit/transcripts.json", "kit/fixtures.jac", "vectors.json")
 # Copied with the kit but not part of the digest pin; prose may be refreshed.
 KIT_EXTRAS = ("kit/README.md",)
@@ -230,11 +232,43 @@ pub const PENDING_DECISIONS: [&str; {len(kit["pending_decisions"])}] = [{pending
 """
 
 
+def render_java(pin: dict) -> str:
+    release, kit = pin["release"], pin["kit"]
+    digests = ",\n".join(f'            Map.entry("{name}", "{kit["digests"][name]}")' for name in KIT_FILES)
+    pending = ", ".join(f'"{name}"' for name in kit["pending_decisions"])
+    return f"""// Generated from core-pin.json by scripts/core_pin.py; do not edit by hand.
+
+package org.jacquardlang.host;
+
+import java.util.List;
+import java.util.Map;
+
+/** The Jacquard Core release and host protocol this adapter is pinned to. */
+public final class Compat {{
+    private Compat() {{}}
+
+    public static final String PROTOCOL = "{pin["protocol"]}";
+    public static final String CARRIER = "{pin["carrier"]}";
+    public static final String CORE_VERSION = "{release["version"]}";
+    public static final String CORE_TAG = "{release["tag"]}";
+    public static final String CORE_COMMIT = "{release["commit"]}";
+
+    /** SHA-256 digests of the pinned conformance kit files. */
+    public static final List<Map.Entry<String, String>> KIT_DIGESTS = List.of(
+{digests});
+
+    /** Decisions Core recorded as pending; replay reproduces them. */
+    public static final List<String> PENDING_DECISIONS = List.of({pending});
+}}
+"""
+
+
 GENERATED = {
     "src/jacquard_host/compat.py": render_python,
     "typescript/src/compat.ts": render_typescript,
     "go/protocol/compat.go": render_go,
     "rust/src/compat.rs": render_rust,
+    "java/src/main/java/org/jacquardlang/host/Compat.java": render_java,
 }
 BLOCKS = {
     "docs/COMPATIBILITY.md": render_compatibility,
