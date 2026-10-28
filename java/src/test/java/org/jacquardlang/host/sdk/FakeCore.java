@@ -31,7 +31,7 @@ final class FakeCore implements AutoCloseable {
 
     /**
      * A fake whose {@code --version} prints {@code version} and leaves a
-     * sleeper holding its output, and whose other commands run {@code cases}
+     * sleeper that closed its output, and whose other commands run {@code cases}
      * (shell {@code case} arms). {@code $ROOT} names the fake's directory.
      */
     static FakeCore create(Path scratch, String version, String versionCase, String cases) throws Exception {
@@ -40,7 +40,7 @@ final class FakeCore implements AutoCloseable {
         Files.writeString(root.resolve("prelude/01-prim.jqd"), "prelude\n");
         Files.writeString(root.resolve("rules.jac"), "rules\n");
         String script = "#!/bin/sh\nROOT='" + root + "'\necho \"$1\" >> \"$ROOT/log\"\ncase \"$1\" in\n--version) "
-                + (versionCase != null ? versionCase : "echo 'jacquard " + version + "'; sleep 30 & echo $! >> \"$ROOT/pids\"") + " ;;\n"
+                + (versionCase != null ? versionCase : "echo 'jacquard " + version + "'; sleep 30 </dev/null >/dev/null 2>&1 & echo $! >> \"$ROOT/pids\"") + " ;;\n"
                 + cases + "\nesac\n";
         Path binary = root.resolve("jacquard");
         Files.writeString(binary, script);

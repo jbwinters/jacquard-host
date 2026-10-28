@@ -5,9 +5,13 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -46,15 +50,102 @@ final class OutputPipes {
     private final RandomAccessFile stderr;
     private final InputStream stdoutStream;
     private final InputStream stderrStream;
+    /** The FIFOs' file keys (device and inode), which identify them in {@code /proc} after they are unlinked. */
+    private final Object stdoutKey;
+    private final Object stderrKey;
 
     private OutputPipes(Path directory, Path stdoutPath, Path stderrPath, RandomAccessFile stdout, RandomAccessFile stderr) {
         this.directory = directory;
+        this.stdoutKey = fileKey(stdoutPath);
+        this.stderrKey = fileKey(stderrPath);
         this.stdoutPath = stdoutPath;
         this.stderrPath = stderrPath;
         this.stdout = stdout;
         this.stderr = stderr;
         this.stdoutStream = streamOf(stdout);
         this.stderrStream = streamOf(stderr);
+    }
+
+    private static Object fileKey(Path path) {
+        try {
+            return Files.readAttributes(path, BasicFileAttributes.class).fileKey();
+        } catch (IOException | RuntimeException error) {
+            return null;
+        }
+    }
+
+    /** Whether {@link #holders()} can find the processes that hold the FIFOs: where {@code /proc/<pid>/fd} exists. */
+    static final boolean HOLDERS_FOUND = Files.isDirectory(Path.of("/proc/self/fd"));
+
+    /**
+     * The processes, other than this JVM and its children, that hold either
+     * FIFO open: on Linux, those of this user whose {@code /proc/<pid>/fd}
+     * links to one of them. Elsewhere it is always empty. The JVM's own
+     * children are left out because one that the JDK is still spawning may
+     * briefly hold a copy of the host's descriptors.
+     */
+    List<ProcessHandle> holders() {
+        if (!HOLDERS_FOUND || stdoutKey == null || stderrKey == null) {
+            return List.of();
+        }
+        long self = ProcessHandle.current().pid();
+        Object uid;
+        try {
+            uid = Files.getAttribute(Path.of("/proc/self"), "unix:uid");
+        } catch (IOException | RuntimeException error) {
+            return List.of();
+        }
+        String marker = directory.getFileName().toString();
+        List<ProcessHandle> found = new ArrayList<>();
+        try (DirectoryStream<Path> processes = Files.newDirectoryStream(Path.of("/proc"))) {
+            for (Path process : processes) {
+                String name = process.getFileName().toString();
+                if (name.isEmpty() || !name.chars().allMatch(c -> c >= '0' && c <= '9')) {
+                    continue;
+                }
+                long pid;
+                try {
+                    pid = Long.parseLong(name);
+                    if (pid == self || !uid.equals(Files.getAttribute(process, "unix:uid", LinkOption.NOFOLLOW_LINKS))) {
+                        continue;
+                    }
+                } catch (IOException | RuntimeException error) {
+                    continue;
+                }
+                if (holds(process.resolve("fd"), marker)) {
+                    ProcessHandle.of(pid).ifPresent(handle -> {
+                        if (handle.parent().map(parent -> parent.pid() != self).orElse(true)) {
+                            found.add(handle);
+                        }
+                    });
+                }
+            }
+        } catch (IOException | RuntimeException error) {
+            // What was found so far.
+        }
+        return found;
+    }
+
+    private boolean holds(Path descriptors, String marker) {
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(descriptors)) {
+            for (Path descriptor : entries) {
+                try {
+                    // The link names the FIFO (with " (deleted)" once unlinked); its key confirms it.
+                    if (!Files.readSymbolicLink(descriptor).toString().contains(marker)) {
+                        continue;
+                    }
+                    Object key = Files.readAttributes(descriptor, BasicFileAttributes.class).fileKey();
+                    if (stdoutKey.equals(key) || stderrKey.equals(key)) {
+                        return true;
+                    }
+                } catch (IOException | RuntimeException error) {
+                    // Closed meanwhile, or not ours to read.
+                }
+            }
+        } catch (IOException | RuntimeException error) {
+            // The process exited, or its descriptors are not readable.
+        }
+        return false;
     }
 
     private static InputStream streamOf(RandomAccessFile file) {

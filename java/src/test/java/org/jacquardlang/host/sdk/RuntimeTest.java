@@ -18,14 +18,16 @@ import org.jacquardlang.host.carrier.Cancel;
 import org.jacquardlang.host.protocol.Limits;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Runtime options, and preparation against a fake Core: one version check and
- * prelude discovery per key across threads and runtimes, failures reported
- * without waiting for descendants, and every Core command bounded by its
- * timeout, its output limit, the caller's {@link Cancel}, and its interrupt.
+ * prelude discovery per key across threads and runtimes, a child holding a
+ * command's output failing it and killed, every Core command bounded by its
+ * timeout, its output limit, the caller's {@link Cancel}, and its interrupt,
+ * bounded regular-file reads, and a verified cache.
  */
 class RuntimeTest {
     @TempDir
@@ -58,10 +60,9 @@ class RuntimeTest {
 
     @DisabledOnOs(OS.WINDOWS)
     @Test
-    void versionIsCheckedOnceAndFailuresAreReportedWithoutWaitingForDescendants() throws Exception {
+    void versionIsCheckedOnceAcrossThreadsAndRuntimes() throws Exception {
         try (FakeCore fake = FakeCore.failing(scratch.resolve("once"), Compat.CORE_VERSION)) {
             List<CompletableFuture<JacquardException>> workers = new ArrayList<>();
-            long started = System.nanoTime();
             for (int i = 0; i < 4; i++) {
                 workers.add(CompletableFuture.supplyAsync(() -> {
                     try {
@@ -76,9 +77,6 @@ class RuntimeTest {
                 assertEquals(JacquardException.Kind.PREPARATION, error.kind());
                 assertEquals("Core check failed: boom", error.getMessage());
             }
-            // The --version sleeper holds Core's output for 30 seconds.
-            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
-            assertTrue(elapsed < 10_000, "a descendant holding Core's output delayed preparation: " + elapsed + " ms");
             assertEquals(1, fake.calls("--version"));
             assertEquals(4, fake.calls("check"));
             assertFalse(fake.stagingLeft(), "a staging directory was left behind");
@@ -88,6 +86,18 @@ class RuntimeTest {
             assertThrows(JacquardException.class, () -> other.prepare(List.of(fake.source("rules.jac")), fake.options()));
             assertEquals(1, fake.calls("--version"));
             assertEquals(1, other.coreCommands());
+        }
+    }
+
+    /** A Core command whose child keeps its output open fails after the grace, and the child is killed. */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void aCoreCommandWhoseChildHoldsItsOutputFailsAndTheChildIsKilled() throws Exception {
+        try (FakeCore fake = FakeCore.create(scratch.resolve("holder"), Compat.CORE_VERSION, null,
+                "check) sleep 300 & echo $! > \"$ROOT/holder.pid\" ;;")) {
+            assertEquals("Core check failed: its output did not close", fake.prepareFails().getMessage());
+            FakeCore.dies("the command's child", fake.pid("holder.pid"));
+            assertFalse(fake.stagingLeft());
         }
     }
 

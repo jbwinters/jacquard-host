@@ -16,9 +16,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * A Core command whose descendant escapes (with {@code setsid}) and keeps
- * the command's output open fails nothing by itself, and repeated
- * preparations leak no descriptor or thread. Its own test class, so its own
- * JVM, and so no other class changes the counts.
+ * the command's output open fails after the grace; the host finds the
+ * escaped descendant through /proc and kills it, and repeated preparations
+ * leak no descriptor or thread. Its own test class, so its own JVM, and so
+ * no other class changes the counts.
  */
 @EnabledOnOs(OS.LINUX)
 class CoreDescriptorsTest {
@@ -38,19 +39,20 @@ class CoreDescriptorsTest {
     }
 
     @Test
-    void anEscapedDescendantHoldingCoreOutputLeaksNothing() throws Exception {
-        // Every command leaves an escaped sleeper holding its output; check
-        // and hash print nothing, so preparation fails at the first hash.
-        String escape = "setsid sleep 30 & echo $! >> \"$ROOT/pids\"";
-        String version = "echo 'jacquard " + Compat.CORE_VERSION + "'; " + escape;
-        try (FakeCore fake = FakeCore.create(scratch.resolve("escaped"), Compat.CORE_VERSION, version, "*) " + escape + " ;;")) {
+    void anEscapedDescendantHoldingCoreOutputIsKilledAndLeaksNothing() throws Exception {
+        // --version leaves an escaped sleeper holding its output, so every
+        // preparation fails there.
+        String version = "echo 'jacquard " + Compat.CORE_VERSION + "'; setsid sleep 300 & echo $! > \"$ROOT/version.pid\"";
+        try (FakeCore fake = FakeCore.create(scratch.resolve("escaped"), Compat.CORE_VERSION, version, "*) ;;")) {
             // Warm up lazily opened files and JDK threads before counting.
             fake.prepareFails("warm.jac", new org.jacquardlang.host.carrier.Cancel());
+            FakeCore.dies("the escaped descendant", fake.pid("version.pid"));
             long before = descriptors();
             long threads = threads();
             for (int i = 0; i < 3; i++) {
                 JacquardException error = fake.prepareFails("rules-" + i + ".jac", new org.jacquardlang.host.carrier.Cancel());
-                assertEquals("Core hash command returned no public identities", error.getMessage());
+                assertEquals("Core --version failed: its output did not close", error.getMessage());
+                FakeCore.dies("the escaped descendant", fake.pid("version.pid"));
             }
             assertEquals(before, descriptors(), "descriptors grew");
             assertTrue(threads() <= threads, "threads grew");

@@ -20,6 +20,7 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -27,8 +28,11 @@ import org.junit.jupiter.api.io.TempDir;
  * The bounded command runner the SDK uses for Core's public commands: exit
  * status and output, output limits, and timeout, cancellation, and
  * interruption that kill the command and its child. A descendant that keeps
- * the output open after the command exits holds neither the caller nor the
- * heap. The commands are shell scripts, so these run on Unix only.
+ * the output open after the command exits fails it after the grace and is
+ * killed (on Linux, where the host finds it through /proc), holding neither
+ * the caller nor the heap; a recorded descendant that closed its output is
+ * killed when the command returns. The commands are shell scripts, so these
+ * run on Unix only.
  */
 @DisabledOnOs(OS.WINDOWS)
 class CommandTest {
@@ -40,6 +44,8 @@ class CommandTest {
     @AfterEach
     void cleanUp() throws IOException {
         OutputPipes.mkfifoOverride = null;
+        Command.recordDescendants = true;
+        Command.recordedHook = null;
         Thread.interrupted();
         // Kill every process a script recorded, even after a failed assertion.
         try (Stream<Path> files = Files.list(scratch)) {
@@ -161,22 +167,70 @@ class CommandTest {
      * reparented {@code yes} flooding stderr. On the JDK's own pipes the
      * reaper drains the flood under the stream lock {@code available()} takes,
      * into an unbounded buffer, so the caller would be held and the heap grow.
+     * Here the command fails once the output stays open for the grace, and
+     * both holders are killed.
      */
+    @EnabledOnOs(OS.LINUX)
     @Test
     void aDescendantHoldingTheOutputHoldsNeitherTheCallerNorTheHeap() throws Exception {
         String script = "echo ready; sleep 300 & echo $! > \"$SCRATCH/holder.pid\"; "
                 + "(yes jacquard-flood >&2 & echo $! > \"$SCRATCH/flooder.pid\"); sleep 0.3";
         long heap = usedHeap();
         long started = System.nanoTime();
-        Command.Output output = sh(script, MINUTE, new Cancel());
+        CarrierException error = assertThrows(CarrierException.class, () -> sh(script, MINUTE, new Cancel()));
         long elapsed = (System.nanoTime() - started) / 1_000_000;
+        assertTrue(error.isLoss() && !error.isTimeout() && !error.isAborted(), error.getMessage());
+        assertEquals("its output did not close", error.getMessage());
         assertTrue(elapsed < 4000, "returned after " + elapsed + " ms");
-        assertEquals(0, output.exitStatus());
-        assertEquals("ready\n", new String(output.stdout(), StandardCharsets.UTF_8));
         long grown = usedHeap() - heap;
         assertTrue(grown < 64 << 20, "the heap grew by " + grown + " bytes");
-        // Its reader is gone, so the flooder's next write fails.
+        dies("the holder", pid("holder.pid"));
         dies("the flooder", pid("flooder.pid"));
+    }
+
+    /**
+     * {@code sh -c 'sleep 300 & echo $!'} exits 0 at once while its child
+     * holds stdout. With recording off, only the holder search can find the
+     * child: the command fails and the child is killed.
+     */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void aBackgroundChildHoldingTheOutputFailsTheCommandAndIsKilled() throws Exception {
+        for (boolean record : new boolean[] {false, true}) {
+            Command.recordDescendants = record;
+            String name = "child-" + record + ".pid";
+            CarrierException error = assertThrows(CarrierException.class,
+                    () -> sh("sleep 300 & echo $!; echo $! > \"$SCRATCH/" + name + "\"", MINUTE, new Cancel()), "recording " + record);
+            assertEquals("its output did not close", error.getMessage());
+            dies("the background child", pid(name));
+        }
+    }
+
+    /**
+     * A descendant that closed its output and keeps running does not fail
+     * the command; once recorded, it is killed when the command returns. The
+     * command waits until the record holds the descendant, so the record
+     * cannot miss it.
+     */
+    @Test
+    void aRecordedDescendantThatClosedItsOutputIsKilled() throws Exception {
+        Path recorded = scratch.resolve("recorded");
+        Command.recordedHook = pids -> {
+            try {
+                Path file = scratch.resolve("quiet.pid");
+                String text = Files.exists(file) ? Files.readString(file) : "";
+                if (text.endsWith("\n") && pids.contains(Long.parseLong(text.strip()))) {
+                    Files.writeString(recorded, "");
+                }
+            } catch (IOException | RuntimeException error) {
+                throw new IllegalStateException(error);
+            }
+        };
+        Command.Output output = sh("sleep 300 </dev/null >/dev/null 2>&1 & echo $! > \"$SCRATCH/quiet.pid\"; "
+                + "while [ ! -e \"$SCRATCH/recorded\" ]; do sleep 0.01; done; echo done", MINUTE, new Cancel());
+        assertEquals(0, output.exitStatus());
+        assertEquals("done\n", new String(output.stdout(), StandardCharsets.UTF_8));
+        dies("the recorded descendant", pid("quiet.pid"));
     }
 
     @Test

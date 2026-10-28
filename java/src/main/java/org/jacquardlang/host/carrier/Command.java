@@ -20,14 +20,28 @@ import java.util.concurrent.locks.LockSupport;
  * FIFOs on Unix (see {@link OutputPipes}), read only after {@code available()}
  * reports bytes, on the caller's thread, in polls of 0.1 to 5 ms that recheck
  * the timeout, the {@link Cancel}, and the caller's interrupt status, which is
- * never cleared. Its stdin is the null device. Once the command has exited,
- * what is left in its pipes (at most {@link #EXIT_DRAIN} more bytes of each)
- * is read and the host closes its ends; a descendant that still holds the
- * output neither holds the caller nor is waited for, and its next write
- * fails. On timeout, cancellation, or interruption the command's process
- * tree is killed: a snapshot of its descendants and the command itself. As
- * for the worker, a descendant that was already reparented keeps running. On
- * other systems the JDK's pipes are used, with their exit-time drain.
+ * never cleared. Its stdin is the null device. While the command runs, its
+ * descendants are recorded about every 10 ms, each by pid and start time.
+ *
+ * <p>Once the command has exited, the host waits up to {@link #OUTPUT_GRACE}
+ * for its output to close: on Linux, until no other process of this user
+ * holds either FIFO, which it finds through {@code /proc/<pid>/fd}. A process
+ * still holding one then fails the command with "its output did not close",
+ * and is killed if it started no earlier than the command (or than this JVM,
+ * when the command exited before its start time was read) and still has the
+ * start time it was found with. Then what is left in the pipes (at most
+ * {@link #EXIT_DRAIN} more bytes of each) is read and the host closes its
+ * ends. Elsewhere there is no {@code /proc}: a descendant still holding the
+ * output is not detected, the host closes its ends after the exit, and that
+ * descendant's next write fails.
+ *
+ * <p>Whatever the outcome, every recorded descendant still alive with the
+ * start time it was recorded with is killed. On timeout, cancellation, or
+ * interruption the command's process tree is killed too: a snapshot of its
+ * descendants and the command itself. A descendant that was never recorded
+ * (one started and reparented between two records) and holds no output keeps
+ * running. On other systems the JDK's pipes are used, with their exit-time
+ * drain.
  */
 public final class Command {
     private Command() {}
@@ -40,6 +54,59 @@ public final class Command {
     private static final int SLICE = 1 << 20;
     /** The most of each stream read after the command has exited. */
     public static final int EXIT_DRAIN = 4 << 20;
+    /** How long the output may stay open after the command exits. */
+    public static final Duration OUTPUT_GRACE = Duration.ofSeconds(1);
+    /** How often the command's descendants are recorded, and the output's holders looked for after the exit. */
+    private static final long SAMPLE_INTERVAL = TimeUnit.MILLISECONDS.toNanos(10);
+
+    /**
+     * Test seam: whether descendants are recorded. Tests clear it to show
+     * that a holder of the output is killed without being recorded.
+     */
+    static volatile boolean recordDescendants = true;
+    /** Test seam: runs after each record with every pid recorded so far. Null outside tests. */
+    static volatile java.util.function.Consumer<java.util.Set<Long>> recordedHook;
+
+    /** The command's descendants seen while it ran, by pid, with their start times. */
+    private static final class Recorded {
+        private final java.util.Map<Long, java.time.Instant> started = new java.util.HashMap<>();
+        private long next = System.nanoTime();
+
+        /** Records the command's current descendants, at most once per {@link #SAMPLE_INTERVAL}. */
+        void sample(Process process) {
+            long now = System.nanoTime();
+            if (!recordDescendants || now - next < 0) {
+                return;
+            }
+            next = now + SAMPLE_INTERVAL;
+            try {
+                process.descendants().forEach(handle -> handle.info().startInstant()
+                        .ifPresent(start -> started.putIfAbsent(handle.pid(), start)));
+            } catch (RuntimeException error) {
+                // Not supported here, or the tree changed while it was read.
+            }
+            java.util.function.Consumer<java.util.Set<Long>> hook = recordedHook;
+            if (hook != null) {
+                hook.accept(java.util.Set.copyOf(started.keySet()));
+            }
+        }
+
+        /** Kills every recorded descendant that is still alive with the start time it was recorded with. */
+        void killAlive() {
+            started.forEach((pid, start) -> ProcessHandle.of(pid).ifPresent(handle -> killIfStarted(handle, start)));
+        }
+    }
+
+    /** Kills {@code handle} only if it still has start time {@code start}, so a reused pid is never killed. */
+    private static void killIfStarted(ProcessHandle handle, java.time.Instant start) {
+        try {
+            if (handle.info().startInstant().map(start::equals).orElse(false)) {
+                handle.destroyForcibly();
+            }
+        } catch (RuntimeException ignored) {
+            // Not permitted, or already gone.
+        }
+    }
 
     /**
      * A command that exited.
@@ -189,13 +256,19 @@ public final class Command {
                 pipes.unlink();
             }
         }
+        Recorded recorded = new Recorded();
+        // A command that already exited has no start time; a holder then
+        // must at least have started after this JVM.
+        java.time.Instant started = process.toHandle().info().startInstant()
+                .orElseGet(() -> ProcessHandle.current().info().startInstant().orElse(null));
         try {
-            return await(process, pipes, expires, cancel, stdoutLimit, stderrLimit);
+            return await(process, pipes, recorded, started, expires, cancel, stdoutLimit, stderrLimit);
         } finally {
             if (process.isAlive()) {
                 killTree(process);
                 awaitExit(process, EXIT_GRACE);
             }
+            recorded.killAlive();
             if (pipes != null) {
                 // A descendant still writing has no reader now, so its next write fails.
                 pipes.close();
@@ -206,8 +279,8 @@ public final class Command {
         }
     }
 
-    private static Output await(Process process, OutputPipes pipes, long expires, Cancel cancel, int stdoutLimit, int stderrLimit)
-            throws CarrierException {
+    private static Output await(Process process, OutputPipes pipes, Recorded recorded, java.time.Instant started, long expires,
+            Cancel cancel, int stdoutLimit, int stderrLimit) throws CarrierException {
         Capture stdout = new Capture(pipes != null ? pipes.stdout() : process.getInputStream(), stdoutLimit);
         Capture stderr = new Capture(pipes != null ? pipes.stderr() : process.getErrorStream(), stderrLimit);
         long idle = POLL_MIN;
@@ -215,8 +288,14 @@ public final class Command {
             // The exit is observed before the pipes are read, so everything
             // the command itself wrote is read below.
             boolean exited = !process.isAlive();
+            if (!exited) {
+                recorded.sample(process);
+            }
             int read = stdout.step(SLICE) + stderr.step(SLICE);
             if (exited) {
+                if (pipes != null) {
+                    awaitClosed(pipes, started, stdout, stderr, expires, cancel);
+                }
                 stdout.step(EXIT_DRAIN);
                 stderr.step(EXIT_DRAIN);
                 return new Output(process.exitValue(), stdout.bytes(), stdout.overflow, stderr.bytes());
@@ -229,6 +308,57 @@ public final class Command {
                 idle = POLL_MIN;
             } else {
                 long slice = Math.min(idle, expires - System.nanoTime());
+                if (slice > 0 && !Thread.currentThread().isInterrupted()) {
+                    // Parking leaves the interrupt status set.
+                    LockSupport.parkNanos(slice);
+                }
+                idle = Math.min(idle * 2, POLL_MAX);
+            }
+        }
+    }
+
+    /**
+     * Waits up to {@link #OUTPUT_GRACE} after the exit until no other process
+     * holds the output, reading what arrives meanwhile. On failure it kills
+     * the holders it last found that started no earlier than the command.
+     */
+    private static void awaitClosed(OutputPipes pipes, java.time.Instant started, Capture stdout, Capture stderr, long expires,
+            Cancel cancel) throws CarrierException {
+        long end = System.nanoTime() + OUTPUT_GRACE.toNanos();
+        long scan = System.nanoTime();
+        long idle = POLL_MIN;
+        java.util.Map<ProcessHandle, java.time.Instant> holders = java.util.Map.of();
+        while (true) {
+            long now = System.nanoTime();
+            if (now - scan >= 0) {
+                holders = new java.util.HashMap<>();
+                for (ProcessHandle holder : pipes.holders()) {
+                    java.time.Instant start = holder.info().startInstant().orElse(null);
+                    if (start != null) {
+                        holders.put(holder, start);
+                    }
+                }
+                if (holders.isEmpty()) {
+                    return;
+                }
+                scan = now + SAMPLE_INTERVAL;
+            }
+            CarrierException stopped = stopped(expires, cancel);
+            if (stopped == null && now - end >= 0) {
+                stopped = CarrierException.loss("its output did not close");
+            }
+            if (stopped != null) {
+                holders.forEach((holder, start) -> {
+                    if (started != null && !start.isBefore(started)) {
+                        killIfStarted(holder, start);
+                    }
+                });
+                throw stopped;
+            }
+            if (stdout.step(SLICE) + stderr.step(SLICE) > 0) {
+                idle = POLL_MIN;
+            } else {
+                long slice = Math.min(idle, end - now);
                 if (slice > 0 && !Thread.currentThread().isInterrupted()) {
                     // Parking leaves the interrupt status set.
                     LockSupport.parkNanos(slice);
