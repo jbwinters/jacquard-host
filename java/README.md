@@ -100,10 +100,16 @@ keyed by:
 Each source must be a regular file (a symbolic link to one is followed), and
 all of them together at most 16 MiB (`Runtime.SOURCE_LIMIT`); both are checked
 from the files' attributes before a source is read, so a FIFO or device is
-refused rather than opened. The prelude and cache walks read regular files
-only (no symbolic links, FIFOs, or devices), at most 256 MiB under one root,
-checked from each file's size before it is read. Between files these reads
-observe the `Cancel` and the caller's interrupt. A source replaced by a FIFO
+refused rather than opened; between sources the read observes the `Cancel`
+and the caller's interrupt. The Core executable is fingerprinted in 64 KiB
+pieces up to 512 MiB: a larger file is refused from its size before it is
+read, the ceiling is enforced again while it is read, and the `Cancel` and
+the interrupt are observed between pieces. The prelude and cache walks stream
+each directory and read regular files only (no symbolic links, FIFOs, or
+devices), at most 100,000 entries (empty files and directories count) and
+256 MiB under one root; each file's size is checked before it is read and
+the ceiling again while it is read, and the `Cancel` and the interrupt are
+observed before each entry and between pieces. A source replaced by a FIFO
 between that check and its open can still block the open.
 
 The cache defaults to `.scratch/jacquard-host-java` under the working
@@ -114,9 +120,16 @@ Every binding (names, constructors, signatures, and declaration groups) is
 derived from those outputs, on the first preparation and again on each load.
 A load refuses an entry whose files do not match the recorded digests, or
 whose `program.json` bindings differ from what the outputs give, rather than
-repairing it. This detects a changed or incomplete entry; it is not a defence
-against someone who can write the cache, who could rewrite an output and its
-recorded digest together with the bindings. The `--version` check and prelude discovery run
+repairing it. So an accidental or partial change is refused. No record inside
+an entry can resist someone who can rewrite it (an output, its recorded
+digest, and the bindings changed together load), so the cache's owner is
+trusted and only the owner may write it: on POSIX file systems, preparation
+refuses a cache root, an entry, or any file or directory in one that the
+current user does not own or that its group or others may write, both when
+it creates an entry and when it loads one, and it makes each new entry's
+directories and files owner-only (Core's store included). The cache root's
+parent directories are not checked. Without POSIX permissions (Windows) none
+of this is checked. The `--version` check and prelude discovery run
 once per Core executable and prelude in the JVM, shared by every `Runtime`
 and thread. Each call runs one fresh worker. Prepare only first-party
 declaration sources: preparation runs Core's `run` command, without service
@@ -131,11 +144,10 @@ the same host-owned output FIFOs as the worker (see
 cancelling it, or interrupting the calling thread, kills the running command
 and a snapshot of its process tree, and fails the preparation. The interrupt
 status stays set, and a preparation waiting for another thread's version
-check or prelude discovery stops waiting too. Once a command exits, the host
-waits up to one second for its output to close; on Linux a process still
-holding it fails the command ("its output did not close", as in the Rust
-SDK) and is killed. Descendants recorded while the command ran are killed
-when it returns (see [Core's commands](#process-carrier)).
+check or prelude discovery stops waiting too. On Linux with util-linux
+`setsid`, each command runs in its own process group, which is killed when
+the command exits and on every stop, as in the Rust SDK (see
+[Core's commands](#process-carrier)).
 
 Arguments are Java values encoded by their runtime class (see [data](#data)),
 or `codec.arg(value)` where the runtime class does not say enough, such as a
@@ -215,12 +227,14 @@ that denotes a huge one (1024 references to one tuple of 1024 references,
 say) costs no more than one frame. `Data.decode` measures a value within the
 same node and depth limits before it decodes it. Only what passes through the
 `Encoder` is charged: `Codec.VALUE` and `Value` arguments are walked within
-the same bounds, but a custom codec that returns a `Value` it built itself
-bypasses that budget. Such a value is still measured before it is sent: a
-function call renders the invoke frame, charging every argument's nodes,
-collection items, text bytes, depth, and frame size, before any worker
-starts, and the host measures a handler's result the same way. A value
-returned by `Data.encode` is not measured again. `Program.data()` gives each
+the same bounds, but a custom codec may return a `Value` it built itself.
+Such a value is still measured: before a function call checks the arguments'
+types, it walks every argument value under one shared budget (nodes,
+collection items, text bytes alone and together, and depth), whatever codec
+built it, so a small shared graph that stands for a huge value is refused
+before the type check walks it. The invoke frame is then measured as it is
+rendered, before any worker starts, and the host measures a handler's result
+the same way. A value returned by `Data.encode` is not measured again. `Program.data()` gives each
 public name's exact identity. `Data.make` builds a `Dynamic.Variant` after
 checking that its constructor exists, and `Invocation.value` decodes any
 result into `Dynamic`.
@@ -295,13 +309,12 @@ Every SDK failure is a checked `JacquardException`, whose `kind()` is:
 
 `mapBatches` runs a pure function whose final parameter and result are Lists
 over explicit chunks of rows. It validates every batch before the first runs
-and retries nothing. Validation holds one batch's encoding at a time: each
-batch is encoded and checked, then discarded, and encoded and checked again
-just before it runs. Between batches it observes the `Cancel`, the caller's
-interrupt (which stays set), and the runtime's deadline (30 seconds by
-default), which bounds the whole validation. A stop there is reported as the
-host's aborted invocation, without a worker; a validation past the deadline
-is an `INVALID_ARGUMENT`. A failed batch's exception names it in
+and retries nothing. Validation keeps no batch's encoding: each batch is
+encoded and checked by a step that returns nothing, and encoded and checked
+again just before it runs. Before each batch, and once more after the last,
+it observes the `Cancel` and the caller's interrupt (which stays set). As in
+the other SDKs, validation has no deadline of its own. A stop there is
+reported as the host's aborted invocation, without a worker. A failed batch's exception names it in
 `batchIndex()` (-1 when nothing ran: a batch was refused, or validation
 stopped) and keeps the decoded values of the batches that completed in
 `completed()`, in an unmodifiable list in which a unit result is `null`.
@@ -453,8 +466,11 @@ returns. Nothing is retried.
 
 ## Process carrier
 
-Java cannot start a process in its own process group, and a blocking read
-from a pipe cannot be interrupted. The carrier is built around both:
+The JDK cannot start a process in its own process group, and a blocking
+read from a pipe cannot be interrupted. The worker carrier is built around
+both. (The SDK's Core commands get a process group from util-linux `setsid`
+on Linux; see [Core's commands](#process-carrier). The worker does not use
+it yet, so the worker's gaps below remain.)
 
 - **The host owns the output pipes on Unix.** The JDK's own process pipes
   drain themselves on its process reaper thread when the process exits, under
@@ -534,31 +550,62 @@ cancellation.
 
 **Core's commands.** The SDK runs Core's `--version`, `check`, `hash`, and
 `run` through `Command`, with the same output FIFOs and polls, its stdin the
-null device. While the command runs, its descendants are recorded about every
-10 ms, by pid and start time. Once it has exited, the host waits up to one
-second for the output to close. On Linux that means no other process of this
-user holds either FIFO, which the host finds by scanning `/proc/<pid>/fd`; a
-process still holding one fails the command with "its output did not close"
-(the Rust SDK's message) and is killed if it started no earlier than the
-command and still has the start time it was found with. Then at most 4 MiB
-more of each stream is read and the host closes its ends. Whatever the
-outcome, every recorded descendant still alive with its recorded start time
-is killed, so a reused pid is never signalled. A timeout, a cancellation, or
-the caller's interrupt also kills a snapshot of the command's process tree,
-as for the worker. A descendant that was never recorded (started and
-reparented between two records) and that holds no output keeps running. On
-macOS there is no `/proc`: a descendant holding the output is not detected,
-only recorded descendants are killed, and a holder's next write fails once
-the host closes its ends. Tests show, on Linux, that `sh -c 'sleep 300 & echo
-$!'` fails and its child is killed (also with recording off, so the `/proc`
-search alone finds it), that a sleeper and a reparented descendant flooding
-stderr fail the command within the grace and are both killed while the heap
-stays bounded (on the JDK's own pipes the flood held the caller for 6.4 s in
-a local run), and that an escaped (`setsid`) descendant holding Core's output
-is killed and repeated preparations leak no descriptor or thread; and, on
-Unix, that a recorded descendant that closed its output is killed when the
-command returns, and that timeout, cancellation, and interruption kill the
-command's child, the last keeping the interrupt status.
+null device. On Linux, when util-linux `setsid` is installed at
+`/usr/bin/setsid` or `/bin/setsid`, each command runs as `setsid -- <core>`.
+The JDK's child is never a process group leader, so `setsid` execs Core
+without forking: Core keeps the pid the JDK reports and leads a new session
+and process group whose id is that pid. Core and every descendant that does
+not leave the group share it. When the command exits, and on a timeout, a
+cancellation, or the caller's interrupt, the host kills that group: for each
+entry of `/proc` it first acquires the process's `ProcessHandle`, then reads
+the group id from `/proc/<pid>/stat` (after the last `)`), and kills the
+process through that handle only when the id is the command's. The JDK
+checks the handle's start time before signalling, so a pid reused after the
+handle was acquired is not killed, and a group with a live member keeps its
+id, so a matching id proves membership. Each pass covers every process once
+and always runs to the end; passes repeat, at most eight, until one finds no
+live member. After the exit's cleanup the host checks the timeout, the
+`Cancel`, and the interrupt again before it reports success, and then reads
+at most 4 MiB more of each stream and closes its ends.
+
+What remains: a descendant that leaves the group (calls `setsid` itself) is
+neither detected nor killed. The Rust SDK detects one that still holds Core's
+output ("its output did not close") but does not kill it either; the Java
+host holds its FIFOs read-write, so it never sees EOF and cannot detect it.
+Such a descendant's next write fails once the host closes its ends. If the
+whole group has exited by the time the JDK reaps Core, and a new process
+reuses Core's pid as its own group id before the exit's pass reads it, that
+process would match. Without `setsid` (macOS, or Linux without util-linux),
+the host records the command's descendants about every 10 ms, by pid and
+start time, kills every recorded descendant still alive with its recorded
+start time when the command returns, and on a stop also kills a snapshot of
+the command's process tree. That fallback misses a descendant started and
+reparented between two records, as in a fast fork-and-exit chain.
+
+Tests show, on Linux with `setsid`, that the command keeps the JDK's pid and
+that its group and session ids equal it; that `sh -c 'sleep 300 & echo $!'`
+succeeds with its output and its child is killed, also when the JVM is a
+child subreaper (a child JVM launched under `prctl(PR_SET_CHILD_SUBREAPER)`),
+so the orphan is reparented to the JVM itself; that a sleeper and a
+reparented descendant flooding stderr are both killed at the exit while the
+command succeeds within 4 s and the heap grows by less than 64 MiB; that a
+descendant that left the group (`setsid yes`) and floods stderr is not
+killed, yet the command returns within 4 s with the heap bounded and the
+flooder dies on its next write once the host closes its ends (on the JDK's
+own pipes the same test held the caller for 6.4 s); that an
+unrelated process of the same user holding the command's stdout (opened
+through `/proc/<pid>/fd/1`) is not killed; that a cancellation kills a group
+member whose parent had already exited; that a stop arriving during the
+exit's cleanup (a test seam) is reported instead of success; and that a Core command's
+child holding its output is killed while repeated preparations leak no
+descriptor or thread; and that timeout, cancellation, and interruption kill
+the command's child, the last keeping the interrupt status. On Unix, with
+groups switched off by a test seam, they show that a recorded descendant
+that closed its output is killed when the command returns, that a timeout
+kills the command's child, and that a stop during the exit's cleanup is
+reported. The Java worker does not run
+in its own group (see the worker paragraphs above and
+[LIMITS](../docs/LIMITS.md)).
 
 ## Conformance kit
 

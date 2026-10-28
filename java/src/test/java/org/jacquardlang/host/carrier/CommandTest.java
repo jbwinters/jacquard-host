@@ -213,6 +213,46 @@ class CommandTest {
     }
 
     /**
+     * A descendant that left the group ({@code setsid yes}) keeps flooding
+     * stderr after the command exits; it is not killed, but the host closes
+     * its FIFO ends after the exit, so the command returns within 4 s, the
+     * heap grows by less than 64 MiB, and the flooder dies on its next write.
+     * On the JDK's own pipes the reaper would drain the flood at the exit,
+     * under the lock {@code available()} takes and into an unbounded buffer.
+     * A watchdog kills the flooder after 20 s, so that variant cannot hang.
+     */
+    @EnabledOnOs(OS.LINUX)
+    @Test
+    void anEscapedFlooderHoldsNeitherTheCallerNorTheHeap() throws Exception {
+        assumeGroups();
+        Thread watchdog = once("flooder.pid", () -> {
+            try {
+                ProcessHandle flooder = ProcessHandle.of(pid("flooder.pid")).orElse(null);
+                if (flooder != null && !flooder.onExit().isDone()) {
+                    try {
+                        flooder.onExit().get(20, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (java.util.concurrent.TimeoutException late) {
+                        flooder.destroyForcibly();
+                    }
+                }
+            } catch (Exception error) {
+                // The test reports what it saw.
+            }
+        });
+        String script = "echo ready; (setsid yes jacquard-flood >&2 & echo $! > \"$SCRATCH/flooder.pid\"); sleep 0.3";
+        long heap = usedHeap();
+        long started = System.nanoTime();
+        Command.Output output = sh(script, MINUTE, new Cancel());
+        long elapsed = (System.nanoTime() - started) / 1_000_000;
+        assertEquals(0, output.exitStatus());
+        assertTrue(elapsed < 4000, "returned after " + elapsed + " ms");
+        long grown = usedHeap() - heap;
+        assertTrue(grown < 64 << 20, "the heap grew by " + grown + " bytes");
+        dies("the escaped flooder", pid("flooder.pid"));
+        watchdog.join();
+    }
+
+    /**
      * {@code sh -c 'sleep 300 & echo $!'} exits 0 at once while its child
      * holds stdout. As in Rust, the group is killed at the exit and the
      * command succeeds with its output.
