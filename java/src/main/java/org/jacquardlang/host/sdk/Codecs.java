@@ -556,16 +556,15 @@ final class Codecs {
         /**
          * The distinct non-union cases, nested unions flattened in order, so
          * decoding asks each once: asking a nested union asked every case
-         * below it again, which grew as 2 to the nesting depth.
+         * below it again, which grew as 2 to the nesting depth. Computed on
+         * first use, when every lazy case of a derived (possibly recursive)
+         * hierarchy has its target, by one walk over the whole case graph.
          */
-        private final List<Cases<?>> leaves;
+        private volatile List<Cases<?>> leaves;
 
         UnionCodec(Class<S> type, List<Cases<?>> cases) {
             this.type = type;
             this.cases = List.copyOf(cases);
-            List<Cases<?>> flat = new ArrayList<>();
-            flatten(this.cases, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), flat);
-            this.leaves = List.copyOf(flat);
         }
 
         /** {@code codec}, or what a finished lazy one stands for. */
@@ -576,19 +575,40 @@ final class Codecs {
             return codec;
         }
 
+        private List<Cases<?>> leaves() {
+            List<Cases<?>> known = leaves;
+            if (known == null) {
+                List<Cases<?>> flat = new ArrayList<>();
+                java.util.Set<Object> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                seen.add(this);
+                flatten(cases, seen, flat);
+                known = List.copyOf(flat);
+                // Idempotent: a race computes the same list twice.
+                leaves = known;
+            }
+            return known;
+        }
+
+        /**
+         * Depth-first over the case graph, in case order, each codec once; a
+         * union is entered, never kept as a case. Iterative, so nesting of any
+         * depth cannot overflow the stack.
+         */
         private static void flatten(List<Cases<?>> cases, java.util.Set<Object> seen, List<Cases<?>> out) {
-            for (Cases<?> given : cases) {
-                Cases<?> each = resolved(given);
+            java.util.ArrayDeque<java.util.Iterator<Cases<?>>> stack = new java.util.ArrayDeque<>();
+            stack.push(cases.iterator());
+            while (!stack.isEmpty()) {
+                java.util.Iterator<Cases<?>> top = stack.peek();
+                if (!top.hasNext()) {
+                    stack.pop();
+                    continue;
+                }
+                Cases<?> each = resolved(top.next());
                 if (!seen.add(each)) {
                     continue;
                 }
                 if (each instanceof UnionCodec<?> nested) {
-                    // Already flattened when it was built.
-                    for (Cases<?> leaf : nested.leaves) {
-                        if (seen.add(leaf)) {
-                            out.add(leaf);
-                        }
-                    }
+                    stack.push(nested.cases.iterator());
                 } else {
                     out.add(each);
                 }
@@ -602,7 +622,7 @@ final class Codecs {
 
         @Override
         public boolean decodes(Decoder decoder, Value value) {
-            for (Cases<?> each : leaves) {
+            for (Cases<?> each : leaves()) {
                 if (each.decodes(decoder, value)) {
                     return true;
                 }
@@ -622,7 +642,7 @@ final class Codecs {
 
         @Override
         public S decode(Decoder decoder, Value value) throws JacquardException {
-            for (Cases<?> each : leaves) {
+            for (Cases<?> each : leaves()) {
                 if (each.decodes(decoder, value)) {
                     return type.cast(each.decode(decoder, value));
                 }
@@ -633,7 +653,7 @@ final class Codecs {
 
     /** Test seam: how many distinct cases a union codec decodes through, or -1 for another codec. */
     static int unionCases(Codec<?> codec) {
-        return codec instanceof UnionCodec<?> union ? union.leaves.size() : -1;
+        return codec instanceof UnionCodec<?> union ? union.leaves().size() : -1;
     }
 
     @SuppressWarnings("unchecked")

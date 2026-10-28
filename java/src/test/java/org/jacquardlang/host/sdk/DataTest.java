@@ -580,6 +580,14 @@ class DataTest {
         JacquardException refused = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(10),
                 () -> assertThrows(JacquardException.class, () -> data.decode(nested, notRouted)));
         assertEquals(JacquardException.Kind.BINDING, refused.kind());
+        // Flattening walks the cases iteratively: 100,000 layers neither overflow the stack nor take long.
+        Codec<One> deep = Codec.record(One.class, "routed");
+        for (int i = 0; i < 100_000; i++) {
+            deep = Codec.union(One.class, List.of(deep, deep));
+        }
+        Codec<One> deepest = deep;
+        assertEquals(1, Codecs.unionCases(deepest));
+        assertThrows(JacquardException.class, () -> data.decode(deepest, notRouted));
     }
 
     /** A Dynamic value over the hard limit is refused at construction, before its items are copied. */
