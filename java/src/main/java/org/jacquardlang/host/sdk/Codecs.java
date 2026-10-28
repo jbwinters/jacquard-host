@@ -632,25 +632,15 @@ final class Codecs {
 
         @Override
         public Value encode(Encoder encoder, S value) throws JacquardException {
-            // Down through nested unions in a loop, not a call per layer, so
-            // nesting of any depth cannot overflow the stack.
-            UnionCodec<?> union = this;
-            while (true) {
-                Cases<?> chosen = null;
-                for (Cases<?> each : union.cases) {
-                    if (each.javaType().isInstance(value)) {
-                        chosen = resolved(each);
-                        break;
-                    }
+            // The first flattened case that takes the value, in the order
+            // decoding asks them: no call per nested layer, and the cost is
+            // the number of distinct cases, not their nesting.
+            for (Cases<?> each : leaves()) {
+                if (each.javaType().isInstance(value)) {
+                    return encodeCase(encoder, each, value);
                 }
-                if (chosen == null) {
-                    throw encoder.invalid(union.type.getSimpleName() + " has no case for " + value.getClass().getName());
-                }
-                if (!(chosen instanceof UnionCodec<?> nested)) {
-                    return encodeCase(encoder, chosen, value);
-                }
-                union = nested;
             }
+            throw encoder.invalid(type.getSimpleName() + " has no case for " + value.getClass().getName());
         }
 
         @Override
@@ -747,17 +737,35 @@ final class Codecs {
         return type instanceof Class<?> plain ? derived(plain) : derive(type, new HashMap<>());
     }
 
+    /**
+     * The deepest List and Optional nesting a type may declare: each adds two
+     * JSON levels, so a deeper value could not fit the v0 depth limit (64).
+     */
+    static final int TYPE_NESTING = 32;
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static Codec<?> derive(Type type, Map<Class<?>, Lazy> seen) {
-        if (type instanceof ParameterizedType parameterized && parameterized.getRawType() instanceof Class<?> raw) {
-            Type[] arguments = parameterized.getActualTypeArguments();
-            if (raw == List.class) {
-                return Codec.list(derive(arguments[0], seen));
+        // List and Optional layers are peeled in a loop and capped, so a
+        // deep or self-referential ParameterizedType cannot overflow the stack.
+        List<Class<?>> wrappers = new ArrayList<>();
+        while (type instanceof ParameterizedType parameterized && parameterized.getRawType() instanceof Class<?> raw) {
+            if (raw != List.class && raw != Optional.class) {
+                // The raw class, not getTypeName(), which itself recurses on a self-referential type.
+                throw new IllegalArgumentException("no Jacquard mapping for " + raw.getName() + "<...>");
             }
-            if (raw == Optional.class) {
-                return Codec.optional(derive(arguments[0], seen));
+            if (wrappers.size() == TYPE_NESTING) {
+                throw new IllegalArgumentException("type nests List or Optional deeper than " + TYPE_NESTING
+                        + " levels; no such value fits the v0 depth limit");
             }
-            throw new IllegalArgumentException("no Jacquard mapping for " + type.getTypeName());
+            wrappers.add(raw);
+            type = parameterized.getActualTypeArguments()[0];
+        }
+        if (!wrappers.isEmpty()) {
+            Codec<?> codec = derive(type, seen);
+            for (int i = wrappers.size() - 1; i >= 0; i--) {
+                codec = wrappers.get(i) == List.class ? Codec.list(codec) : Codec.optional(codec);
+            }
+            return codec;
         }
         if (!(type instanceof Class<?> plain)) {
             throw new IllegalArgumentException("no Jacquard mapping for " + type.getTypeName() + "; use a concrete type");

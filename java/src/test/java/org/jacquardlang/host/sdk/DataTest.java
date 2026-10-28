@@ -562,6 +562,76 @@ class DataTest {
 
     record One() {}
 
+    sealed interface Shape permits Circle, Square {}
+
+    record Circle() implements Shape {}
+
+    record Square() implements Shape {}
+
+    /** An explicit union whose first case is a narrower union: encoding asks the flattened cases in decoding's order, so both agree. */
+    @Test
+    void encodingAndDecodingAgreeOnExplicitNestedUnions() throws Exception {
+        Data data = fixture(Limits.HARD);
+        Codec<Shape> circle = Codec.union(Shape.class, List.of(Codec.record(Circle.class, "routed")));
+        Codec<Shape> outer = Codec.union(Shape.class, List.of(circle, Codec.record(Square.class, "invalid-incident")));
+        Value square = data.encode(outer, new Square());
+        assertEquals(new Square(), data.decode(outer, square));
+        assertEquals(new Circle(), data.decode(outer, data.encode(outer, new Circle())));
+    }
+
+    /** A List or Optional nesting deeper than any value is refused with IllegalArgumentException, also for a type that names itself. */
+    @Test
+    void deepAndSelfReferentialGenericTypesAreRefused() throws Exception {
+        java.lang.reflect.Type type = Long.class;
+        for (int i = 0; i < 200_000; i++) {
+            type = listOf(type);
+        }
+        java.lang.reflect.Type deep = type;
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> Codec.of(deep)).getMessage().contains("deeper than 32 levels"));
+        java.lang.reflect.ParameterizedType[] self = new java.lang.reflect.ParameterizedType[1];
+        self[0] = new java.lang.reflect.ParameterizedType() {
+            @Override
+            public java.lang.reflect.Type[] getActualTypeArguments() {
+                return new java.lang.reflect.Type[] {self[0]};
+            }
+
+            @Override
+            public java.lang.reflect.Type getRawType() {
+                return List.class;
+            }
+
+            @Override
+            public java.lang.reflect.Type getOwnerType() {
+                return null;
+            }
+        };
+        assertThrows(IllegalArgumentException.class, () -> Codec.of(self[0]));
+        java.lang.reflect.Type allowed = Long.class;
+        for (int i = 0; i < 32; i++) {
+            allowed = listOf(allowed);
+        }
+        assertTrue(Codec.of(allowed) != null);
+    }
+
+    private static java.lang.reflect.ParameterizedType listOf(java.lang.reflect.Type item) {
+        return new java.lang.reflect.ParameterizedType() {
+            @Override
+            public java.lang.reflect.Type[] getActualTypeArguments() {
+                return new java.lang.reflect.Type[] {item};
+            }
+
+            @Override
+            public java.lang.reflect.Type getRawType() {
+                return List.class;
+            }
+
+            @Override
+            public java.lang.reflect.Type getOwnerType() {
+                return null;
+            }
+        };
+    }
+
     /**
      * Nested unions are flattened when built, so decoding asks each distinct
      * case once: 64 layers of a two-case union over one record decode, or are
