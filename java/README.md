@@ -321,7 +321,11 @@ deadline (default 30 s) that bounds each worker lifetime; see
 
 Every failure to prepare, bind, encode, call, or decode is a checked
 `JacquardException`, including an unchecked exception thrown by your own codec
-while an argument is encoded (an `INVALID_ARGUMENT` naming the argument). Two others are left to their usual types: building a
+while a value is encoded, by a function or by `Data.encode` (an
+`INVALID_ARGUMENT` naming the value, with your exception as its cause).
+Messages quote your text, such as a name or your codec's message, as an
+excerpt of at most 64 chars and its length, and no message is kept past 8,192
+chars. Two others are left to their usual types: building a
 codec from a type it cannot map (for example `Codec.of(Object.class)`) throws
 `IllegalArgumentException` at construction, before any call, and
 `Invocation.save` throws `IOException`. A `JacquardException`'s `kind()` is:

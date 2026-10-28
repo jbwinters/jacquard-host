@@ -39,12 +39,12 @@ public final class Decoder {
         if (is(value, constructor) && ((Value.Constructor) value).arguments().size() == count) {
             return ((Value.Constructor) value).arguments();
         }
-        throw mapping(constructor + " result has the wrong constructor or field count");
+        throw mapping(Identities.excerpt(constructor) + " result has the wrong constructor or field count");
     }
 
     /** A mapping failure for a value that is none of a type's constructors. */
     public JacquardException mismatch(String typeName) {
-        return mapping("unknown " + typeName + " case");
+        return mapping("unknown " + Identities.excerpt(typeName) + " case");
     }
 
     /** A mapping failure: a boundary value that does not decode into the requested type. */

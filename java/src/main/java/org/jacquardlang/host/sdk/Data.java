@@ -102,7 +102,17 @@ public final class Data {
      * @throws JacquardException an invalid argument naming the value's location
      */
     public <T> Value encode(Codec<T> codec, T value) throws JacquardException {
-        return Encoder.root(this, "value").encode(codec, value);
+        try {
+            return Encoder.root(this, "value").encode(codec, value);
+        } catch (RuntimeException error) {
+            throw codecFailed("value", error);
+        }
+    }
+
+    /** A caller's codec that threw while encoding at {@code path}: an invalid argument quoting an excerpt, the exception kept as its cause. */
+    static JacquardException codecFailed(String path, RuntimeException error) {
+        return JacquardException.invalidAt(path, "its codec failed: " + error.getClass().getName()
+                + (error.getMessage() == null ? "" : ": " + Identities.excerpt(error.getMessage())), error);
     }
 
     /**

@@ -115,7 +115,7 @@ public final class Program {
     public synchronized Program provide(String effect, Operations operations) throws JacquardException {
         java.util.Objects.requireNonNull(operations, "operations");
         if (!effects.containsKey(Identities.normal(effect))) {
-            throw JacquardException.binding("unknown effect " + effect + (unsupported.isEmpty() ? ""
+            throw JacquardException.binding("unknown effect " + Identities.excerpt(effect) + (unsupported.isEmpty() ? ""
                     : "; the effects of functions with unsupported signatures (" + String.join(", ", unsupported.keySet()) + ") are not bound"));
         }
         services.put(Identities.normal(effect), operations);
@@ -140,7 +140,7 @@ public final class Program {
         Interface signature = interfaces.get(name);
         if (signature == null) {
             String reason = unsupported.get(name);
-            throw JacquardException.binding(name + ": absent or unsupported closed v0 signature" + (reason == null ? "" : ": " + reason));
+            throw JacquardException.binding(Identities.excerpt(name) + ": absent or unsupported closed v0 signature" + (reason == null ? "" : ": " + reason));
         }
         Hash target = data.name(name);
         if (target == null) {
@@ -158,7 +158,7 @@ public final class Program {
         Map<String, Operations> chosen = new TreeMap<>(services);
         for (Map.Entry<String, Operations> binding : new TreeMap<>(bindings).entrySet()) {
             if (!selected.containsKey(Identities.normal(binding.getKey()))) {
-                throw JacquardException.binding(name + " does not use " + binding.getKey());
+                throw JacquardException.binding(name + " does not use " + Identities.excerpt(binding.getKey()));
             }
             chosen.put(Identities.normal(binding.getKey()), java.util.Objects.requireNonNull(binding.getValue(), "operations"));
         }
@@ -177,7 +177,7 @@ public final class Program {
             // must be some effect's operation.
             for (String key : new TreeMap<>(handlers).keySet()) {
                 if (!operationNames.contains(key)) {
-                    throw JacquardException.binding(name + ": " + effect.getKey() + " has no operation " + key);
+                    throw JacquardException.binding(name + ": " + effect.getKey() + " has no operation " + Identities.excerpt(key));
                 }
             }
             for (Identities.Entry operation : effect.getValue().operations()) {

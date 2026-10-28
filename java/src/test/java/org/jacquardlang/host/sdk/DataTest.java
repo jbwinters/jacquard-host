@@ -432,6 +432,42 @@ class DataTest {
         assertEquals("job-ticket", Identities.displayToStore("JobTicket"));
     }
 
+    record Empty() {}
+
+    /**
+     * Messages quote caller text as an excerpt, and no message is kept past
+     * 8,192 chars: a result codec naming a constructor of a million chars,
+     * and a codec that throws with a million-char message, each give a short
+     * refusal (before the fix the whole name or message was copied into each
+     * wrapper, and a 50-million-char name exhausted a 128 MiB heap).
+     */
+    @Test
+    void messagesQuoteCallerTextAsAnExcerpt() throws Exception {
+        String huge = "X".repeat(1_000_000);
+        Data data = fixture(Limits.HARD);
+        Value unit = data.encode(Codec.UNIT, null);
+        JacquardException decode = assertThrows(JacquardException.class, () -> data.decode(Codec.record(Empty.class, huge), unit));
+        assertTrue(decode.getMessage().length() < 200, decode.getMessage().length() + " chars");
+        assertTrue(decode.getMessage().contains("... (1000000 chars)"), decode.getMessage().substring(0, 120));
+        Codec<Long> throwing = new Codec<>() {
+            @Override
+            public Value encode(Encoder encoder, Long value) {
+                throw new IllegalStateException(huge);
+            }
+
+            @Override
+            public Long decode(Decoder decoder, Value value) {
+                return 0L;
+            }
+        };
+        JacquardException encode = assertThrows(JacquardException.class, () -> data.encode(throwing, 1L));
+        assertEquals(JacquardException.Kind.INVALID_ARGUMENT, encode.kind());
+        assertEquals("value: its codec failed: java.lang.IllegalStateException: " + "X".repeat(64) + "... (1000000 chars)", encode.getMessage());
+        assertTrue(encode.getCause() instanceof IllegalStateException, "the codec's exception was not kept");
+        String bounded = JacquardException.binding(huge).getMessage();
+        assertEquals("X".repeat(JacquardException.MESSAGE_LIMIT) + "... (1000000 chars)", bounded);
+    }
+
     @Test
     void anOversizedRecordIsRefusedBeforeItsComponentsAreRead() throws Exception {
         Hash counted = id('c');

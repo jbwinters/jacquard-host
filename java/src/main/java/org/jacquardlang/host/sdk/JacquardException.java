@@ -36,13 +36,24 @@ public final class JacquardException extends Exception {
     private final int batchIndex;
     private final transient List<Object> completed;
 
+    /** The longest message kept, in chars; a longer one keeps its start and its length. */
+    static final int MESSAGE_LIMIT = 8192;
+
     private JacquardException(Kind kind, String message, InvocationResult result, Throwable cause, int batchIndex,
             List<Object> completed) {
-        super(message, cause);
+        super(bounded(message), cause);
         this.kind = kind;
         this.result = result;
         this.batchIndex = batchIndex;
         this.completed = completed;
+    }
+
+    private static String bounded(String message) {
+        if (message == null || message.length() <= MESSAGE_LIMIT) {
+            return message;
+        }
+        int end = Character.isHighSurrogate(message.charAt(MESSAGE_LIMIT - 1)) ? MESSAGE_LIMIT - 1 : MESSAGE_LIMIT;
+        return message.substring(0, end) + "... (" + message.length() + " chars)";
     }
 
     static JacquardException preparation(String message) {
@@ -65,6 +76,11 @@ public final class JacquardException extends Exception {
     /** An invalid argument at a value's location, such as {@code shipping-cost.argument[0]}. */
     static JacquardException invalidAt(String path, String message) {
         return invalid(path + ": " + message);
+    }
+
+    /** As {@link #invalidAt(String, String)}, keeping the exception that caused it. */
+    static JacquardException invalidAt(String path, String message, Throwable cause) {
+        return new JacquardException(Kind.INVALID_ARGUMENT, path + ": " + message, null, cause, -1, List.of());
     }
 
     /** A failed invocation; {@code result} is not ok. */

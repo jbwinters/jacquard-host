@@ -444,13 +444,17 @@ public final class JacquardExamples {
             OutputStream out = Channels.newOutputStream(Files.newByteChannel(temporary,
                     Set.of(StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW),
                     PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))));
+            boolean moved = false;
             try {
                 try (out) {
                     out.write(text.getBytes(StandardCharsets.UTF_8));
                 }
                 Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                moved = true;
             } finally {
-                Files.deleteIfExists(temporary);
+                if (!moved) {
+                    Files.deleteIfExists(temporary);
+                }
             }
             state = next;
         }

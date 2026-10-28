@@ -85,7 +85,7 @@ public final class Function {
                 values.add(Encoder.root(data, path, budget).encode(Codecs.RUNTIME, args.get(i)));
             } catch (RuntimeException error) {
                 // A caller's codec failed; no worker starts, as for any refusal.
-                throw JacquardException.invalidAt(path, "its codec failed: " + error);
+                throw Data.codecFailed(path, error);
             }
         }
         return values;

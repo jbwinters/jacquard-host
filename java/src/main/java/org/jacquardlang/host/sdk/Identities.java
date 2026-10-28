@@ -109,7 +109,7 @@ final class Identities {
 
     /** {@code name} for a message: whole when short, otherwise its first 64 chars and its length. */
     static String excerpt(String name) {
-        if (name.length() <= 64) {
+        if (name == null || name.length() <= 64) {
             return name;
         }
         int end = Character.isHighSurrogate(name.charAt(63)) ? 63 : 64;
@@ -118,6 +118,9 @@ final class Identities {
 
     /** The form used to look up effects and operations: store spelling, with {@code _} accepted for {@code -}. */
     static String normal(String name) {
+        if (name.length() > NAME_LIMIT) {
+            return name;
+        }
         return displayToStore(name).replace('_', '-');
     }
 
@@ -221,7 +224,7 @@ final class Identities {
         private String take(String expected) throws JacquardException {
             String token = peek();
             if (token.isEmpty() || (!expected.isEmpty() && !token.equals(expected))) {
-                throw JacquardException.binding("expected \"" + expected + "\", found \"" + token + "\"");
+                throw JacquardException.binding("expected \"" + expected + "\", found \"" + excerpt(token) + "\"");
             }
             index++;
             return token;
@@ -233,7 +236,7 @@ final class Identities {
                 hash = names.get(display);
             }
             if (hash == null) {
-                throw JacquardException.binding("no identity for " + display);
+                throw JacquardException.binding("no identity for " + excerpt(display));
             }
             return hash;
         }
@@ -269,7 +272,7 @@ final class Identities {
                 return new BoundaryType.Tuple(items);
             }
             if (!Character.isLetter(token.codePointAt(0))) {
-                throw JacquardException.binding("unsupported type \"" + token + "\"");
+                throw JacquardException.binding("unsupported type \"" + excerpt(token) + "\"");
             }
             return new BoundaryType.Nominal(identity(token), List.of());
         }
