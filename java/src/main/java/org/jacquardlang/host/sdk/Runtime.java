@@ -45,16 +45,25 @@ import org.jacquardlang.host.protocol.Limits;
 public final class Runtime {
     /** Prepared programs live here unless {@link PrepareOptions#cacheDir()} is set. */
     public static final String DEFAULT_CACHE_DIR = ".scratch/jacquard-host-java";
-    static final String PROGRAM_SCHEMA = "jacquard-java-program-v1";
+    static final String PROGRAM_SCHEMA = "jacquard-java-program-v2";
     private static final long POLL_MIN = TimeUnit.MICROSECONDS.toNanos(100);
     private static final long POLL_MAX = TimeUnit.MILLISECONDS.toNanos(10);
     /** The most source bytes one preparation reads, separators included. */
     public static final long SOURCE_LIMIT = 16L << 20;
     private static final List<String> PRELUDE_FILES = List.of("01-prim.jqd", "02-data.jqd", "19-audit.jqd");
+    /** Core's raw outputs, kept as verified files of each cache entry, from which every binding is derived. */
+    static final String CHECK_OUTPUT = "core/check.out";
+    static final String HASH_OUTPUT = "core/hash.out";
+    /** The most bytes of {@code program.json} a load reads. */
+    private static final int METADATA_LIMIT = 32 << 20;
+
+    private static String preludeOutput(String file) {
+        return "core/prelude-" + file + ".out";
+    }
 
     /** One discovery: empty until a run succeeds; a failed run leaves it empty for the next caller. */
     private static final class Flight {
-        List<List<Identities.Entry>> groups;
+        List<String> outputs;
         boolean running;
     }
 
@@ -141,7 +150,7 @@ public final class Runtime {
 
     @FunctionalInterface
     private interface Work {
-        List<List<Identities.Entry>> run() throws JacquardException;
+        List<String> run() throws JacquardException;
     }
 
     /**
@@ -151,14 +160,14 @@ public final class Runtime {
      * successful result stays cached, and a failed run leaves the next caller
      * to try again.
      */
-    private static List<List<Identities.Entry>> once(String key, Cancel cancel, Work work) throws JacquardException {
+    private static List<String> once(String key, Cancel cancel, Work work) throws JacquardException {
         Flight flight = FLIGHTS.computeIfAbsent(key, ignored -> new Flight());
         long idle = POLL_MIN;
         boolean waiting = false;
         while (true) {
             synchronized (flight) {
-                if (flight.groups != null) {
-                    return flight.groups;
+                if (flight.outputs != null) {
+                    return flight.outputs;
                 }
                 if (!flight.running) {
                     flight.running = true;
@@ -178,11 +187,11 @@ public final class Runtime {
             idle = Math.min(idle * 2, POLL_MAX);
         }
         try {
-            List<List<Identities.Entry>> groups = work.run();
+            List<String> outputs = work.run();
             synchronized (flight) {
-                flight.groups = groups;
+                flight.outputs = outputs;
             }
-            return groups;
+            return outputs;
         } finally {
             synchronized (flight) {
                 flight.running = false;
@@ -203,14 +212,60 @@ public final class Runtime {
         });
     }
 
-    private List<List<Identities.Entry>> preludeGroups(Path executable, String key, Cancel cancel) throws JacquardException {
+    /** Core's {@code hash} output for each prelude file, which must parse. */
+    private List<String> preludeOutputs(Path executable, String key, Cancel cancel) throws JacquardException {
         return once("prelude:" + key, cancel, () -> {
-            List<List<Identities.Entry>> groups = new ArrayList<>();
+            List<String> outputs = new ArrayList<>();
             for (String name : PRELUDE_FILES) {
-                groups.addAll(Identities.hashGroups(command(executable, cancel, "hash", prelude.resolve(name).toString())));
+                String output = command(executable, cancel, "hash", prelude.resolve(name).toString());
+                Identities.hashGroups(output);
+                outputs.add(output);
             }
-            return List.copyOf(groups);
+            return List.copyOf(outputs);
         });
+    }
+
+    /** The bindings of a program: what {@code program.json} records beside its identity and files. */
+    record Bindings(List<Identities.Entry> names, List<Identities.Entry> constructors, Map<String, String> signatures,
+            List<List<Identities.Entry>> groups) {}
+
+    /**
+     * Derives every binding from Core's raw outputs: {@code check --print-sigs}
+     * for the signatures, and {@code hash} of each prelude file and of the
+     * source for the names, constructors, and declaration groups.
+     */
+    static Bindings derive(String check, List<String> preludeHashes, String hash) throws JacquardException {
+        Map<String, String> signatures = new TreeMap<>(Json.CODE_POINT_ORDER);
+        for (String line : check.split("\n", -1)) {
+            String trimmed = line.strip();
+            int split = trimmed.indexOf(" : ");
+            if (split >= 0) {
+                String name = trimmed.substring(0, split);
+                if (name.indexOf(' ') < 0 && name.indexOf('\t') < 0) {
+                    signatures.put(name, trimmed.substring(split + 3));
+                }
+            }
+        }
+        List<List<Identities.Entry>> groups = new ArrayList<>();
+        for (String output : preludeHashes) {
+            groups.addAll(Identities.hashGroups(output));
+        }
+        groups.addAll(Identities.hashGroups(hash));
+        Identities.checkGroups(groups);
+        List<Identities.Entry> names = new ArrayList<>();
+        LinkedHashMap<String, Hash> constructors = new LinkedHashMap<>();
+        Set<String> seen = new HashSet<>();
+        for (List<Identities.Entry> group : groups) {
+            for (Identities.Entry entry : group) {
+                if (seen.add(entry.name())) {
+                    names.add(entry);
+                }
+                constructors.put(entry.name(), entry.hash());
+            }
+        }
+        List<Identities.Entry> constructorList = new ArrayList<>();
+        constructors.forEach((name, identity) -> constructorList.add(new Identities.Entry(name, identity)));
+        return new Bindings(names, constructorList, signatures, groups);
     }
 
     /**
@@ -298,37 +353,21 @@ public final class Runtime {
         try {
             Path snapshot = staging.resolve("source" + syntax);
             write(snapshot, bytes, "cannot write the source snapshot");
-            String output = command(executable, cancel, "check", snapshot.toString(), "--print-sigs");
-            Map<String, String> signatures = new TreeMap<>(Json.CODE_POINT_ORDER);
-            for (String line : output.split("\n", -1)) {
-                String trimmed = line.strip();
-                int split = trimmed.indexOf(" : ");
-                if (split >= 0) {
-                    String name = trimmed.substring(0, split);
-                    if (name.indexOf(' ') < 0 && name.indexOf('\t') < 0) {
-                        signatures.put(name, trimmed.substring(split + 3));
-                    }
-                }
-            }
-            List<List<Identities.Entry>> groups = new ArrayList<>(preludeGroups(executable, binaryHash + preludeHash, cancel));
-            groups.addAll(Identities.hashGroups(command(executable, cancel, "hash", snapshot.toString())));
-            Identities.checkGroups(groups);
+            String check = command(executable, cancel, "check", snapshot.toString(), "--print-sigs");
+            List<String> preludeHashes = preludeOutputs(executable, binaryHash + preludeHash, cancel);
+            String hash = command(executable, cancel, "hash", snapshot.toString());
+            Bindings bindings = derive(check, preludeHashes, hash);
             Path store = staging.resolve("store");
             command(executable, cancel, "run", snapshot.toString(), "--store", store.toString());
-            List<Identities.Entry> names = new ArrayList<>();
-            LinkedHashMap<String, Hash> constructors = new LinkedHashMap<>();
-            Set<String> seen = new HashSet<>();
-            for (List<Identities.Entry> group : groups) {
-                for (Identities.Entry entry : group) {
-                    if (seen.add(entry.name())) {
-                        names.add(entry);
-                    }
-                    constructors.put(entry.name(), entry.hash());
-                }
+            createDirectory(staging.resolve("core"));
+            write(staging.resolve(CHECK_OUTPUT), check.getBytes(StandardCharsets.UTF_8), "cannot write Core's output");
+            write(staging.resolve(HASH_OUTPUT), hash.getBytes(StandardCharsets.UTF_8), "cannot write Core's output");
+            for (int i = 0; i < PRELUDE_FILES.size(); i++) {
+                write(staging.resolve(preludeOutput(PRELUDE_FILES.get(i))), preludeHashes.get(i).getBytes(StandardCharsets.UTF_8),
+                        "cannot write Core's output");
             }
-            List<Identities.Entry> constructorList = new ArrayList<>();
-            constructors.forEach((name, hash) -> constructorList.add(new Identities.Entry(name, hash)));
-            Metadata metadata = new Metadata(identity, names, constructorList, signatures, groups, Core.tree(staging, cancel));
+            Metadata metadata = new Metadata(identity, bindings.names(), bindings.constructors(), bindings.signatures(), bindings.groups(),
+                    Core.tree(staging, cancel));
             write(staging.resolve("program.json"), metadata.toJson().getBytes(StandardCharsets.UTF_8), "cannot write program.json");
             try {
                 Files.move(staging, directory, StandardCopyOption.ATOMIC_MOVE);
@@ -404,6 +443,14 @@ public final class Runtime {
         return dot <= 0 ? "" : text.substring(dot);
     }
 
+    private static void createDirectory(Path path) throws JacquardException {
+        try {
+            Files.createDirectory(path);
+        } catch (IOException error) {
+            throw JacquardException.preparation("cannot create " + path + ": " + error.getMessage());
+        }
+    }
+
     private static void write(Path path, byte[] bytes, String context) throws JacquardException {
         try {
             Files.write(path, bytes);
@@ -441,31 +488,88 @@ public final class Runtime {
         }
     }
 
+    /**
+     * Loads a cache entry, refusing any change: every file but
+     * {@code program.json} must match the digests it records, and every
+     * binding it records must equal what is derived again from Core's raw
+     * outputs, which are among those verified files.
+     */
     private Program load(Path directory, Map<String, String> identity, Path executable, Cancel cancel) throws JacquardException {
         java.util.function.Function<String, JacquardException> fail = detail -> JacquardException.preparation("prepared cache "
                 + directory + " is incomplete or changed (" + detail + "); remove that cache entry and prepare again");
-        byte[] text;
-        try {
-            text = Files.readAllBytes(directory.resolve("program.json"));
-        } catch (IOException error) {
-            throw fail.apply(String.valueOf(error.getMessage()));
-        }
-        Metadata metadata = Metadata.fromJson(text);
-        if (metadata == null) {
-            throw fail.apply("unreadable program.json");
-        }
         TreeMap<String, String> observed;
         try {
+            // Regular files only, bounded, so no read below can block.
             observed = Core.tree(directory, cancel);
         } catch (JacquardException error) {
             throw fail.apply(error.getMessage());
+        }
+        if (!observed.containsKey("program.json")) {
+            throw fail.apply("no program.json");
+        }
+        Metadata metadata = Metadata.fromJson(readVerified(directory, "program.json", null, METADATA_LIMIT, fail));
+        if (metadata == null) {
+            throw fail.apply("unreadable program.json");
         }
         observed.remove("program.json");
         if (!metadata.identity().equals(identity) || !observed.equals(metadata.files())) {
             throw fail.apply("cached artifact digests do not match");
         }
-        Identities.checkGroups(metadata.groups());
+        Bindings derived;
+        try {
+            List<String> preludeHashes = new ArrayList<>();
+            for (String file : PRELUDE_FILES) {
+                preludeHashes.add(text(readVerified(directory, preludeOutput(file), observed, Core.STDOUT_LIMIT, fail), fail));
+            }
+            derived = derive(text(readVerified(directory, CHECK_OUTPUT, observed, Core.STDOUT_LIMIT, fail), fail), preludeHashes,
+                    text(readVerified(directory, HASH_OUTPUT, observed, Core.STDOUT_LIMIT, fail), fail));
+        } catch (JacquardException error) {
+            if (error.getMessage().startsWith("prepared cache ")) {
+                throw error;
+            }
+            throw fail.apply("Core's cached output does not parse: " + error.getMessage());
+        }
+        Bindings recorded = new Bindings(metadata.names(), metadata.constructors(), metadata.signatures(), metadata.groups());
+        if (!derived.equals(recorded)) {
+            throw fail.apply("program.json bindings differ from Core's cached output");
+        }
         return new Program(this, directory, metadata, executable);
+    }
+
+    /**
+     * The bytes of a regular file in a cache entry, at most {@code limit};
+     * when {@code digests} is given, they must have the digest it records.
+     */
+    private static byte[] readVerified(Path directory, String name, Map<String, String> digests, int limit,
+            java.util.function.Function<String, JacquardException> fail) throws JacquardException {
+        if (digests != null && !digests.containsKey(name)) {
+            throw fail.apply("no " + name);
+        }
+        byte[] bytes;
+        try (InputStream in = Files.newInputStream(directory.resolve(name), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            bytes = in.readNBytes(limit + 1);
+        } catch (IOException error) {
+            throw fail.apply(name + ": " + error.getMessage());
+        }
+        if (bytes.length > limit) {
+            throw fail.apply(name + " is too long");
+        }
+        if (digests != null && !Core.digest(bytes).equals(digests.get(name))) {
+            throw fail.apply("cached artifact digests do not match");
+        }
+        return bytes;
+    }
+
+    private static String text(byte[] bytes, java.util.function.Function<String, JacquardException> fail) throws JacquardException {
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes))
+                    .toString();
+        } catch (java.nio.charset.CharacterCodingException error) {
+            throw fail.apply("Core's cached output is not UTF-8");
+        }
     }
 
     /** The prepared metadata in {@code program.json}. */

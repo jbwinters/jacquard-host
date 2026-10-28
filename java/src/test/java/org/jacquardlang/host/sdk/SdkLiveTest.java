@@ -376,6 +376,24 @@ class SdkLiveTest {
                 assertThrows(JacquardException.class, () -> prepare(source("rules.txt", ""))).kind());
     }
 
+    /** Pointing {@code first} at {@code second}'s identity in program.json would make it return 2. */
+    @Test
+    void aRedirectedNameInProgramJsonIsRefused() throws Exception {
+        Path source = source("pair.jac", "first : () ->{} Int\nfirst() = 1\n\nsecond : () ->{} Int\nsecond() = 2\n");
+        Program program = prepare(source);
+        assertEquals(1L, program.function("first").call(Codec.INT));
+        Path metadata = program.directory().resolve("program.json");
+        String original = Files.readString(metadata);
+        String from = "[\"first\",\"" + program.data().identity("first").hex() + "\"]";
+        assertTrue(original.contains(from));
+        Files.writeString(metadata, original.replace(from, "[\"first\",\"" + program.data().identity("second").hex() + "\"]"));
+        JacquardException error = assertThrows(JacquardException.class, () -> prepare(source).function("first").call(Codec.INT));
+        assertEquals(JacquardException.Kind.PREPARATION, error.kind(), error.getMessage());
+        assertTrue(error.getMessage().contains("program.json bindings differ"), error.getMessage());
+        Files.writeString(metadata, original);
+        assertEquals(1L, prepare(source).function("first").call(Codec.INT));
+    }
+
     @Test
     void fullIntRangeRealsAndNestedOptions() throws Exception {
         Program program = prepare(source("values.jac", "value.int : (Int) ->{} Int\nvalue.int(x) = x\n"

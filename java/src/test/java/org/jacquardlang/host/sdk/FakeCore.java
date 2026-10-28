@@ -60,6 +60,21 @@ final class FakeCore implements AutoCloseable {
         return create(scratch, Compat.CORE_VERSION, null, "check) ;;\nhash) echo '0:x " + hash + "' ;;\nrun) exit 4 ;;");
     }
 
+    static final String FIRST = "a".repeat(64);
+    static final String SECOND = "b".repeat(64);
+
+    /**
+     * A fake that prepares every source as two functions, {@code first} and
+     * {@code second}, with identities {@link #FIRST} and {@link #SECOND}, over
+     * a one-type prelude.
+     */
+    static FakeCore programs(Path scratch) throws Exception {
+        return create(scratch, Compat.CORE_VERSION, null, "check) echo 'first : () ->{} Int'; echo 'second : () ->{} Int' ;;\n"
+                + "hash) case \"$2\" in */prelude/*) echo '0:int " + "1".repeat(64) + "' ;; *) echo '0:first " + FIRST + "'; echo '1:second "
+                + SECOND + "' ;; esac ;;\n"
+                + "run) mkdir -p \"$4\" && echo objects > \"$4/objects\" ;;");
+    }
+
     PrepareOptions options() {
         return new PrepareOptions(root.resolve("cache"));
     }

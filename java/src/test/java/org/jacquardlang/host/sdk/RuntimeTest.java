@@ -368,4 +368,57 @@ class RuntimeTest {
             assertEquals(0, fake.calls("check"));
         }
     }
+    /** Replaces every occurrence of {@code from}, which must occur, in {@code file}. */
+    private static void replace(Path file, String from, String to) throws Exception {
+        String text = Files.readString(file);
+        assertTrue(text.contains(from), from + " is not in " + file);
+        Files.writeString(file, text.replace(from, to));
+    }
+
+    /**
+     * A warm preparation loads the entry without Core. A change to any
+     * binding in {@code program.json} (a name's identity, a group, a
+     * signature) is refused because the bindings are derived again from
+     * Core's cached output; a change to that output is refused by its digest,
+     * and so is a rewrite of the output with its recorded digest when the
+     * bindings no longer match it.
+     */
+    @DisabledOnOs(OS.WINDOWS)
+    @Test
+    void aChangedCacheEntryIsRefusedIncludingItsMetadata() throws Exception {
+        try (FakeCore fake = FakeCore.programs(scratch.resolve("verified"))) {
+            List<Path> sources = List.of(fake.source("rules.jac"));
+            Program program = fake.runtime.prepare(sources, fake.options());
+            assertEquals(FakeCore.FIRST, program.data().identity("first").hex());
+            assertTrue(Files.isRegularFile(program.directory().resolve(Runtime.HASH_OUTPUT)));
+            int commands = fake.runtime.coreCommands();
+            assertEquals(program.directory(), fake.runtime.prepare(sources, fake.options()).directory());
+            assertEquals(commands, fake.runtime.coreCommands(), "a warm preparation ran Core");
+            Path metadata = program.directory().resolve("program.json");
+            String original = Files.readString(metadata);
+            List<List<String>> changes = List.of(
+                    List.of("[\"first\",\"" + FakeCore.FIRST + "\"]", "[\"first\",\"" + FakeCore.SECOND + "\"]"),
+                    List.of("{\"hash\":\"" + FakeCore.FIRST + "\",\"name\":\"first\"}", "{\"hash\":\"" + FakeCore.SECOND + "\",\"name\":\"first\"}"),
+                    List.of("\"first\":\"() ->{} Int\"", "\"first\":\"() ->{} Text\""));
+            for (List<String> change : changes) {
+                replace(metadata, change.get(0), change.get(1));
+                JacquardException error = assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options()),
+                        "a changed program.json was accepted: " + change);
+                assertTrue(error.getMessage().contains("program.json bindings differ from Core's cached output"), error.getMessage());
+                Files.writeString(metadata, original);
+            }
+            assertEquals(program.directory(), fake.runtime.prepare(sources, fake.options()).directory());
+            Path hash = program.directory().resolve(Runtime.HASH_OUTPUT);
+            String output = Files.readString(hash);
+            replace(hash, "0:first " + FakeCore.FIRST, "0:first " + FakeCore.SECOND);
+            String changed = Files.readString(hash);
+            JacquardException digest = assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options()));
+            assertTrue(digest.getMessage().contains("cached artifact digests do not match"), digest.getMessage());
+            replace(metadata, Core.digest(output.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                    Core.digest(changed.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            JacquardException rewritten = assertThrows(JacquardException.class, () -> fake.runtime.prepare(sources, fake.options()));
+            assertTrue(rewritten.getMessage().contains("program.json bindings differ"), rewritten.getMessage());
+            assertEquals(commands, fake.runtime.coreCommands());
+        }
+    }
 }
