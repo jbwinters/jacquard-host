@@ -588,6 +588,9 @@ class DataTest {
         Codec<One> deepest = deep;
         assertEquals(1, Codecs.unionCases(deepest));
         assertThrows(JacquardException.class, () -> data.decode(deepest, notRouted));
+        // Encoding descends the layers in a loop too, so the same depth encodes and round-trips.
+        Value encoded = data.encode(deepest, new One());
+        assertEquals(new One(), data.decode(deepest, encoded));
     }
 
     /** A Dynamic value over the hard limit is refused at construction, before its items are copied. */

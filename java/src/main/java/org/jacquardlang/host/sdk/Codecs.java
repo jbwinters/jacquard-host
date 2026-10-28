@@ -632,12 +632,25 @@ final class Codecs {
 
         @Override
         public Value encode(Encoder encoder, S value) throws JacquardException {
-            for (Cases<?> each : cases) {
-                if (each.javaType().isInstance(value)) {
-                    return encodeCase(encoder, each, value);
+            // Down through nested unions in a loop, not a call per layer, so
+            // nesting of any depth cannot overflow the stack.
+            UnionCodec<?> union = this;
+            while (true) {
+                Cases<?> chosen = null;
+                for (Cases<?> each : union.cases) {
+                    if (each.javaType().isInstance(value)) {
+                        chosen = resolved(each);
+                        break;
+                    }
                 }
+                if (chosen == null) {
+                    throw encoder.invalid(union.type.getSimpleName() + " has no case for " + value.getClass().getName());
+                }
+                if (!(chosen instanceof UnionCodec<?> nested)) {
+                    return encodeCase(encoder, chosen, value);
+                }
+                union = nested;
             }
-            throw encoder.invalid(type.getSimpleName() + " has no case for " + value.getClass().getName());
         }
 
         @Override
@@ -694,7 +707,8 @@ final class Codecs {
 
     /** A codec still being derived, for recursive declarations. */
     private static final class Lazy implements Cases<Object> {
-        private Cases<Object> target;
+        // Volatile, so a codec published without a happens-before edge still shows its target.
+        private volatile Cases<Object> target;
 
         @Override
         public Class<?> javaType() {
