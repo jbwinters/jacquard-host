@@ -97,7 +97,10 @@ keyed by:
 - every prelude file;
 - the protocol and preparation format.
 
-Each source must be a regular file (a symbolic link to one is followed), and
+At most 1,024 sources are taken (`Runtime.SOURCE_FILES`); a longer list is
+refused from its `size()` before any element is read, and the `Cancel` and
+the interrupt are observed before each element's extension is checked. Each
+source must be a regular file (a symbolic link to one is followed), and
 all of them together at most 16 MiB (`Runtime.SOURCE_LIMIT`); both are checked
 from the files' attributes before a source is read, so a FIFO or device is
 refused rather than opened; between sources the read observes the `Cancel`
@@ -112,8 +115,28 @@ the ceiling again while it is read, and the `Cancel` and the interrupt are
 observed before each entry and between pieces. A source replaced by a FIFO
 between that check and its open can still block the open.
 
+A preparation that fails removes its unpublished staging directory
+(`prepare-*` in the cache root) in a streamed walk of at most 100,000 entries
+that ends at the first `Cancel` or interrupt, so a stopped preparation leaves
+its staging directory behind. Such a directory is never loaded: entries are
+named by their identity digest. A later preparation that makes a new entry removes
+`prepare-*` directories last modified over an hour ago, within the same
+entry cap and stop checks, best effort.
+
+A function whose checked signature nests types deeper than 64 levels (the
+protocol's value-depth limit, `max_json_depth`, so no such value could be
+passed), names more than 4,096 types, or has more than 16,384 tokens is
+refused before the parser recurses past that bound. Like a polymorphic
+function it is left unbound: preparation succeeds, the other functions bind,
+and `program.function` on it fails with a `BINDING` exception naming the
+limit. `check --print-sigs` prints no operation signatures, and the SDK
+parses none; an operation's arguments are checked by the protocol's limits
+when they arrive.
+
 The cache defaults to `.scratch/jacquard-host-java` under the working
-directory; `PrepareOptions` changes it. A cache entry keeps Core's raw
+directory; `PrepareOptions` changes it. A symbolic link to the cache root is
+followed once, and the real directory is checked and used; nothing inside it
+is followed. A cache entry keeps Core's raw
 `check --print-sigs` output and the `hash` output for the source and each
 prelude file beside the store, and `program.json` records every file's digest.
 Every binding (names, constructors, signatures, and declaration groups) is
@@ -144,8 +167,8 @@ the same host-owned output FIFOs as the worker (see
 cancelling it, or interrupting the calling thread, kills the running command
 and a snapshot of its process tree, and fails the preparation. The interrupt
 status stays set, and a preparation waiting for another thread's version
-check or prelude discovery stops waiting too. On Linux with util-linux
-`setsid`, each command runs in its own process group, which is killed when
+check or prelude discovery stops waiting too. On Linux with a `setsid` at
+`/usr/bin` or `/bin`, each command runs in its own process group, which is killed when
 the command exits and on every stop, as in the Rust SDK (see
 [Core's commands](#process-carrier)).
 
@@ -468,8 +491,8 @@ returns. Nothing is retried.
 
 The JDK cannot start a process in its own process group, and a blocking
 read from a pipe cannot be interrupted. The worker carrier is built around
-both. (The SDK's Core commands get a process group from util-linux `setsid`
-on Linux; see [Core's commands](#process-carrier). The worker does not use
+both. (The SDK's Core commands get a process group from `setsid` on
+Linux; see [Core's commands](#process-carrier). The worker does not use
 it yet, so the worker's gaps below remain.)
 
 - **The host owns the output pipes on Unix.** The JDK's own process pipes
@@ -550,8 +573,12 @@ cancellation.
 
 **Core's commands.** The SDK runs Core's `--version`, `check`, `hash`, and
 `run` through `Command`, with the same output FIFOs and polls, its stdin the
-null device. On Linux, when util-linux `setsid` is installed at
-`/usr/bin/setsid` or `/bin/setsid`, each command runs as `setsid -- <core>`.
+null device. On Linux, when a `setsid` is installed at `/usr/bin/setsid` or
+`/bin/setsid` (util-linux's, or a compatible one such as BusyBox's; any
+executable there is used), each command runs as `setsid -- <core>`. When
+`setsid` cannot exec Core (exit status 126 or 127 with stderr starting
+`setsid: `), the command is reported as a start failure, as the JDK reports
+one without `setsid`.
 The JDK's child is never a process group leader, so `setsid` execs Core
 without forking: Core keeps the pid the JDK reports and leads a new session
 and process group whose id is that pid. Core and every descendant that does
@@ -562,11 +589,15 @@ the group id from `/proc/<pid>/stat` (after the last `)`), and kills the
 process through that handle only when the id is the command's. The JDK
 checks the handle's start time before signalling, so a pid reused after the
 handle was acquired is not killed, and a group with a live member keeps its
-id, so a matching id proves membership. Each pass covers every process once
-and always runs to the end; passes repeat, at most eight, until one finds no
-live member. After the exit's cleanup the host checks the timeout, the
-`Cancel`, and the interrupt again before it reports success, and then reads
-at most 4 MiB more of each stream and closes its ends.
+id, so a matching id proves membership unless the id was reused after the
+group emptied: after a full pid wraparound, a process that took Core's pid,
+made its own group, forked, and exited can have its child killed by a pass
+still running, the same window as the Rust SDK's `kill(-pgid)`. Each pass
+covers every process once and always runs to the end; passes repeat, at most
+eight, until one finds no live member. After the exit's cleanup the host
+reads at most 4 MiB more of each stream, then checks the timeout, the
+`Cancel`, and the interrupt again before it reports success, and closes its
+ends either way.
 
 What remains: a descendant that leaves the group (calls `setsid` itself) is
 neither detected nor killed. The Rust SDK detects one that still holds Core's
@@ -575,7 +606,10 @@ host holds its FIFOs read-write, so it never sees EOF and cannot detect it.
 Such a descendant's next write fails once the host closes its ends. A group
 id cannot be reused while the group has members, so once Core has been
 reaped, a live process holding Core's pid means the group is gone, and the
-pass stops without killing anything more. Without `setsid` (macOS, or Linux without util-linux),
+pass stops without killing anything more. A killed descendant that had been
+reparented to the JVM (a child subreaper) stays a zombie of the JVM, since
+the JDK reaps only its own children. Without `setsid` (macOS, or Linux
+without one at those paths),
 the host records the command's descendants about every 10 ms, by pid and
 start time, kills every recorded descendant still alive with its recorded
 start time when the command returns, and on a stop also kills a snapshot of
