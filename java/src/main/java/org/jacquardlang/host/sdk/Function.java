@@ -1,5 +1,6 @@
 package org.jacquardlang.host.sdk;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -10,6 +11,7 @@ import org.jacquardlang.host.Host;
 import org.jacquardlang.host.OperationRegistry;
 import org.jacquardlang.host.ProtocolException;
 import org.jacquardlang.host.carrier.Cancel;
+import org.jacquardlang.host.carrier.Worker;
 import org.jacquardlang.host.json.Json;
 import org.jacquardlang.host.json.JsonCodec;
 import org.jacquardlang.host.protocol.BoundaryType;
@@ -38,14 +40,16 @@ public final class Function {
     private final OperationRegistry registry;
     private final Host host;
     private final Data data;
+    private final Duration deadline;
 
-    Function(String name, Interface signature, Hash target, OperationRegistry registry, Host host, Data data) {
+    Function(String name, Interface signature, Hash target, OperationRegistry registry, Host host, Data data, Duration deadline) {
         this.name = name;
         this.signature = signature;
         this.target = target;
         this.registry = registry;
         this.host = host;
         this.data = data;
+        this.deadline = deadline;
     }
 
     /** The public name. */
@@ -147,17 +151,25 @@ public final class Function {
      * Runs a pure function whose final parameter and result are Lists over
      * explicit chunks of {@code rows}, with {@code leading} as the other
      * arguments, and concatenates the decoded results. Every chunk is
-     * validated before the first runs. Nothing is retried.
+     * validated before the first runs, one at a time: each chunk's encoding
+     * is discarded once it is checked, and the chunk is encoded and checked
+     * again just before it runs, so at most one chunk's encoding is held at a
+     * time. Between chunks the validation observes {@code cancel}, the
+     * caller's interrupt (which it never clears), and the runtime's deadline,
+     * which bounds the whole validation. Nothing is retried.
      *
      * @throws JacquardException a refusal before any worker started
-     *     ({@link JacquardException#batchIndex()} is -1), or the failure of
-     *     one batch, with the decoded values of the batches before it in
+     *     ({@link JacquardException#batchIndex()} is -1): an invalid chunk, a
+     *     validation that outlived the deadline, or a stop, which is reported
+     *     as the host's aborted invocation, without a worker; or the failure
+     *     of one batch, with the decoded values of the batches before it in
      *     {@link JacquardException#completed()}
      */
     public <R> List<R> mapBatches(Cancel cancel, Codec<R> item, List<?> rows, int batchSize, Object... leading)
             throws JacquardException {
         Objects.requireNonNull(cancel, "cancel");
         Objects.requireNonNull(item, "item");
+        Objects.requireNonNull(rows, "rows");
         Objects.requireNonNull(leading, "leading");
         if (batchSize < 1) {
             throw JacquardException.invalid("batch size must be positive");
@@ -168,21 +180,40 @@ public final class Function {
                 || !isList(signature.result(), list)) {
             throw JacquardException.binding("mapBatches needs a pure function with a final List parameter and a List result");
         }
-        batch(leading, List.of());
-        List<List<Value>> batches = new ArrayList<>();
-        for (int start = 0; start < rows.size(); start += batchSize) {
-            batches.add(batch(leading, rows.subList(start, Math.min(rows.size(), start + batchSize))));
+        Duration bound = deadline == null ? Worker.DEFAULT_DEADLINE : deadline;
+        long budget = bound.compareTo(Duration.ofNanos(Long.MAX_VALUE / 4)) > 0 ? Long.MAX_VALUE / 4 : bound.toNanos();
+        long expires = System.nanoTime() + budget;
+        List<Value> empty = batch(leading, List.of());
+        int count = (int) ((rows.size() + (long) batchSize - 1) / batchSize);
+        for (int index = 0; index < count; index++) {
+            if (cancel.isCancelled() || Thread.currentThread().isInterrupted()) {
+                // The host observes the stop before it spawns a worker.
+                Invocation stopped = run(empty, cancel);
+                if (!stopped.ok()) {
+                    throw JacquardException.invocation(stopped.raw());
+                }
+            }
+            if (System.nanoTime() - expires >= 0) {
+                throw JacquardException.invalid(name + ": validating " + count + " batches outlived the deadline of " + bound
+                        + "; pass fewer rows");
+            }
+            batch(leading, chunk(rows, index, batchSize));
         }
         List<R> completed = new ArrayList<>();
         Codec<List<R>> results = Codec.list(item);
-        for (int index = 0; index < batches.size(); index++) {
+        for (int index = 0; index < count; index++) {
             try {
-                completed.addAll(run(batches.get(index), cancel).decode(results));
+                completed.addAll(run(batch(leading, chunk(rows, index, batchSize)), cancel).decode(results));
             } catch (JacquardException error) {
                 throw JacquardException.batch(index, new ArrayList<Object>(completed), error);
             }
         }
         return completed;
+    }
+
+    private static List<?> chunk(List<?> rows, int index, int batchSize) {
+        int start = index * batchSize;
+        return rows.subList(start, (int) Math.min(rows.size(), (long) start + batchSize));
     }
 
     private List<Value> batch(Object[] leading, List<?> chunk) throws JacquardException {
