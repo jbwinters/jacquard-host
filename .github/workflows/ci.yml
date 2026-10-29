@@ -230,25 +230,33 @@ jobs:
           # SDK. A group-writable level passes only when its group is the
           # user's private group: the user's primary group, named as the user,
           # no other listed member, and no access ACL; and getent passwd
-          # succeeds, lists at most 100,000 well-formed entries with no name
-          # twice, lists the user with that primary group, and lists no
-          # account of another uid with it.
+          # succeeds, prints at most 16 MiB ending in a newline, lists at most
+          # 100,000 well-formed entries with no name twice, lists the user
+          # with that primary group, and lists no account of another uid
+          # with it.
           me=$(id -un); uid=$(id -u); gid=$(id -g)
           private=no
+          listing=$(mktemp)
+          trap 'rm -f "$listing"' EXIT
           passwd_status=0
-          passwd=$(getent passwd) || passwd_status=$?
+          # At most one byte over the cap is kept; a longer listing fails (getent is stopped) and is refused.
+          getent passwd | head -c 16777217 > "$listing" || passwd_status=$?
+          size=$(wc -c < "$listing")
           group_status=0
           group_entry=$(getent group "$gid") || group_status=$?
           if [ "$passwd_status" = 0 ] && [ "$group_status" = 0 ] \
-            && printf '%s\n' "$passwd" | awk -F: -v n="$me" -v u="$uid" -v g="$gid" '
+            && [ "$size" -gt 0 ] && [ "$size" -le 16777216 ] \
+            && [ "$(tail -c 1 "$listing" | od -An -tx1 | tr -d ' \n')" = 0a ] \
+            && awk -F: -v n="$me" -v u="$uid" -v g="$gid" '
                 NF != 7 || $1 == "" || $3 !~ /^(0|[1-9][0-9]*)$/ || $4 !~ /^(0|[1-9][0-9]*)$/ || seen[$1]++ { bad = 1; exit }
                 $1 == n { if ($3 != u || $4 != g) { bad = 1; exit }; listed = 1; next }
                 $4 == g && $3 != u { bad = 1; exit }
-                END { exit (bad || !listed || NR > 100000) }' \
+                END { exit (bad || !listed || NR > 100000) }' "$listing" \
             && [ "$(printf '%s\n' "$group_entry" | cut -d: -f1)" = "$me" ] \
             && [ -z "$(printf '%s\n' "$group_entry" | cut -d: -f4 | tr , '\n' | grep -vx "$me")" ]; then
             private=yes
           fi
+          rm -f "$listing"
           d=$(realpath "$RUNNER_TEMP")
           while :; do
             mode=$(stat -c %a "$d"); owner=$(stat -c %u "$d"); group=$(stat -c %g "$d")
