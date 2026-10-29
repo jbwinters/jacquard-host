@@ -1,20 +1,19 @@
 # Jacquard Host
 
-Call checked Jacquard functions from Python, TypeScript, Go, or Rust and implement their
-declared host operations with ordinary services. Jacquard owns the decision
+Call checked Jacquard functions from Python, TypeScript, Go, Rust, or Java and implement
+their declared host operations with ordinary services. Jacquard owns the decision
 logic; the host owns persistence, I/O, and application lifetimes.
 
 The SDK prepares and caches checked programs, converts native Python values,
 binds services to exact operation identities, and retains the raw evidence for
-every invocation. Python 3.11+, Node.js 22+, Go 1.24+, or Rust 1.88+, with no
-third-party runtime dependencies. The [TypeScript SDK](typescript/README.md),
-the [Go SDK](go/README.md), and the [Rust SDK](rust/README.md) implement the
-pinned protocol independently. The TypeScript SDK supports async service
-methods, the Go SDK maps native Go types and context cancellation, and the Rust
-SDK maps native Rust types through `record!` and `variants!` declarations. A
-protocol-level [Java adapter](java/README.md) (Java 21+) also implements the
-pinned protocol independently. It has a closed operation registry and kit
-replay, but no SDK layer yet.
+every invocation. Python 3.11+, Node.js 22+, Go 1.24+, Rust 1.88+, or Java 21+,
+with no third-party runtime dependencies. The [TypeScript SDK](typescript/README.md),
+the [Go SDK](go/README.md), the [Rust SDK](rust/README.md), and the
+[Java SDK](java/README.md) implement the pinned protocol independently. The
+TypeScript SDK supports async service methods, the Go SDK maps native Go types
+and context cancellation, the Rust SDK maps native Rust types through `record!`
+and `variants!` declarations, and the Java SDK maps records, enums, and sealed
+interfaces through explicit codecs.
 
 **Experimental:** the SDK targets Core's pinned `jacquard-host-v0` protocol.
 Core is installed separately. Each invocation runs one fresh, serial worker;
@@ -23,7 +22,8 @@ the host and operating system are trusted. See [limits](docs/LIMITS.md).
 ## Get started
 
 For Node.js, follow the [TypeScript walkthrough](typescript/README.md); for Go,
-the [Go walkthrough](go/README.md). For Python:
+the [Go walkthrough](go/README.md); for Rust, the [Rust walkthrough](rust/README.md);
+for Java, the [Java walkthrough](java/README.md). For Python:
 
 From a clone of this repository:
 

@@ -88,7 +88,7 @@ jobs:
           java-version: ${{ matrix.java }}
           cache: maven
           cache-dependency-path: java/pom.xml
-      - name: Offline tests
+      - name: Offline adapter and SDK tests
         run: mvn -B -ntp verify
 
   bootstrap:
@@ -163,8 +163,23 @@ jobs:
           java-version: "21"
           cache: maven
           cache-dependency-path: java/pom.xml
-      - name: Run independent Java adapter against Core
+      - name: Run independent Java adapter and SDK against Core
         run: mvn -B -ntp verify
         working-directory: java
         env:
           JACQUARD_REQUIRE_LIVE: "1"
+      - name: Run the four example projects through the Java SDK
+        working-directory: java
+        run: |
+          set -euo pipefail
+          run() { java -cp target/classes:target/test-classes org.jacquardlang.host.examples.JacquardExamples --workdir "$RUNNER_TEMP/java-examples" "$@"; }
+          run quickstart
+          run planner | grep -q '"score": 16'
+          run triage | grep -q '"urgency": "WATCH"'
+          run fulfillment | grep -q '"$tag": "Fulfilled"'
+          run fulfillment | grep -q '"$tag": "DuplicateOrder"'
+          status=0
+          run --workdir "$RUNNER_TEMP/java-recovery" --fault publish-failed fulfillment || status=$?
+          test "$status" = 1
+          run --workdir "$RUNNER_TEMP/java-recovery" --deliver-pending fulfillment | grep -q '{"delivered":1}'
+          run --workdir "$RUNNER_TEMP/java-recovery" --deliver-pending fulfillment | grep -q '{"delivered":0}'

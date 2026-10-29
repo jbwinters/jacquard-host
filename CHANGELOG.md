@@ -26,7 +26,7 @@
   It provides strict codecs, the session state machine, a bounded process
   carrier for `jacquard host worker`, and a `Host` with a closed operation
   registry. It carries the pinned kit as class-path resources and replays all
-  21 recordings. It is protocol-level only, with no SDK layer. Java cannot
+  21 recordings. Java cannot
   start the worker in its own process group or interrupt a pipe read, so the
   carrier never blocks on a read, reads the worker's output through FIFOs it
   creates with `mkfifo` on Unix (so the JDK's exit-time pipe drain cannot hold
@@ -35,6 +35,43 @@
   `java/src/main/java/org/jacquardlang/host/Compat.java` and keeps the Java kit
   copy in sync, and CI runs the offline tests on Java 21 and 25 and the live
   tests against the pinned Core.
+- Java SDK (`org.jacquardlang.host.sdk`): prepares and caches checked programs
+  with Core's public commands, maps Java values through explicit `Codec`
+  objects (derived from records, enums, and sealed interfaces through their
+  declarations, and `Dynamic` for untyped code), binds typed handlers to exact
+  operation identities, checks arguments against the checked signature and
+  the selected limits before a worker starts, and keeps each invocation's raw
+  evidence. Encoding is bounded by the selected limits as it goes, so a small
+  Java value that denotes a huge one is refused after about one frame's work.
+  Every argument value is measured under one shared budget before its type
+  is checked, whatever codec built it. `mapBatches` runs explicit batches,
+  validating every batch first without keeping any batch's encoding, and
+  observing the `Cancel` and the interrupt between batches and after the
+  last; as in the other SDKs, validation has no deadline. Preparation takes
+  a `Cancel` and stops on the caller's interrupt; it reads only regular
+  files, at most 16 MiB of sources, 512 MiB of Core executable, and 100,000
+  entries and 256 MiB under the prelude or a cache entry, observing stops as
+  it reads. A cache entry keeps Core's raw `check` and `hash` output, and
+  every binding is derived from it again on load, so a changed `program.json`
+  is refused; on POSIX, a cache root or entry that another user owns or that
+  others may write is refused, and new entries are owner-only. On Linux with
+  a `setsid` at `/usr/bin` or `/bin`, each Core command runs in its own
+  process group, which is killed when the command exits and on every stop,
+  and a `setsid` that cannot exec Core is reported as a start failure;
+  elsewhere its recorded descendants are killed. Preparation takes at most
+  1,024 sources, refused from the list's size; a failed preparation's
+  cleanup is bounded and ends at a stop, leaving an unpublished staging
+  directory, which nothing removes later; a preparation that finishes as a
+  stop arrives reports the stop; and a symbolic
+  link to the cache root is followed to the directory it names. A function
+  whose signature nests types deeper than 64 levels, the protocol's value
+  depth, is left unbound with a binding failure naming the limit, while the
+  program's other functions still bind. The four example projects run through the
+  `JacquardExamples` command. The low-level adapter gains `carrier.Command`,
+  the bounded runner the SDK uses for Core's commands, which shares the
+  worker's output FIFOs, and `HandlerContext.of` for calling a handler
+  outside an invocation. CI runs the SDK's offline and live tests and the
+  four projects.
 
 ## 0.2.0 — 2026-10-25
 

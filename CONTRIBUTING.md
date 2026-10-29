@@ -114,7 +114,7 @@ directly, so there is no copy to keep in sync.
 
 ## Java
 
-The independent Java adapter lives in `java/` as Maven artifact
+The independent Java adapter and SDK live in `java/` as Maven artifact
 `org.jacquardlang:jacquard-host`. It has no third-party runtime dependencies
 and does not call Python, Node.js, Go, or Rust; on Unix it runs the system
 `mkfifo`. JUnit 5 is its only test dependency. Java 21+ and Maven 3.9+ are
@@ -125,16 +125,22 @@ cd java
 mvn -B verify
 # With the pinned Core configured (eval "$(python3 ../scripts/core_pin.py install)"):
 JACQUARD_REQUIRE_LIVE=1 mvn -B verify
+java -cp target/classes:target/test-classes org.jacquardlang.host.examples.JacquardExamples quickstart
 ```
 
-CI runs the offline tests on Java 21 and 25, and the live tests on Java 21 in
-the shared pinned-Core job. The compiler runs with `-Xlint:all -Werror`.
+CI runs the offline tests on Java 21 and 25, and the live tests and the four
+example projects on Java 21 in the shared pinned-Core job. The compiler runs
+with `-Xlint:all -Werror`.
 `java/src/main/java/org/jacquardlang/host/Compat.java` is generated and the
 kit under `java/src/main/resources/` is a byte copy of the pinned kit.
 `scripts/core_pin.py` maintains both; do not edit them by hand. The `StandIn`
-main class in the test sources is a fixture for the offline tests. Copy the
-repository `NOTICE` to `java/NOTICE` when it changes (a test fails if they
-differ).
+main class and the `FakeCore` script in the test sources are fixtures for the
+offline tests. The `JacquardExamples` command, also a test source, reads the
+rules and inputs from `examples/` directly, so there is no copy to keep in
+sync. The README's Java examples are compiled test sources under
+`java/src/test/java/org/jacquardlang/host/readme/` (a test fails if they
+differ). Copy the repository `NOTICE` to `java/NOTICE` when it changes (a test
+fails if they differ).
 
 ## Releasing
 

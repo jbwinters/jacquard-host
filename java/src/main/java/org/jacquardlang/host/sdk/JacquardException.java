@@ -1,0 +1,194 @@
+package org.jacquardlang.host.sdk;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import org.jacquardlang.host.Failure;
+import org.jacquardlang.host.InvocationException;
+import org.jacquardlang.host.InvocationResult;
+
+/**
+ * Every SDK failure. {@link #kind()} says what failed; an invocation that ran
+ * keeps its raw {@link #result()}.
+ */
+public final class JacquardException extends Exception {
+    private static final long serialVersionUID = 1L;
+
+    /** What failed. */
+    public enum Kind {
+        /** The program could not be checked, hashed, installed, or loaded from its cache. */
+        PREPARATION,
+        /**
+         * A mapping or binding problem: an unknown name, a missing handler, or a
+         * successful Core result that does not decode into the requested type
+         * ({@link #result()} is then set).
+         */
+        BINDING,
+        /** A local input that cannot be sent; no worker started. */
+        INVALID_ARGUMENT,
+        /** The invocation ran and did not succeed; {@link #failure()} classifies it. */
+        INVOCATION
+    }
+
+    private final Kind kind;
+    private final transient InvocationResult result;
+    private final int batchIndex;
+    private final transient List<Object> completed;
+
+    /** The longest message kept, in chars; a longer one keeps its start and its length. */
+    static final int MESSAGE_LIMIT = 8192;
+
+    private JacquardException(Kind kind, String message, InvocationResult result, Throwable cause, int batchIndex,
+            List<Object> completed) {
+        super(bounded(message), cause);
+        this.kind = kind;
+        this.result = result;
+        this.batchIndex = batchIndex;
+        this.completed = completed;
+    }
+
+    /** {@code message} in at most {@link #MESSAGE_LIMIT} chars, its start kept and its length noted. */
+    static String bounded(String message) {
+        return message == null ? null : joined("", message);
+    }
+
+    /** The noted length of a message already cut by {@link #bounded}, or -1. */
+    private static long notedLength(String message) {
+        // A cut that dropped a high surrogate is one char shorter.
+        if (message.length() < MESSAGE_LIMIT - 1 || message.length() > MESSAGE_LIMIT || !message.endsWith(" chars)")) {
+            return -1;
+        }
+        int open = message.lastIndexOf("... (");
+        try {
+            long noted = open < 0 ? -1 : Long.parseLong(message.substring(open + 5, message.length() - 7));
+            // No string is longer than Integer.MAX_VALUE, so a larger note is not the SDK's.
+            return noted < message.length() || noted > Integer.MAX_VALUE ? -1 : noted;
+        } catch (NumberFormatException error) {
+            return -1;
+        }
+    }
+
+    /**
+     * {@code prefix} followed by {@code message}, in at most
+     * {@link #MESSAGE_LIMIT} chars, noting the whole length once. A message
+     * that was already cut keeps its own noted length, plus the prefix, so
+     * it is never cut twice or noted wrongly. Nothing longer than the limit is copied.
+     */
+    static String joined(String prefix, String message) {
+        if (message == null) {
+            message = "null";
+        }
+        long noted = notedLength(message);
+        long total = prefix.length() + (noted < 0 ? message.length() : noted);
+        if (noted < 0 && total <= MESSAGE_LIMIT) {
+            return prefix + message;
+        }
+        String body = noted < 0 ? message : message.substring(0, message.lastIndexOf("... ("));
+        String suffix = "... (" + total + " chars)";
+        int room = MESSAGE_LIMIT - suffix.length() - prefix.length();
+        if (room <= 0) {
+            // A prefix past the limit (not one the SDK builds): keep its start.
+            String start = prefix.substring(0, MESSAGE_LIMIT - suffix.length());
+            return (Character.isHighSurrogate(start.charAt(start.length() - 1)) ? start.substring(0, start.length() - 1) : start) + suffix;
+        }
+        int end = Math.min(room, body.length());
+        if (end > 0 && end < body.length() && Character.isHighSurrogate(body.charAt(end - 1))) {
+            end--;
+        }
+        return prefix + body.substring(0, end) + suffix;
+    }
+
+    static JacquardException preparation(String message) {
+        return new JacquardException(Kind.PREPARATION, message, null, null, -1, List.of());
+    }
+
+    static JacquardException binding(String message) {
+        return new JacquardException(Kind.BINDING, message, null, null, -1, List.of());
+    }
+
+    /** A binding failure caused by {@code cause}, such as a caller's codec that threw. */
+    static JacquardException binding(String message, Throwable cause) {
+        return new JacquardException(Kind.BINDING, message, null, cause, -1, List.of());
+    }
+
+    /** A successful Core result that could not be mapped, caused by {@code cause}; the result is kept. */
+    static JacquardException binding(String message, InvocationResult result, Throwable cause) {
+        return new JacquardException(Kind.BINDING, message, result, cause, -1, List.of());
+    }
+
+    /** A successful Core result that could not be mapped; the result is kept. */
+    static JacquardException binding(String message, InvocationResult result) {
+        return new JacquardException(Kind.BINDING, message, result, null, -1, List.of());
+    }
+
+    static JacquardException invalid(String message) {
+        return new JacquardException(Kind.INVALID_ARGUMENT, message, null, null, -1, List.of());
+    }
+
+    /** An invalid argument at a value's location, such as {@code shipping-cost.argument[0]}. */
+    static JacquardException invalidAt(String path, String message) {
+        // Bounded before it is joined, so a caller's huge message is never copied whole.
+        return invalid(joined(path + ": ", message));
+    }
+
+    /** As {@link #invalidAt(String, String)}, keeping the exception that caused it. */
+    static JacquardException invalidAt(String path, String message, Throwable cause) {
+        return new JacquardException(Kind.INVALID_ARGUMENT, joined(path + ": ", message), null, cause, -1, List.of());
+    }
+
+    /** A failed invocation; {@code result} is not ok. */
+    static JacquardException invocation(InvocationResult result) {
+        InvocationException cause;
+        try {
+            result.valueOrThrow();
+            throw new IllegalArgumentException("the invocation succeeded");
+        } catch (InvocationException error) {
+            cause = error;
+        }
+        return new JacquardException(Kind.INVOCATION, result.message(), result, cause, -1, List.of());
+    }
+
+    /**
+     * {@code error} as the failure of batch {@code index}, after the decoded
+     * values of the batches before it. The copy keeps null items, which is how
+     * {@link Codec#UNIT} decodes unit.
+     */
+    static JacquardException batch(int index, List<Object> completed, JacquardException error) {
+        return new JacquardException(error.kind, joined("batch " + index + ": ", error.getMessage()), error.result, error.getCause(), index,
+                Collections.unmodifiableList(new ArrayList<>(completed)));
+    }
+
+    /** What failed. */
+    public Kind kind() {
+        return kind;
+    }
+
+    /** The raw result, when a worker ran: always for {@link Kind#INVOCATION}, and for a result that did not decode. */
+    public InvocationResult result() {
+        return result;
+    }
+
+    /** How the invocation failed, for {@link Kind#INVOCATION}; otherwise null. */
+    public Failure failure() {
+        return getCause() instanceof InvocationException error ? error.failure() : null;
+    }
+
+    /**
+     * For {@link Function#mapBatches}: the index of the batch that failed, or -1
+     * when a batch was refused before any worker started (and for every other
+     * failure).
+     */
+    public int batchIndex() {
+        return batchIndex;
+    }
+
+    /**
+     * For {@link Function#mapBatches}: the decoded values of the batches that
+     * completed before the failed one, in order, unmodifiable; a unit item is
+     * null. Nothing is retried.
+     */
+    public List<Object> completed() {
+        return completed;
+    }
+}
