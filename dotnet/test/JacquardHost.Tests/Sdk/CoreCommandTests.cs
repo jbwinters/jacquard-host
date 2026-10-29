@@ -44,6 +44,7 @@ public sealed class CoreCommandTests
         CoreCommand.StatReadHook = null;
         CoreCommand.ClockHook = null;
         CoreCommand.SignalHook = null;
+        CoreCommand.ExitWaitHook = null;
         foreach (string file in Directory.EnumerateFiles(root, "*.pid"))
         {
             Support.Kill(int.Parse(File.ReadAllText(file).Trim(), CultureInfo.InvariantCulture));
@@ -458,47 +459,67 @@ public sealed class CoreCommandTests
     }
 
     /// <summary>
-    /// The whole cleanup after a stop, on the real clock, ends within
-    /// <see cref="CoreCommand.StopBudgetMs"/> (750 ms) plus scheduling slack,
-    /// even when the last record and the kills of 300 recorded descendants
-    /// would take 600 ms each (each fake <c>stat</c> read after the stop
-    /// takes at least 2 ms): the record and the kills are cut at their
-    /// budgets. The measured time is written to the test output.
+    /// The cleanup after a stop ends at its budgets on the test clock, even
+    /// when the last record and the kills of 300 recorded descendants would
+    /// take 600 ms each: the clock stands still except that each
+    /// <c>stat</c> read after the stop advances it by 2 ms. The last record
+    /// reads at 0, 2, ..., 248 ms after the stop (125 reads) and ends at
+    /// 250 ms, when the command is killed; the kills read at 250, ..., 498 ms
+    /// (125 reads) and end at 500 ms; the wait for the command to exit ends
+    /// at 750 ms. Without the budgets, all 300 entries would be read in each.
     /// </summary>
     [Test]
-    public void TheCleanupAfterAStopEndsWithinItsBudget()
+    public void TheCleanupAfterAStopEndsAtItsBudgets()
     {
         CoreCommand.WithoutGroups = true;
         string proc = Path.Combine(root, "proc");
         CoreCommand.ProcRoot = proc;
         CoreCommand.StartedHook = pid => FakeProc("proc", 300, pid);
+        long start = 1_000_000_000;
+        long clock = start;
+        long ms = Stopwatch.Frequency / 1000;
+        CoreCommand.ClockHook = () => Interlocked.Read(ref clock);
         int recorded = 0;
         using var cancel = new CancellationTokenSource();
-        long cancelled = 0;
         CoreCommand.RecordedHook = pids =>
         {
             if (recorded == 0)
             {
                 recorded = pids.Count;
-                cancelled = Stopwatch.GetTimestamp();
                 cancel.Cancel();
             }
         };
-        int after = 0;
+        var reads = new List<long>();
+        long killed = -1;
+        CoreCommand.SignalHook = (pid, signal) =>
+        {
+            if (signal == Unix.Sigkill)
+            {
+                killed = Interlocked.Read(ref clock) - start;
+                reads.Add(-1);
+            }
+        };
         CoreCommand.StatReadHook = (path, bytes, canStop) =>
         {
             if (!canStop)
             {
-                after++;
-                Thread.Sleep(2);
+                reads.Add(Interlocked.Read(ref clock) - start);
+                Interlocked.Add(ref clock, 2 * ms);
             }
         };
+        var waits = new List<long>();
+        CoreCommand.ExitWaitHook = end => waits.Add(end - start);
         Support.Throws<CarrierException>(() => Run(Waiting(Path.Combine(root, "never")), cancellationToken: cancel.Token));
-        double elapsed = Stopwatch.GetElapsedTime(cancelled).TotalMilliseconds;
-        TestContext.Out.WriteLine("cleanup after the stop: " + elapsed.ToString("F1", CultureInfo.InvariantCulture) + " ms; reads after the stop: " + after.ToString(CultureInfo.InvariantCulture));
         Assert.That(recorded, Is.EqualTo(300));
-        Assert.That(after, Is.LessThan(600), "the record and the kills were not cut at their budgets");
-        Assert.That(elapsed, Is.LessThan(CoreCommand.StopBudgetMs + 500));
+        int split = reads.IndexOf(-1);
+        Assert.That(split, Is.GreaterThanOrEqualTo(0), "the command was not killed");
+        List<long> record = reads.Take(split).ToList();
+        List<long> kills = reads.Skip(split + 1).ToList();
+        Assert.That(record, Is.EqualTo(Enumerable.Range(0, 125).Select(i => 2L * i * ms)), "the last record ends at 250 ms");
+        Assert.That(killed, Is.EqualTo(250 * ms), "the command is killed when the record ends");
+        Assert.That(kills, Is.EqualTo(Enumerable.Range(125, 125).Select(i => 2L * i * ms)), "the kills end at 500 ms");
+        Assert.That(reads.Count - 1, Is.LessThan(600), "the record and the kills were not cut at their budgets");
+        Assert.That(waits, Is.EqualTo(new[] { (long)CoreCommand.StopBudgetMs * ms }), "the exit wait ends at 750 ms");
     }
 
     /// <summary>

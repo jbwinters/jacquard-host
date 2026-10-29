@@ -141,6 +141,9 @@ internal static class CoreCommand
     /// <summary>Test seam: runs before the host sends the command itself a signal on a stop without groups, with its pid and the signal. Null outside tests.</summary>
     internal static volatile Action<int, int>? SignalHook;
 
+    /// <summary>Test seam: receives the end of each wait for a killed command to exit, on the budgets' clock. Null outside tests.</summary>
+    internal static volatile Action<long>? ExitWaitHook;
+
     /// <summary>Test seam: receives the pid of each command once it has started. Null outside tests.</summary>
     internal static volatile Action<int>? StartedHook;
 
@@ -858,6 +861,7 @@ internal static class CoreCommand
     /// </summary>
     private static void AwaitExit(Process process, long end)
     {
+        ExitWaitHook?.Invoke(end);
         while (!HasExited(process) && Now() < end)
         {
             Posix.Poll(Span<Posix.PollFd>.Empty, 1);
