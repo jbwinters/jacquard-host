@@ -155,7 +155,10 @@ public sealed class CancelStartTests
         {
             Assert.That(thrown, Is.Null, "Invoke threw: " + thrown);
             Assert.That(Eventually(() => Children() == 0), Is.True, "the worker was not disposed: it is still running");
-            Assert.That(Eventually(() => Descriptors() <= before), Is.True, "the worker was not disposed: descriptors grew from " + before + " to " + Descriptors());
+            // Disposal closes the pipes before Invoke returns, so the count
+            // is read at once rather than polled.
+            int after = Descriptors();
+            Assert.That(after, Is.LessThanOrEqualTo(before), "the worker was not disposed: descriptors grew from " + before + " to " + after);
         }));
         Assert.That(Volatile.Read(ref attempts), Is.EqualTo(2), "the host did not try a thread and then the pool, once");
         Assert.That(result.HandlerTokenNotCancelled, Is.True, "the failure was not recorded");

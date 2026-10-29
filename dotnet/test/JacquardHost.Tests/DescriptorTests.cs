@@ -23,7 +23,21 @@ namespace JacquardLang.Host.Tests;
 [Platform("Linux")]
 public sealed class DescriptorTests
 {
-    private static bool DescriptorsBackTo(int before) => Eventually(() => Descriptors() <= before);
+    /// <summary>
+    /// Asserts the count is back to <paramref name="before"/>, read once
+    /// with no polling, right after the call that should have released it. Every path these tests take releases the host's
+    /// descriptors synchronously before <c>Invoke</c> (or the probe) returns:
+    /// disposal closes the pipes on the calling thread, and a descendant
+    /// that still holds the worker's ends holds its own copies, not the
+    /// host's. A poll would give a collection time to finalize a lost
+    /// stream and hide the leak. Only thread counts are polled, since the
+    /// short-lived cancel thread ends after <c>Invoke</c> returns.
+    /// </summary>
+    private static void AssertReleased(int before, string what)
+    {
+        int after = Descriptors();
+        Assert.That(after, Is.LessThanOrEqualTo(before), what + ": descriptors grew from " + before + " to " + after);
+    }
 
     [TearDown]
     public void ClearSeams()
@@ -150,20 +164,20 @@ public sealed class DescriptorTests
         for (int i = 0; i < 5; i++)
         {
             InvocationResult result = InvokeReady(Faulty("ok", TimeSpan.FromSeconds(10)));
+            AssertReleased(before, "invocation " + (i + 1));
             Assert.That(result.Ok, Is.True, result.ToString());
         }
 
-        Assert.That(DescriptorsBackTo(before), Is.True, "descriptors grew from " + before + " to " + Descriptors());
         Assert.That(AdapterThreads(), Is.EqualTo(0), "adapter threads outlived their invocations");
 
         // A daemonized descendant keeps holding stderr after the invocation
         // returns; the host does not wait for it, and its pipes are closed.
         InvocationResult escaped = InvokeReady(Faulty("escaped-descendant", TimeSpan.FromSeconds(10)));
+        int released = Descriptors();
         int pid = Descendant("escaped-descendant", escaped.Stderr);
-        bool released = DescriptorsBackTo(before);
         int threads = AdapterThreads();
         Kill(pid);
-        Assert.That(released, Is.True, "escaped descendant: descriptors grew from " + before + " to " + Descriptors());
+        Assert.That(released, Is.LessThanOrEqualTo(before), "escaped descendant: descriptors grew from " + before + " to " + released);
         Assert.That(threads, Is.EqualTo(0), "escaped descendant: adapter threads remain");
 
         // Handlers run on their own threads, which end with the handler; the
@@ -182,27 +196,34 @@ public sealed class DescriptorTests
         {
             Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "an earlier invocation's threads remain");
             InvocationResult result = replaying.Invoke(Pinned.Identity("kit-echo"), Echo(), new Value[] { new TextValue("ping") }, registry);
+            AssertReleased(before, "handler invocation " + (i + 1));
             Assert.That(result.Ok, Is.True, result.ToString());
         }
 
         Assert.That(during, Is.EqualTo(1), "the handler thread was not seen while it ran");
         Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "handler threads remain");
-        Assert.That(DescriptorsBackTo(before), Is.True, "handlers: descriptors grew from " + before + " to " + Descriptors());
 
         // Failure paths release the same resources: expiry, cancellation, a
         // truncated frame, and a spawn failure.
         for (int i = 0; i < 3; i++)
         {
-            Assert.That(Reason(InvokeReady(Faulty("silent", TimeSpan.FromMilliseconds(500)))), Is.EqualTo("deadline"));
+            InvocationResult expired = InvokeReady(Faulty("silent", TimeSpan.FromMilliseconds(500)));
+            AssertReleased(before, "expiry");
+            Assert.That(Reason(expired), Is.EqualTo("deadline"));
             using var cancelled = new CancellationTokenSource();
             After(TimeSpan.FromMilliseconds(200), cancelled.Cancel);
-            Assert.That(Reason(InvokeReady(Faulty("silent", TimeSpan.FromSeconds(10)), cancelled.Token)), Is.EqualTo("aborted"));
-            Assert.That(InvokeReady(Faulty("truncated", TimeSpan.FromSeconds(10))).Ok, Is.False);
-            Assert.That(Reason(InvokeReady(new Host("unused", new HostOptions { Carrier = new WorkerOptions { Command = new[] { "/no/such/executable" } } }))), Is.EqualTo("worker_spawn_failed"));
+            InvocationResult aborted = InvokeReady(Faulty("silent", TimeSpan.FromSeconds(10)), cancelled.Token);
+            AssertReleased(before, "cancellation");
+            Assert.That(Reason(aborted), Is.EqualTo("aborted"));
+            InvocationResult truncated = InvokeReady(Faulty("truncated", TimeSpan.FromSeconds(10)));
+            AssertReleased(before, "truncated frame");
+            Assert.That(truncated.Ok, Is.False);
+            InvocationResult unspawned = InvokeReady(new Host("unused", new HostOptions { Carrier = new WorkerOptions { Command = new[] { "/no/such/executable" } } }));
+            AssertReleased(before, "spawn failure");
+            Assert.That(Reason(unspawned), Is.EqualTo("worker_spawn_failed"));
         }
 
         Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "failure paths: adapter threads remain");
-        Assert.That(DescriptorsBackTo(before), Is.True, "failure paths: descriptors grew from " + before + " to " + Descriptors());
     }
 
     [Test]
@@ -216,13 +237,14 @@ public sealed class DescriptorTests
         int before = Descriptors();
         InvocationResult result = Within(TimeSpan.FromSeconds(15), () => Faulty("stdin-descendant", TimeSpan.FromSeconds(2))
             .Invoke(Pinned.Identity("kit-ready"), Echo(withWorld: false), new Value[] { new TextValue(new string('x', 220_000)) }, new OperationRegistry()));
+        int after = Descriptors();
         int pid = Descendant("stdin-descendant", result.Stderr);
         try
         {
             Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
             Assert.That(Alive(pid), Is.True);
             Assert.That(AdapterThreads(), Is.EqualTo(0));
-            Assert.That(DescriptorsBackTo(before), Is.True, "descriptors grew from " + before + " to " + Descriptors());
+            Assert.That(after, Is.LessThanOrEqualTo(before), "descriptors grew from " + before + " to " + after);
         }
         finally
         {
@@ -278,6 +300,7 @@ public sealed class DescriptorTests
         var watch = Stopwatch.StartNew();
         InvocationResult result = Within(TimeSpan.FromSeconds(30), () => new Host("unused", new HostOptions { Carrier = options }).ShutdownProbe(cancel.Token));
         TimeSpan elapsed = watch.Elapsed;
+        int after = Descriptors();
         long heapAfter = GC.GetTotalMemory(forceFullCollection: false);
         Assert.That(Eventually(() => File.Exists(pidFile) && File.ReadAllText(pidFile).Trim().Length > 0), Is.True, "the descendant never started");
         int pid = int.Parse(File.ReadAllText(pidFile).Trim(), CultureInfo.InvariantCulture);
@@ -301,6 +324,6 @@ public sealed class DescriptorTests
         }
 
         Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "adapter threads remain");
-        Assert.That(DescriptorsBackTo(before), Is.True, "descriptors grew from " + before + " to " + Descriptors());
+        Assert.That(after, Is.LessThanOrEqualTo(before), "descriptors grew from " + before + " to " + after);
     }
 }
