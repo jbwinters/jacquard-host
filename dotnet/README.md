@@ -134,14 +134,21 @@ cancelled, the host kills the worker's process tree and sends no late
 response. Cancellation is cooperative: `HandlerContext.IsCancelled` turns true
 as soon as the call is cancelled or its lifetime passes (it reads the
 deadline exactly), and stays true once the invocation ends.
-`HandlerContext.CancellationToken` is cancelled when the caller's token is,
-shortly after the deadline (a timer, so up to a few milliseconds late), and
-when the invocation ends. Callbacks registered on that token run on a
-thread-pool thread, never on the caller's thread, the thread that cancelled
-the caller's token, or the timer; the host does not wait for them, and
-anything they throw is discarded. A callback that blocks holds only that
-pool thread. A handler that ignores both keeps running on its thread until it
-returns. Nothing is retried.
+`HandlerContext.CancellationToken` is cancelled when the call stops or ends,
+and never earlier: however long the lifetime, the deadline alone does not
+cancel it before it passes. While a handler runs, the caller's thread checks
+the deadline and the caller's token at least every 5 ms; when it sees
+either, it starts the token's cancellation before it kills the worker.
+Otherwise the token is cancelled shortly after the invocation ends. The host
+cancels it on a short-lived thread of its own, one per invocation, so a busy
+thread pool does not delay it. Callbacks registered on the token run on that
+thread, never on the caller's thread or the thread that cancelled the
+caller's token; the host does not wait for them, and anything they throw is
+discarded. A callback that blocks holds only that thread. A callback
+registered after the token is already cancelled runs at once on the
+registering (handler) thread, as with any `CancellationToken`, and its
+exception is thrown there. A handler that ignores both keeps running on its
+thread until it returns. Nothing is retried.
 
 `Invoke` advertises and dispatches one snapshot of the registry, taken when
 it is called: an operation bound during the invocation is not served by it.

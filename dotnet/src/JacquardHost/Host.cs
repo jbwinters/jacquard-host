@@ -481,9 +481,10 @@ public sealed class Host
         /// <summary>
         /// The handlers' token, created on the caller's thread for the first
         /// handler. Only <see cref="StopHandlers"/> cancels it, once the
-        /// caller's thread has seen the call stop or end: there is no timer, no registration on the
-        /// caller's token, and no pool work item. The source is never
-        /// disposed, because an abandoned handler may still hold its token.
+        /// caller's thread has seen the call stop or end: there is no timer,
+        /// no registration on the caller's token, and no pool work item
+        /// unless no thread can be created. The source is never disposed,
+        /// because an abandoned handler may still hold its token.
         /// </summary>
         private CancellationToken HandlerToken()
         {

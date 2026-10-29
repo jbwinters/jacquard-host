@@ -36,11 +36,21 @@ public sealed class HandlerContext
     public bool IsCancelled => stopping() || ended() || CancellationToken.IsCancellationRequested;
 
     /// <summary>
-    /// A token cancelled when the caller cancels, shortly after the lifetime
-    /// deadline passes (timer granularity; <see cref="IsCancelled"/> is
-    /// exact), or when the invocation ends. Callbacks registered on it run on
-    /// a thread-pool thread, never on the caller's thread; the host does not
-    /// wait for them, and any exception they throw is discarded.
+    /// A token cancelled when the invocation stops or ends, and never
+    /// earlier: the lifetime alone does not cancel it before its deadline,
+    /// however long it is. While the handler runs, the caller's thread
+    /// checks the deadline and the caller's token at least every 5 ms; when
+    /// it sees either, it starts the cancellation before it kills the worker.
+    /// Otherwise the token is cancelled shortly after the invocation ends.
+    /// <see cref="IsCancelled"/> is exact; the token follows it.
+    /// The host cancels the token on a dedicated thread of its own, not a
+    /// thread-pool thread, so callbacks registered on it run there, never on
+    /// the caller's thread or the thread that cancelled the caller's token;
+    /// the host does not wait for them, and any exception they throw is
+    /// discarded. A callback registered after the token is cancelled runs at
+    /// once on the registering (handler) thread, as for any
+    /// <see cref="System.Threading.CancellationToken"/>, and its exception is
+    /// thrown there.
     /// </summary>
     public CancellationToken CancellationToken { get; }
 }
