@@ -6,3 +6,7 @@
 dotnet_diagnostic.CA1036.severity = none
 # JsonObject is named for JSON's object, not as a collection.
 dotnet_diagnostic.CA1710.severity = none
+# The SDK's types are named for Jacquard's concepts, as in the other SDKs:
+# Function, Option, and Int are Jacquard names, not .NET keywords or types.
+dotnet_diagnostic.CA1716.severity = none
+dotnet_diagnostic.CA1720.severity = none
