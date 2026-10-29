@@ -93,6 +93,13 @@ public sealed class Host
     internal static volatile Action? HandlerCheckHook;
 
     /// <summary>
+    /// Test seam: runs on the handler thread just after it publishes its
+    /// answer, so a test can wait until the caller's wait will see it. Null
+    /// outside tests.
+    /// </summary>
+    internal static volatile Action? HandlerAnsweredHook;
+
+    /// <summary>
     /// Test seam: runs before the host starts the cancellation of the
     /// handlers' token, with <c>"thread"</c> before it creates its dedicated
     /// thread and with <c>"pool"</c> before it falls back to a thread-pool
@@ -476,6 +483,7 @@ public sealed class Host
             {
                 HandlerCheckHook?.Invoke();
                 completion.Answer = Worker.Stopping ? NotStarted : CallHandler(handler, context, arguments);
+                HandlerAnsweredHook?.Invoke();
             })
             {
                 IsBackground = true,

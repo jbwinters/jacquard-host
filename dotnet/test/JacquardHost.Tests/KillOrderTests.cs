@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using JacquardLang.Host.Carrier;
 using JacquardLang.Host.Protocol;
@@ -15,7 +16,9 @@ namespace JacquardLang.Host.Tests;
 /// slice (its own predicate, then the fault check), and the call checks again
 /// after the handler returns; these tests use the clock seam to land the
 /// stop exactly between two such reads, so the outcome does not depend on
-/// timing.
+/// timing. Each case also asserts which check killed the worker, from the
+/// killing thread's stack: the handler wait's fault check, or the call's
+/// check after the handler returned.
 /// </summary>
 [TestFixture]
 public sealed class KillOrderTests
@@ -29,7 +32,12 @@ public sealed class KillOrderTests
         Worker.ClockHook = null;
         Worker.ExpireHook = null;
         Host.HandlerThreadStartedHook = null;
+        Host.HandlerAnsweredHook = null;
     }
+
+    /// <summary>The names of the methods on the current thread's stack.</summary>
+    private static string[] StackMethods() =>
+        new StackTrace(false).GetFrames().Select(frame => frame.GetMethod()?.Name ?? string.Empty).ToArray();
 
     /// <summary>What the stop is, and when it lands.</summary>
     public enum Stop
@@ -95,27 +103,33 @@ public sealed class KillOrderTests
         using var cancel = new CancellationTokenSource();
         using var registered = new ManualResetEventSlim();
         using var callback = new ManualResetEventSlim();
+        using var answered = new ManualResetEventSlim();
         bool returnsAtOnce = stop == Stop.DeadlineAfterTheHandler;
         var clock = new SplitClock(stop == Stop.CallerCancelInTheWait ? cancel.Cancel : null, stop != Stop.CallerCancelInTheWait);
         int kills = 0;
         bool callbackBeforeKill = false;
+        string[] killer = Array.Empty<string>();
         Worker.ExpireHook = () =>
         {
             if (Interlocked.Increment(ref kills) == 1)
             {
+                Volatile.Write(ref killer, StackMethods());
                 Volatile.Write(ref callbackBeforeKill, callback.Wait(CallbackWait));
             }
         };
 
         // The caller's thread arms the clock only once the handler has
-        // registered its callback (and, for the post-handler case, returned),
-        // so the caller's next clock read is the stopping check.
+        // registered its callback (and, for the post-handler case, returned
+        // and published its answer, so the wait's predicate sees the answer
+        // without reading the clock), so the caller's next clock read is the
+        // stopping check.
+        Host.HandlerAnsweredHook = answered.Set;
         Host.HandlerThreadStartedHook = () =>
         {
             Assert.That(registered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the handler did not start");
             if (returnsAtOnce)
             {
-                Thread.Sleep(100);
+                Assert.That(answered.Wait(TimeSpan.FromSeconds(10)), Is.True, "the handler did not publish its answer");
             }
 
             clock.Arm();
@@ -141,5 +155,17 @@ public sealed class KillOrderTests
         Assert.That(result.HostFrames, Has.Count.EqualTo(2), "a response was sent after the stop");
         Assert.That(Volatile.Read(ref kills), Is.GreaterThanOrEqualTo(1), "the worker was not killed");
         Assert.That(Volatile.Read(ref callbackBeforeKill), Is.True, "the worker was killed before the token's cancellation started");
+        string[] stack = Volatile.Read(ref killer);
+        string path = string.Join(" < ", stack);
+        if (returnsAtOnce)
+        {
+            // The check in Respond after RunHandler returned killed it.
+            Assert.That(stack, Does.Contain("Respond").And.Not.Contain("RunHandler").And.Not.Contain("Await").And.Not.Contain("WriteBytes"), path);
+        }
+        else
+        {
+            // The fault check in the handler wait killed it.
+            Assert.That(stack, Does.Contain("Await").And.Contain("RunHandler"), path);
+        }
     }
 }
