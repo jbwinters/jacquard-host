@@ -47,11 +47,19 @@ namespace JacquardLang.Host.Sdk;
 /// Elsewhere (Linux without <c>setsid</c>), the command's descendants are
 /// recorded from <c>/proc</c> about every 10 ms, each by pid and start time,
 /// and every recorded descendant still alive with that start time is killed
-/// when the command returns; on timeout or cancellation .NET's
-/// <see cref="Process.Kill(bool)"/> kills the command's tree too. A
-/// descendant started and reparented between two records keeps running. On
-/// macOS, which has no <c>/proc</c>, nothing is recorded: only the tree kill
-/// on a stop applies.
+/// when the command returns. Each record reads at most
+/// <see cref="ProcEntries"/> process entries and <see cref="ProcBytes"/>
+/// bytes (at most <see cref="StatBytes"/> of each <c>stat</c> file), keeps
+/// at most <see cref="ProcEntries"/> descendants in all, and observes the
+/// deadline and the token before each entry, ending at once on a stop; the
+/// kills at the exit observe them before each descendant too, so a stop
+/// leaves the descendants not yet killed running. On timeout or
+/// cancellation a last record is made (bounded by the same caps, but not
+/// ended by the stop), then the command is killed, then every recorded
+/// descendant; a descendant past the caps, or one started and reparented
+/// between two records, keeps running. On macOS,
+/// which has no <c>/proc</c>, nothing is recorded: only .NET's
+/// <see cref="Process.Kill(bool)"/> tree kill on a stop applies.
 /// </para>
 /// </remarks>
 internal static class CoreCommand
@@ -71,6 +79,15 @@ internal static class CoreCommand
     /// <summary>How often descendants are recorded where there are no process groups.</summary>
     private const long SampleIntervalMs = 10;
 
+    /// <summary>The most <c>/proc</c> entries one record reads, and the most descendants recorded in all.</summary>
+    internal const int ProcEntries = 16_384;
+
+    /// <summary>The most bytes of <c>stat</c> files one record reads.</summary>
+    internal const int ProcBytes = 4 << 20;
+
+    /// <summary>The most bytes read of one <c>stat</c> file; the fields read come well before.</summary>
+    internal const int StatBytes = 1024;
+
     private const short Ready = Posix.PollIn | Posix.PollHup | Posix.PollErr | Posix.PollNval;
 
     /// <summary>Test seam: when set, commands run without a process group, as where <c>setsid</c> is absent.</summary>
@@ -81,6 +98,22 @@ internal static class CoreCommand
 
     /// <summary>Test seam: runs after each record with every pid recorded so far. Null outside tests.</summary>
     internal static volatile Action<IReadOnlyCollection<int>>? RecordedHook;
+
+    /// <summary>Test seam: the directory read as <c>/proc</c>.</summary>
+    internal static volatile string ProcRoot = "/proc";
+
+    /// <summary>Test seam: the entry cap of one record.</summary>
+    internal static volatile int ProcEntryCap = ProcEntries;
+
+    /// <summary>Test seam: the byte cap of one record.</summary>
+    internal static volatile int ProcByteCap = ProcBytes;
+
+    /// <summary>
+    /// Test seam: runs after each <c>stat</c> file a record or the kills of
+    /// recorded descendants read, with its path, how many bytes were read,
+    /// and whether a stop ends that work. Null outside tests.
+    /// </summary>
+    internal static volatile Action<string, int, bool>? StatReadHook;
 
     /// <summary>Test seam: receives the pid of each command once it has started. Null outside tests.</summary>
     internal static volatile Action<int>? StartedHook;
@@ -260,20 +293,41 @@ internal static class CoreCommand
         private readonly Dictionary<int, string> started = new();
         private long next = Stopwatch.GetTimestamp();
 
-        /// <summary>Records the command's current descendants, at most once per <see cref="SampleIntervalMs"/>.</summary>
-        internal void Sample(int root)
+        /// <summary>
+        /// Records the command's current descendants, at most once per
+        /// <see cref="SampleIntervalMs"/>, reading at most the entry and byte
+        /// caps; a stop ends the record at the next entry, recording nothing
+        /// from it. The <paramref name="final"/> record, made on a stop just
+        /// before the command is killed, runs whenever it is asked and to
+        /// its caps.
+        /// </summary>
+        internal void Sample(int root, long expires, CancellationToken cancellationToken, bool final = false)
         {
             long now = Stopwatch.GetTimestamp();
-            if (!RecordDescendants || now < next || !OperatingSystem.IsLinux())
+            if (!RecordDescendants || (now < next && !final) || !OperatingSystem.IsLinux())
             {
                 return;
             }
 
             next = now + (Stopwatch.Frequency * SampleIntervalMs / 1000);
             var children = new Dictionary<int, List<(int Pid, string Start)>>();
-            foreach (string entry in ProcEntries())
+            int cap = ProcEntryCap;
+            int byteCap = ProcByteCap;
+            int entries = 0;
+            long bytes = 0;
+            foreach (string entry in ProcDirectories())
             {
-                if (ReadStat(entry) is { } stat)
+                if (!final && Stopped(expires, cancellationToken) is not null)
+                {
+                    return;
+                }
+
+                if (++entries > cap || bytes >= byteCap)
+                {
+                    break;
+                }
+
+                if (ReadStat(entry, ref bytes, stoppable: !final) is { } stat)
                 {
                     if (!children.TryGetValue(stat.Parent, out List<(int, string)>? list))
                     {
@@ -299,7 +353,11 @@ internal static class CoreCommand
                 {
                     if (seen.Add(pid))
                     {
-                        started.TryAdd(pid, start);
+                        if (started.Count < ProcEntries)
+                        {
+                            started.TryAdd(pid, start);
+                        }
+
                         queue.Enqueue(pid);
                     }
                 }
@@ -311,13 +369,22 @@ internal static class CoreCommand
         /// <summary>
         /// Kills every recorded descendant still alive with the start time it
         /// was recorded with, so a reused pid is not killed (the start time is
-        /// read just before the kill, as the JDK's process handles do).
+        /// read just before the kill, as the JDK's process handles do). When
+        /// <paramref name="stoppable"/>, a stop ends it before the next
+        /// descendant; on a stop's own cleanup it runs to the end, bounded by
+        /// the number recorded.
         /// </summary>
-        internal void KillAlive()
+        internal void KillAlive(bool stoppable, long expires, CancellationToken cancellationToken)
         {
+            long bytes = 0;
             foreach ((int pid, string start) in started)
             {
-                if (ReadStat("/proc/" + pid.ToString(CultureInfo.InvariantCulture)) is { } stat && stat.Start == start && !stat.Zombie)
+                if (stoppable && Stopped(expires, cancellationToken) is not null)
+                {
+                    return;
+                }
+
+                if (ReadStat(Path.Combine(ProcRoot, pid.ToString(CultureInfo.InvariantCulture)), ref bytes, stoppable) is { } stat && stat.Start == start && !stat.Zombie)
                 {
                     Unix.Kill(pid);
                 }
@@ -325,12 +392,12 @@ internal static class CoreCommand
         }
     }
 
-    private static IEnumerable<string> ProcEntries()
+    private static IEnumerable<string> ProcDirectories()
     {
         IEnumerable<string> entries;
         try
         {
-            entries = Directory.EnumerateDirectories("/proc");
+            entries = Directory.EnumerateDirectories(ProcRoot);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
@@ -375,14 +442,30 @@ internal static class CoreCommand
 
     /// <summary>
     /// A process's pid, parent, start time, and whether it is a zombie, from
-    /// <c>/proc/&lt;pid&gt;/stat</c>, read after the last <c>)</c> (the
-    /// command name may hold any byte); null when it cannot be read.
+    /// at most <see cref="StatBytes"/> of <c>/proc/&lt;pid&gt;/stat</c>,
+    /// read after the last <c>)</c> (the command name may hold any byte);
+    /// null when it cannot be read. Adds the bytes read to
+    /// <paramref name="bytes"/>.
     /// </summary>
-    private static (int Pid, int Parent, int Group, string Start, bool Zombie)? ReadStat(string directory)
+    private static (int Pid, int Parent, int Group, string Start, bool Zombie)? ReadStat(string directory, ref long bytes, bool stoppable = false)
     {
         try
         {
-            string stat = File.ReadAllText(Path.Combine(directory, "stat"));
+            string path = Path.Combine(directory, "stat");
+            byte[] buffer = new byte[StatBytes];
+            int read = 0;
+            using (var stream = new FileStream(path, new FileStreamOptions { Mode = FileMode.Open, Access = FileAccess.Read, Share = FileShare.ReadWrite, BufferSize = 0 }))
+            {
+                int n;
+                while (read < buffer.Length && (n = stream.Read(buffer, read, buffer.Length - read)) > 0)
+                {
+                    read += n;
+                }
+            }
+
+            bytes += read;
+            StatReadHook?.Invoke(path, read, stoppable);
+            string stat = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
             int close = stat.LastIndexOf(')');
             if (close < 0 || !int.TryParse(Path.GetFileName(directory), NumberStyles.None, CultureInfo.InvariantCulture, out int pid))
             {
@@ -392,8 +475,9 @@ internal static class CoreCommand
             // state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt
             // cmajflt utime stime cutime cstime priority nice num_threads
             // itrealvalue starttime ...
+            // A field cut by the byte cap is not read: the start time must be followed by another field.
             string[] fields = stat[(close + 1)..].Trim().Split(' ');
-            if (fields.Length < 20
+            if (fields.Length < 21
                 || !int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out int parent)
                 || !int.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out int group))
             {
@@ -416,7 +500,8 @@ internal static class CoreCommand
     /// </summary>
     internal static void KillGroup(int group, Process leader)
     {
-        if (HasExited(leader) && ReadStat("/proc/" + group.ToString(CultureInfo.InvariantCulture)) is { Zombie: false })
+        long bytes = 0;
+        if (HasExited(leader) && ReadStat("/proc/" + group.ToString(CultureInfo.InvariantCulture), ref bytes) is { Zombie: false })
         {
             return;
         }
@@ -576,13 +661,17 @@ internal static class CoreCommand
                 }
                 else
                 {
+                    // Not .NET's tree kill, which reads every process on the
+                    // machine: a last bounded record, the command, then
+                    // every recorded descendant.
                     if (!HasExited(process))
                     {
-                        KillQuietly(process, entireTree: true);
+                        recorded!.Sample(pid, expires, cancellationToken, final: true);
+                        KillQuietly(process, entireTree: !OperatingSystem.IsLinux());
                         AwaitExit(process);
                     }
 
-                    recorded!.KillAlive();
+                    recorded!.KillAlive(stoppable: false, expires, cancellationToken);
                 }
             }
 
@@ -618,7 +707,7 @@ internal static class CoreCommand
             bool exited = HasExited(process);
             if (!exited)
             {
-                recorded?.Sample(pid);
+                recorded?.Sample(pid, expires, cancellationToken);
             }
 
             int read = stdout.Step(Slice) + stderr.Step(Slice);
@@ -635,7 +724,8 @@ internal static class CoreCommand
                 }
                 else
                 {
-                    recorded!.KillAlive();
+                    // A stop ends these kills; the stop is reported below.
+                    recorded!.KillAlive(stoppable: true, expires, cancellationToken);
                 }
 
                 cleaned = true;

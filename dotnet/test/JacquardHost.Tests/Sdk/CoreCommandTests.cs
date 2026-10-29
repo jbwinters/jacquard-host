@@ -38,6 +38,10 @@ public sealed class CoreCommandTests
         CoreCommand.ExitedHook = null;
         CoreCommand.KillGroupAtExit = true;
         CoreCommand.KillGroupOnStop = true;
+        CoreCommand.ProcRoot = "/proc";
+        CoreCommand.ProcEntryCap = CoreCommand.ProcEntries;
+        CoreCommand.ProcByteCap = CoreCommand.ProcBytes;
+        CoreCommand.StatReadHook = null;
         foreach (string file in Directory.EnumerateFiles(root, "*.pid"))
         {
             Support.Kill(int.Parse(File.ReadAllText(file).Trim(), CultureInfo.InvariantCulture));
@@ -285,6 +289,141 @@ public sealed class CoreCommandTests
         CoreCommand.ExitedHook = cancel.Cancel;
         CarrierException error = Support.Throws<CarrierException>(() => Run("echo hi", cancellationToken: cancel.Token))!;
         Assert.That(error.IsAborted, Is.True);
+    }
+
+    /// <summary>
+    /// A fake <c>/proc</c> of <paramref name="count"/> processes whose parent
+    /// is <paramref name="parent"/>, each <c>stat</c> file padded to 64 KiB.
+    /// Their pids start at 5,000,001, above Linux's largest pid (2^22), so a
+    /// kill sent to one reaches no process.
+    /// </summary>
+    private string FakeProc(string name, int count, int parent)
+    {
+        string proc = Directory.CreateDirectory(Path.Combine(root, name)).FullName;
+        string padding = string.Concat(Enumerable.Repeat(" 0", 32 * 1024));
+        for (int i = 0; i < count; i++)
+        {
+            string pid = (5_000_001 + i).ToString(CultureInfo.InvariantCulture);
+            string directory = Directory.CreateDirectory(Path.Combine(proc, pid)).FullName;
+            File.WriteAllText(
+                Path.Combine(directory, "stat"),
+                pid + " (fake) S " + parent.ToString(CultureInfo.InvariantCulture) + " " + pid + " " + pid + " 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 "
+                + (1000 + i).ToString(CultureInfo.InvariantCulture) + padding + "\n");
+        }
+
+        return proc;
+    }
+
+    /// <summary>A command that runs until <paramref name="release"/> exists, for at most 30 seconds.</summary>
+    private static string Waiting(string release) =>
+        "i=0; while [ ! -e '" + release + "' ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i+1)); done";
+
+    /// <summary>
+    /// Without groups, one record reads at most its entry cap of
+    /// <c>/proc</c> entries and its byte cap of <c>stat</c> bytes, and at
+    /// most 1,024 bytes of each <c>stat</c> file, however many processes and
+    /// bytes there are (a fake <c>/proc</c> through a test seam, with lowered
+    /// caps).
+    /// </summary>
+    [Test]
+    public void AProcRecordReadsAtMostItsCaps()
+    {
+        CoreCommand.WithoutGroups = true;
+        CoreCommand.ProcRoot = FakeProc("proc", 50, 1);
+        foreach ((int entryCap, int byteCap, int expected) in new[] { (20, CoreCommand.ProcBytes, 20), (1000, 5 * 1024, 5) })
+        {
+            CoreCommand.ProcEntryCap = entryCap;
+            CoreCommand.ProcByteCap = byteCap;
+            var reads = new List<int>();
+            int records = 0;
+            using var cancel = new CancellationTokenSource();
+            CoreCommand.StatReadHook = (path, bytes, stoppable) =>
+            {
+                if (stoppable && records == 0)
+                {
+                    reads.Add(bytes);
+                }
+            };
+            CoreCommand.RecordedHook = pids =>
+            {
+                if (++records == 1)
+                {
+                    cancel.Cancel();
+                }
+            };
+            CarrierException error = Support.Throws<CarrierException>(() => Run(Waiting(Path.Combine(root, "never")), cancellationToken: cancel.Token))!;
+            Assert.That(error.IsAborted, Is.True);
+            Assert.That(reads, Has.Count.EqualTo(expected), "caps " + entryCap + "/" + byteCap);
+            Assert.That(reads, Is.All.EqualTo(CoreCommand.StatBytes));
+        }
+    }
+
+    /// <summary>
+    /// A cancellation that lands during a record ends it at the next entry:
+    /// of 50 fake entries, the record stops after the third read, and the
+    /// command is stopped (the last record on the stop is bounded by the cap
+    /// instead).
+    /// </summary>
+    [Test]
+    public void ACancelDuringAProcRecordEndsIt()
+    {
+        CoreCommand.WithoutGroups = true;
+        CoreCommand.ProcRoot = FakeProc("proc", 50, 1);
+        CoreCommand.ProcEntryCap = 40;
+        int stoppable = 0;
+        int final = 0;
+        using var cancel = new CancellationTokenSource();
+        CoreCommand.StatReadHook = (path, bytes, canStop) =>
+        {
+            if (!canStop)
+            {
+                final++;
+            }
+            else if (++stoppable == 3)
+            {
+                cancel.Cancel();
+            }
+        };
+        CarrierException error = Support.Throws<CarrierException>(() => Run(Waiting(Path.Combine(root, "never")), cancellationToken: cancel.Token))!;
+        Assert.That(error.IsAborted, Is.True);
+        Assert.That(stoppable, Is.EqualTo(3));
+        Assert.That(final, Is.EqualTo(40));
+    }
+
+    /// <summary>
+    /// The kills of recorded descendants when the command exits observe a
+    /// stop before each descendant: ten fake descendants are recorded, the
+    /// command exits, and a cancellation during the second kill check ends
+    /// the kills there and is reported.
+    /// </summary>
+    [Test]
+    public void AStopDuringTheExitKillsEndsThem()
+    {
+        CoreCommand.WithoutGroups = true;
+        string release = Path.Combine(root, "release");
+        string proc = Path.Combine(root, "proc");
+        CoreCommand.ProcRoot = proc;
+        CoreCommand.StartedHook = pid => FakeProc("proc", 10, pid);
+        int recorded = 0;
+        CoreCommand.RecordedHook = pids =>
+        {
+            recorded = pids.Count;
+            CoreCommand.RecordDescendants = false;
+            File.WriteAllText(release, string.Empty);
+        };
+        int checks = 0;
+        using var cancel = new CancellationTokenSource();
+        CoreCommand.StatReadHook = (path, bytes, stoppable) =>
+        {
+            if (stoppable && !CoreCommand.RecordDescendants && ++checks == 2)
+            {
+                cancel.Cancel();
+            }
+        };
+        CarrierException error = Support.Throws<CarrierException>(() => Run(Waiting(release), cancellationToken: cancel.Token))!;
+        Assert.That(error.IsAborted, Is.True);
+        Assert.That(recorded, Is.EqualTo(10));
+        Assert.That(checks, Is.EqualTo(2));
     }
 
     [Test]
