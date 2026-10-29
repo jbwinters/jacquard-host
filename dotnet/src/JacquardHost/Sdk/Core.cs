@@ -591,9 +591,9 @@ internal static class Core
     /// included, would use it.
     /// </summary>
     /// <exception cref="JacquardException">A preparation failure naming every unsafe directory, or cancelled.</exception>
-    internal static void CheckAncestors(string root, CancellationToken cancellationToken)
+    internal static void CheckAncestors(string root, PasswordListing listing, CancellationToken cancellationToken)
     {
-        if (Path.GetDirectoryName(root) is { } parent && UnsafeDirectories(parent, "cache directory " + root, cancellationToken) is { } problem)
+        if (Path.GetDirectoryName(root) is { } parent && UnsafeDirectories(parent, "cache directory " + root, listing, cancellationToken) is { } problem)
         {
             throw JacquardException.Preparation(problem);
         }
@@ -605,11 +605,39 @@ internal static class Core
     /// made, so a refused preparation makes nothing.
     /// </summary>
     /// <exception cref="JacquardException">A preparation failure naming every unsafe directory, or cancelled.</exception>
-    internal static void CheckDirectories(string directory, string root, CancellationToken cancellationToken)
+    internal static void CheckDirectories(string directory, string root, PasswordListing listing, CancellationToken cancellationToken)
     {
-        if (UnsafeDirectories(directory, "cache directory " + root, cancellationToken) is { } problem)
+        if (UnsafeDirectories(directory, "cache directory " + root, listing, cancellationToken) is { } problem)
         {
             throw JacquardException.Preparation(problem);
+        }
+    }
+
+    /// <summary>
+    /// The password database verdict of the private-group rule
+    /// (<see cref="OnlyUserHasPrimaryGroup"/>) within one preparation or one
+    /// save: the listing runs at most once for one account, user id, and
+    /// group, and the verdict is not kept after that call. Not thread-safe;
+    /// one call uses it.
+    /// </summary>
+    internal sealed class PasswordListing
+    {
+        private string? name;
+        private uint uid;
+        private uint gid;
+        private bool verdict;
+
+        /// <summary>The verdict for the account, listing the password database the first time.</summary>
+        /// <exception cref="JacquardException">The token was cancelled while <c>getent</c> ran.</exception>
+        internal bool OnlyUserHasPrimaryGroup(string name, uint uid, uint gid, CancellationToken cancellationToken)
+        {
+            if (this.name is null || !string.Equals(this.name, name, StringComparison.Ordinal) || this.uid != uid || this.gid != gid)
+            {
+                bool listed = Core.OnlyUserHasPrimaryGroup(name, uid, gid, cancellationToken);
+                (this.name, this.uid, this.gid, verdict) = (name, uid, gid, listed);
+            }
+
+            return verdict;
         }
     }
 
@@ -680,14 +708,16 @@ internal static class Core
     /// access ACL (whose mask, on Linux, is what the group bits show). Every
     /// unsafe directory is named, nearest first, up to
     /// <see cref="UnsafeListed"/>. The enumeration runs at most once per
-    /// call, and its verdict is not kept after the call.
+    /// <paramref name="listing"/>, which one preparation or save shares
+    /// between its checks, and its verdict is not kept after it.
     /// </summary>
     /// <param name="first">The nearest directory to check.</param>
     /// <param name="subject">What the directories hold, which starts the message.</param>
+    /// <param name="listing">The password database verdict of this preparation or save.</param>
     /// <param name="cancellationToken">Stops the password database enumeration.</param>
     /// <returns>The refusal naming every unsafe directory, or null when all are safe or there are no POSIX permissions.</returns>
     /// <exception cref="JacquardException">A directory's status cannot be read, or the token was cancelled during the enumeration.</exception>
-    internal static string? UnsafeDirectories(string first, string subject, CancellationToken cancellationToken)
+    internal static string? UnsafeDirectories(string first, string subject, PasswordListing listing, CancellationToken cancellationToken)
     {
         if (!Unix.Supported)
         {
@@ -698,7 +728,6 @@ internal static class Core
         bool looked = false;
         Unix.Account? account = null;
         Unix.GroupEntry? group = null;
-        bool? sole = null;
         var unsafeOnes = new List<string>();
         int count = 0;
         for (string? directory = first; directory is not null; directory = Path.GetDirectoryName(directory))
@@ -732,7 +761,7 @@ internal static class Core
                         }
                     }
 
-                    if (!PrivateGroup(status, account, group) || !(sole ??= OnlyUserHasPrimaryGroup(account!.Value.Name, user, status.Group, cancellationToken)))
+                    if (!PrivateGroup(status, account, group) || !listing.OnlyUserHasPrimaryGroup(account!.Value.Name, user, status.Group, cancellationToken))
                     {
                         reason = "writable by its group, which is not your private group";
                     }

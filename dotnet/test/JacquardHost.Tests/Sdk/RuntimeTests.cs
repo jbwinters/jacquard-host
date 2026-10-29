@@ -970,6 +970,35 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// One preparation lists the password database at most once, though it
+    /// checks a group-writable private-group parent twice when the cache
+    /// root is missing (before making it and again once it is resolved); a
+    /// later preparation, here on the entry made, lists it again, since the
+    /// verdict is not kept after the call.
+    /// </summary>
+    [Test]
+    public void APreparationListsThePasswordDatabaseAtMostOnce()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent")).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1F8);
+        string cache = Path.Combine(parent, "cache");
+        SdkSupport.Accounts(parent, "me", Array.Empty<string>());
+        Func<CancellationToken, CoreCommand.Output> listing = Core.GetentHook!;
+        int listed = 0;
+        Core.GetentHook = token =>
+        {
+            listed++;
+            return listing(token);
+        };
+        var options = new PrepareOptions { CacheDir = cache };
+        Assert.That(fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options).Directory, Does.StartWith(cache + "/"));
+        Assert.That(listed, Is.EqualTo(1), "a preparation that made the root");
+        Assert.That(fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options).Directory, Does.StartWith(cache + "/"));
+        Assert.That(listed, Is.EqualTo(2), "a later preparation lists it again");
+    }
+
+    /// <summary>
     /// The preparation's token reaches the password database listing: a
     /// listing that sees the token cancelled stops the preparation as
     /// cancelled, and nothing is made.

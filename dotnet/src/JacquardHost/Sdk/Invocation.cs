@@ -164,7 +164,7 @@ public sealed class Invocation
             try
             {
                 // Save takes no token; the password database listing is bounded by its own time limit.
-                problem = Core.UnsafeDirectories(directory, "save target " + full, CancellationToken.None);
+                problem = Core.UnsafeDirectories(directory, "save target " + full, new Core.PasswordListing(), CancellationToken.None);
             }
             catch (JacquardException error)
             {
