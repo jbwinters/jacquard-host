@@ -224,6 +224,19 @@ jobs:
         working-directory: dotnet
         run: |
           set -euo pipefail
+          # The SDK refuses a program cache under a directory another user
+          # could write; check $RUNNER_TEMP's ancestry here, so a runner set up
+          # otherwise fails clearly rather than inside the SDK.
+          d=$(realpath "$RUNNER_TEMP")
+          while :; do
+            mode=$(stat -c %a "$d"); owner=$(stat -c %u "$d")
+            if { [ "$owner" != "$(id -u)" ] && [ "$owner" != 0 ]; } || { [ $((0$mode & 022)) != 0 ] && [ $((0$mode & 01000)) = 0 ]; }; then
+              echo "::error::$d (mode $mode, owner $owner) may be written by another user; the .NET SDK refuses a cache under it" >&2
+              exit 1
+            fi
+            [ "$d" = / ] && break
+            d=$(dirname "$d")
+          done
           dotnet build examples/JacquardExamples
           run() { dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll --workdir "$RUNNER_TEMP/dotnet-examples" "$@"; }
           run quickstart
