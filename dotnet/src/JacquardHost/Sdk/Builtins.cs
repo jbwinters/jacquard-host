@@ -724,18 +724,55 @@ public sealed class UnionCodec<TUnion> : Codec<TUnion>, ICase, Builtins.IUnion
     }
 }
 
-/// <summary>A codec made on first use, for recursive types; made by <see cref="Codecs.Lazy{T}"/>.</summary>
+/// <summary>
+/// A codec made on first use, for recursive types; made by
+/// <see cref="Codecs.Lazy{T}"/>. The factory runs on one thread at a time
+/// and its codec, once made, is kept and shared by every thread; a factory
+/// that throws keeps nothing, so the next use runs it again.
+/// </summary>
 /// <typeparam name="T">The .NET type.</typeparam>
 public sealed class LazyCodec<T> : Codec<T>, ICase, Builtins.ILazy
 {
-    private readonly Lazy<Codec<T>> target;
+    private readonly object gate = new();
+    private readonly Func<Codec<T>> make;
+    private volatile Codec<T>? made;
+    private bool making;
 
     internal LazyCodec(Func<Codec<T>> make)
     {
-        target = new Lazy<Codec<T>>(() => make() ?? throw new InvalidOperationException("a lazy codec's factory returned null"), LazyThreadSafetyMode.ExecutionAndPublication);
+        this.make = make;
     }
 
-    object Builtins.ILazy.Target => target.Value;
+    object Builtins.ILazy.Target => made ?? Make();
+
+    private Codec<T> Make()
+    {
+        lock (gate)
+        {
+            if (made is { } done)
+            {
+                return done;
+            }
+
+            // The lock is reentrant: a factory that asks for its own codec would run again.
+            if (making)
+            {
+                throw new InvalidOperationException("a lazy codec's factory used the codec it makes");
+            }
+
+            making = true;
+            try
+            {
+                Codec<T> codec = make() ?? throw new InvalidOperationException("a lazy codec's factory returned null");
+                made = codec;
+                return codec;
+            }
+            finally
+            {
+                making = false;
+            }
+        }
+    }
 
     internal override bool AcceptsNull => Resolved().AcceptsNull;
 

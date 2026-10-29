@@ -609,6 +609,28 @@ public sealed class DataTests
     }
 
     /// <summary>
+    /// A lazy codec whose factory throws keeps nothing: the next use runs
+    /// the factory again, and once it succeeds its codec is kept and the
+    /// factory never runs again, across threads.
+    /// </summary>
+    [Test]
+    public void ALazyCodecWhoseFactoryFailedIsMadeOnTheNextUse()
+    {
+        ProgramData data = Fixture(Limits.Hard);
+        int calls = 0;
+        LazyCodec<long> codec = Codecs.Lazy<long>(() => Interlocked.Increment(ref calls) <= 2 ? throw new InvalidOperationException("not ready") : Codecs.Int);
+        for (int attempt = 1; attempt <= 2; attempt++)
+        {
+            JacquardException error = Support.Throws<JacquardException>(() => data.Encode(codec, 1L));
+            Assert.That(error.InnerException, Is.InstanceOf<InvalidOperationException>().With.Message.EqualTo("not ready"));
+            Assert.That(calls, Is.EqualTo(attempt));
+        }
+
+        Parallel.For(0, 16, i => Assert.That(data.Decode(codec, data.Encode(codec, i)), Is.EqualTo((long)i)));
+        Assert.That(calls, Is.EqualTo(3), "the codec was made more than once after it succeeded");
+    }
+
+    /// <summary>
     /// Messages quote caller text as an excerpt, and no message is kept
     /// past 8,192 chars: a result codec naming a huge constructor, codecs,
     /// record readers, and constructors that throw huge messages each give a
