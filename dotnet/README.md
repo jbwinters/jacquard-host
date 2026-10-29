@@ -19,7 +19,8 @@ The assembly has two layers:
 
 Linux is exercised. macOS should work but has no CI: the carrier and the SDK
 call the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`,
-`mkdir(2)`, and `stat(2)`; see [process carrier](#process-carrier) and
+`mkdir(2)`, `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, and on Linux
+`lgetxattr(2)`; see [process carrier](#process-carrier) and
 [Core's commands](#cores-commands)), and the macOS status calls are compiled
 but not run by any test. Windows is not supported: the worker reports a spawn
 failure and `Prepare` refuses. **Experimental:** the protocol is Core's pinned
@@ -49,6 +50,15 @@ Expected output:
 Order total 35: shipping 5
 Order total 75: shipping 0
 ```
+
+The command keeps its program cache under `.scratch/dotnet-examples/` in the
+working directory, and the SDK refuses a cache when another user could write
+any directory above it, up to `/`. A clone made with a `umask` of 002 passes
+when its directories belong to your private group (a group named after you,
+with no other members, as Debian, Ubuntu, and Fedora create for each user).
+If preparation is refused, the message names every such directory: run
+`chmod go-w` on each, or pass `--workdir` under directories only you or root
+may write (see [call a checked function](#call-a-checked-function)).
 
 The same command runs the other example projects; see
 [run the projects](#run-the-projects).
@@ -148,14 +158,22 @@ that its group or others may write, both when it creates an entry and when it
 loads one, and it makes each new entry's directories and files owner-only
 (Core's store included). The owner and mode come from `statx(2)` on Linux and
 `stat(2)` on macOS, without following links. Every directory above the
-root, up to `/`, must be owned by you or root and must not be writable by its
-group or others unless it has the sticky bit (as `/tmp` has), as OpenSSH
-checks the directories above its configuration; otherwise preparation is
-refused, naming the directory. So no other user can rename the root away and
-put another directory at its path. The directories a preparation makes for a
-missing root are each made owner-only, whatever the `umask`; an existing one
-left group-writable by a `umask` of 002 is refused: run `chmod go-w` on it, or
-choose a cache under owner-only directories. The root is used by its path, also by every
+root, up to `/`, must be owned by you or root and must not be writable by
+others, nor by its group, unless it has the sticky bit (as `/tmp` has), as
+OpenSSH checks the directories above its configuration. A directory writable
+by its group is accepted when that group is your private group, by Debian
+OpenSSH's rule: the directory's group is your primary group, the group's name
+is your user name, the group lists no members or only you (read with
+`getpwuid_r(3)` and `getgrgid_r(3)`), and, on Linux, the directory has no
+access ACL, whose mask is what its group bits show. So a clone made with a `umask` of 002
+under user-private groups is accepted, and no other user can rename the root
+away and put another directory at its path. Otherwise preparation is refused
+with a message naming every such directory, nearest first, with its reason
+(at most 16 named, the rest counted): run `chmod go-w` on each, or choose a
+cache under directories only you or root may write. The existing directories
+are checked before any missing level is made, so a refused preparation
+creates nothing, and the levels it makes are each owner-only, whatever the
+`umask`. The root is used by its path, also by every
 worker a prepared program starts, so its device and inode, read at the owner
 check, are compared again before the staging directory is made, before an
 entry is published, before and after each load, and before each worker
@@ -210,13 +228,23 @@ decodes the result with the codec you pass; `Invoke` keeps the whole
 kill the worker when it is cancelled. `MapBatches` reads the number of rows
 once and refuses a list whose count differs before a later batch.
 `Invocation.Save` writes the frames and evidence, including argument and
-result values, to a new file created exclusively in the target's directory,
-made owner-only (0600) and owned by you, and then renames it over the path:
-whatever was there is replaced, never written through, so an existing file's
+result values. The target's directory, resolved once, and every directory
+above it must pass the cache's directory rule (owned by you or root; not
+writable by others or by its group unless sticky or your private group), or
+the save is refused with an `IOException` naming them: otherwise another
+user could replace the file before or after the rename. The record is written
+through one handle to a new file created exclusively (`O_CREAT|O_EXCL`, never
+through a link) in that directory, owner-only (0600) and owned by you, and
+flushed to disk (`fsync`); the file at its path is then checked to be the one
+written (same device and inode), and only then renamed over the target. A
+replacement is refused and left in place; nothing is saved. Whatever was at
+the target is replaced, never written through, so an existing file's
 permissions and owner are not kept and a symbolic link there is replaced
-rather than followed. The directory must be writable; in a sticky directory
-such as `/tmp`, a file another user owns cannot be replaced and the save
-fails. The API is synchronous; there are no `Task`-returning variants.
+rather than followed. In a sticky directory such as `/tmp`, a file another
+user owns cannot be replaced and the save fails. Not covered: a replacement
+by you or root between that check and the rename, and the directory's own
+entry, which is not synced, so the rename itself may not survive a power
+loss. The API is synchronous; there are no `Task`-returning variants.
 
 ## Data
 
@@ -485,9 +513,11 @@ The command reads the rules and synthetic inputs from the repository's
 (or `JACQUARD_EXAMPLES=DIR`), so it runs from a clone. Custom input JSON may
 follow the project name. `--inspect PATH` saves frames; triage adds a
 numbered suffix per batch. State defaults to `.scratch/dotnet-examples/`;
-its program cache is refused while any directory above it is writable by its
-group or others (as a clone made with a `umask` of 002 is), so run
-`chmod go-w` on those or pass a `--workdir` under owner-only directories. The
+its program cache, and a `--inspect` file, are refused while another user
+could write a directory above them (one writable by others, or by a group
+other than your private group), so run `chmod go-w` on the directories the
+message names, or pass `--workdir` and `--inspect` paths under directories
+only you or root may write. The
 exit status is 1 for a Jacquard or SDK failure and 2 for usage or other
 errors.
 
@@ -786,8 +816,7 @@ stop; then Core is killed, and every recorded descendant until 500 ms after
 the stop; then the host waits for Core's exit until 750 ms after the stop.
 Each budget is checked before each entry or descendant, so the cleanup
 returns within 750 ms of the stop plus one `stat` read and one signal (tests
-check the order and the budgets on a test clock, and the whole bound on the
-real clock). .NET's `Process.Kill(true)`, which reads every process on the
+check the order and each budget's end on a test clock). .NET's `Process.Kill(true)`, which reads every process on the
 machine, is not used. Only Core is frozen, so a descendant whose parent exits
 before the last record reaches it is reparented and keeps running, as do
 one past the caps or the budgets and one started and reparented between two

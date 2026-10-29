@@ -109,14 +109,18 @@
   within 750 ms. Only the cache's owner may write it: the root, each entry,
   and each file must be owned by the current user and not group- or
   world-writable, every directory above the root must be owned by the user
-  or root and not group- or world-writable unless it is sticky, and the
-  root's device and inode are checked again before each use, each worker a
-  prepared program starts included. Replacement by the same user is not
-  covered.
+  or root and not group- or world-writable unless it is sticky or the group
+  is the user's private group (Debian OpenSSH's rule, so a clone made with a
+  `umask` of 002 under user-private groups is accepted), a refusal names
+  every such directory and creates nothing, and the root's device and inode
+  are checked again before each use, each worker a prepared program starts
+  included. Replacement by the same user is not covered.
   Every binding is derived again from Core's cached output on load, and a
   preparation during which the Core executable or prelude changed is
-  refused. `Invocation.Save` writes a new owner-only file and renames it over
-  the target.
+  refused. `Invocation.Save` refuses a target directory another user could
+  write, by the same directory rule, writes a new owner-only file through one
+  exclusively created handle, flushes it, checks the file at its path is the
+  one written, and renames it over the target.
   The four example projects run through a `JacquardExamples` command in
   `dotnet/examples/`, and CI runs them and the SDK's live tests against the
   pinned Core.
