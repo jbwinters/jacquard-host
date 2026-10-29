@@ -74,6 +74,16 @@ class CorePinTest(unittest.TestCase):
         found = core_pin.problems(self.pin, root)
         self.assertTrue(any("java/src/main/resources" in item and "transcripts.json" in item for item in found), found)
         self.assertTrue(any("Compat.java" in item for item in found), found)
+        dotnet_kit = root / core_pin.KIT_DIRS[4].relative_to(REPO) / "kit/fixtures.jac"
+        dotnet_kit.write_bytes(dotnet_kit.read_bytes() + b" ")
+        dotnet_readme = root / core_pin.KIT_DIRS[4].relative_to(REPO) / "kit/README.md"
+        dotnet_readme.write_text("drifted")
+        compat_cs = root / "dotnet/src/JacquardHost/Compat.cs"
+        compat_cs.write_text(compat_cs.read_text().replace(self.pin["kit"]["digests"]["vectors.json"], "0" * 64))
+        found = core_pin.problems(self.pin, root)
+        self.assertTrue(any("dotnet/src/JacquardHost/kit" in item and "fixtures.jac" in item for item in found), found)
+        self.assertTrue(any("dotnet/src/JacquardHost/kit" in item and "README.md" in item for item in found), found)
+        self.assertTrue(any("Compat.cs" in item for item in found), found)
 
     def test_sync_rewrites_only_generated_regions(self) -> None:
         root = self.copy()
@@ -221,6 +231,9 @@ class UpdateTest(unittest.TestCase):
         self.java_kit = Path(tempfile.mkdtemp(prefix="core-java-kit-"))
         self.addCleanup(shutil.rmtree, self.java_kit)
         shutil.copytree(core_pin.KIT_DIR, self.java_kit, dirs_exist_ok=True)
+        self.dotnet_kit = Path(tempfile.mkdtemp(prefix="core-dotnet-kit-"))
+        self.addCleanup(shutil.rmtree, self.dotnet_kit)
+        shutil.copytree(core_pin.KIT_DIR, self.dotnet_kit, dirs_exist_ok=True)
         self.files = {name: (core_pin.KIT_DIR / name).read_bytes() for name in (*core_pin.KIT_FILES, *core_pin.KIT_EXTRAS)}
 
     def run_update(self, manifest_changes: dict, assets: dict) -> dict:
@@ -231,7 +244,7 @@ class UpdateTest(unittest.TestCase):
         with patch.object(core_pin, "tag_commit", return_value="e" * 40), \
              patch.object(core_pin, "kit_file", side_effect=lambda repo, commit, path, checkout: files[path.split("/", 2)[2]]), \
              patch.object(core_pin, "release_assets", return_value=assets) as self.fetched:
-            return core_pin.update(self.pin, "jacquard-core-9.9.9", None, (self.kit, self.go_kit, self.rust_kit, self.java_kit))
+            return core_pin.update(self.pin, "jacquard-core-9.9.9", None, (self.kit, self.go_kit, self.rust_kit, self.java_kit, self.dotnet_kit))
 
     def test_a_release_is_adopted_with_its_kit_and_assets(self) -> None:
         assets = {"linux-x86_64": {"name": "jacquard-linux-x86_64.tar.gz", "sha256": "c" * 64}}
@@ -243,6 +256,7 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual((self.go_kit / "kit/kit.json").read_bytes(), written)
         self.assertEqual((self.rust_kit / "kit/kit.json").read_bytes(), written)
         self.assertEqual((self.java_kit / "kit/kit.json").read_bytes(), written)
+        self.assertEqual((self.dotnet_kit / "kit/kit.json").read_bytes(), written)
         self.assertEqual([path.name for path in self.kit.rglob(".*.core-pin")], [])
 
     def test_a_failed_replacement_restores_every_kit_file(self) -> None:

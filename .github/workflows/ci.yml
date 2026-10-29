@@ -91,6 +91,31 @@ jobs:
       - name: Offline adapter and SDK tests
         run: mvn -B -ntp verify
 
+  dotnet:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dotnet: ["8.0", "10.0"]
+    defaults:
+      run:
+        working-directory: dotnet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}.x
+      # The runner may also have a newer SDK, which dotnet would pick by
+      # default. Pin this job to the .NET 8 SDK so it builds as an 8.0-only
+      # toolchain would (the test project targets net8.0 alone there).
+      - name: Pin the .NET 8 SDK
+        if: matrix.dotnet == '8.0'
+        run: |
+          printf '{"sdk":{"version":"8.0.100","rollForward":"latestFeature"}}\n' > global.json
+          dotnet --version | grep '^8\.0\.'
+      - name: Offline tests
+        run: dotnet test test/JacquardHost.Tests -f net${{ matrix.dotnet }}
+
   bootstrap:
     runs-on: ubuntu-latest
     strategy:
@@ -183,3 +208,15 @@ jobs:
           test "$status" = 1
           run --workdir "$RUNNER_TEMP/java-recovery" --deliver-pending fulfillment | grep -q '{"delivered":1}'
           run --workdir "$RUNNER_TEMP/java-recovery" --deliver-pending fulfillment | grep -q '{"delivered":0}'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Run independent .NET adapter against Core
+        run: |
+          dotnet test test/JacquardHost.Tests -f net8.0
+          dotnet test test/JacquardHost.Tests -f net10.0
+        working-directory: dotnet
+        env:
+          JACQUARD_REQUIRE_LIVE: "1"

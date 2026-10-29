@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JacquardLang.Host</RootNamespace>
+    <AssemblyName>JacquardLang.Host</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsAotCompatible>true</IsAotCompatible>
+    <PackageId>JacquardLang.Host</PackageId>
+    <Description>An independent .NET adapter for Jacquard Core's experimental jacquard-host-v0 protocol.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/jbwinters/jacquard-host</RepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="JacquardLang.Host.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The pinned conformance kit, a byte copy maintained by scripts/core_pin.py. -->
+    <EmbeddedResource Include="kit/host-protocol-v0/kit/kit.json" LogicalName="host-protocol-v0/kit/kit.json" />
+    <EmbeddedResource Include="kit/host-protocol-v0/kit/transcripts.json" LogicalName="host-protocol-v0/kit/transcripts.json" />
+    <EmbeddedResource Include="kit/host-protocol-v0/kit/fixtures.jac" LogicalName="host-protocol-v0/kit/fixtures.jac" />
+    <EmbeddedResource Include="kit/host-protocol-v0/kit/README.md" LogicalName="host-protocol-v0/kit/README.md" />
+    <EmbeddedResource Include="kit/host-protocol-v0/vectors.json" LogicalName="host-protocol-v0/vectors.json" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../NOTICE" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>

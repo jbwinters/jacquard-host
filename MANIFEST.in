@@ -17,3 +17,11 @@ prune rust/target
 include java/pom.xml java/LICENSE java/NOTICE
 recursive-include java *.java *.md *.json *.jac
 prune java/target
+include dotnet/Directory.Build.props dotnet/.editorconfig dotnet/LICENSE dotnet/NOTICE dotnet/JacquardHost.sln
+recursive-include dotnet *.cs *.csproj *.md *.json *.jac
+prune dotnet/src/JacquardHost/bin
+prune dotnet/src/JacquardHost/obj
+prune dotnet/test/JacquardHost.Tests/bin
+prune dotnet/test/JacquardHost.Tests/obj
+prune dotnet/test/JacquardHost.StandIn/bin
+prune dotnet/test/JacquardHost.StandIn/obj

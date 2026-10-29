@@ -72,6 +72,22 @@
   worker's output FIFOs, and `HandlerContext.of` for calling a handler
   outside an invocation. CI runs the SDK's offline and live tests and the
   four projects.
+- .NET adapter: an independent project in `dotnet/` (package
+  `JacquardLang.Host`, targeting .NET 8 and tested on .NET 8 and 10) with no
+  runtime dependencies beyond the .NET base class library. It provides strict
+  codecs that parse integers exactly from their text, the session state
+  machine, a bounded process carrier for `jacquard host worker`, and a `Host`
+  with a closed operation registry. It carries the pinned kit as embedded
+  resources and replays all 21 recordings. It is protocol-level only, with no
+  SDK layer. .NET cannot start the worker in its own process group or
+  interrupt a pipe read or write, so the carrier never calls one that can
+  block: it waits on the C library's `poll(2)` and runs workers on Linux and
+  macOS only. It kills the worker's process tree with `Process.Kill(true)`,
+  reports a descendant that keeps the pipes open after the worker exits as a
+  carrier loss, and documents what it misses in `docs/LIMITS.md`.
+  `scripts/core_pin.py` now generates `dotnet/src/JacquardHost/Compat.cs` and
+  keeps the .NET kit copy in sync, and CI runs the offline tests on .NET 8 and
+  10 and the live tests against the pinned Core.
 
 ## 0.2.0 — 2026-10-25
 

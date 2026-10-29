@@ -18,8 +18,10 @@ Contributions are licensed under [Apache 2.0](LICENSE), matching this repository
 `core-pin.json` names the one Core release all adapters target. Do not edit
 `src/jacquard_host/compat.py`, `typescript/src/compat.ts`, `go/protocol/compat.go`,
 `rust/src/compat.rs`, `java/src/main/java/org/jacquardlang/host/Compat.java`,
-the Go, Rust, and Java kit copies under `go/kit/data/`, `rust/kit/`, and
-`java/src/main/resources/org/jacquardlang/host/kit/`, or the generated block
+`dotnet/src/JacquardHost/Compat.cs`, the Go, Rust, Java, and .NET kit copies
+under `go/kit/data/`, `rust/kit/`,
+`java/src/main/resources/org/jacquardlang/host/kit/`, and
+`dotnet/src/JacquardHost/kit/`, or the generated block
 in `docs/COMPATIBILITY.md` by hand: change the pin with
 `python3 scripts/core_pin.py update --tag ...`, which also vendors the kit, and
 `python3 scripts/core_pin.py check` (run in CI) reports any drift.
@@ -142,6 +144,33 @@ sync. The README's Java examples are compiled test sources under
 differ). Copy the repository `NOTICE` to `java/NOTICE` when it changes (a test
 fails if they differ).
 
+## .NET
+
+The independent .NET adapter lives in `dotnet/` as package `JacquardLang.Host`
+(`dotnet/src/JacquardHost`). It targets .NET 8, has no runtime dependencies
+beyond the .NET base class library, and does not call Python, Node.js, Go,
+Rust, or Java; it calls the C library's `poll(2)` and runs workers on Linux
+and macOS only. NUnit, its adapter, and the test SDK are its only (test)
+dependencies. The .NET 8 or 10 SDK is required.
+
+```sh
+cd dotnet
+dotnet test test/JacquardHost.Tests -f net8.0
+dotnet test test/JacquardHost.Tests -f net10.0   # with a .NET 10 SDK
+# With the pinned Core configured (eval "$(python3 ../scripts/core_pin.py install)"):
+JACQUARD_REQUIRE_LIVE=1 dotnet test test/JacquardHost.Tests -f net8.0
+```
+
+CI runs the offline tests on .NET 8 and 10, and the live tests on both in the
+shared pinned-Core job. The build treats warnings as errors, with nullable
+reference types and the `8.0-recommended` analyzers.
+`dotnet/src/JacquardHost/Compat.cs` is generated and
+`dotnet/src/JacquardHost/kit/` is a byte copy of the pinned kit.
+`scripts/core_pin.py` maintains both; do not edit them by hand. The
+`JacquardHost.StandIn` program under `dotnet/test/` is a fixture for the
+offline tests. Copy the repository `NOTICE` to `dotnet/NOTICE` when it changes
+(a test fails if they differ).
+
 ## Releasing
 
 A release is one commit on `main` with green CI. To cut one:
@@ -149,7 +178,8 @@ A release is one commit on `main` with green CI. To cut one:
 1. Open a pull request that dates the CHANGELOG entry and updates any version
    references in the docs. Keep the Python (`src/jacquard_host/__init__.py`),
    npm (`typescript/package.json`, `typescript/src/version.ts`), Rust
-   (`rust/Cargo.toml`), Java (`java/pom.xml`), and release versions equal.
+   (`rust/Cargo.toml`), Java (`java/pom.xml`), .NET
+   (`dotnet/Directory.Build.props`), and release versions equal.
 2. After it merges, tag the merge commit twice, with annotated tags
    (`git tag -a`):
    `jacquard-host-X.Y.Z` for the repository and its assets, and `go/vX.Y.Z`
@@ -162,8 +192,9 @@ A release is one commit on `main` with green CI. To cut one:
 4. Publish a GitHub release for `jacquard-host-X.Y.Z` with the CHANGELOG
    entry as its notes and the assets attached.
 
-Nothing is published to PyPI, npm, crates.io, or Maven Central. The Rust
-crate is used from the repository tag, and the Java artifact is built from it.
+Nothing is published to PyPI, npm, crates.io, Maven Central, or NuGet. The
+Rust crate is used from the repository tag, and the Java artifact and the .NET
+package are built from it.
 
 ## TypeScript
 

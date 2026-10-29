@@ -38,11 +38,13 @@ REPO = Path(__file__).resolve().parents[1]
 PIN = REPO / "core-pin.json"
 SCHEMA = "jacquard-host-core-pin-v1"
 KIT_DIR = REPO / "src" / "jacquard_host" / "data" / "conformance" / "host-protocol-v0"
-# Go, Rust, and Java embed their own byte-identical copies; go:embed cannot
-# reach outside the module, a published crate contains only its own directory,
-# and a jar carries its kit as class-path resources.
+# Go, Rust, Java, and .NET embed their own byte-identical copies; go:embed
+# cannot reach outside the module, a published crate contains only its own
+# directory, a jar carries its kit as class-path resources, and a .NET
+# assembly carries it as embedded resources.
 KIT_DIRS = (KIT_DIR, REPO / "go" / "kit" / "data" / "host-protocol-v0", REPO / "rust" / "kit" / "host-protocol-v0",
-            REPO / "java" / "src" / "main" / "resources" / "org" / "jacquardlang" / "host" / "kit" / "host-protocol-v0")
+            REPO / "java" / "src" / "main" / "resources" / "org" / "jacquardlang" / "host" / "kit" / "host-protocol-v0",
+            REPO / "dotnet" / "src" / "JacquardHost" / "kit" / "host-protocol-v0")
 KIT_FILES = ("kit/kit.json", "kit/transcripts.json", "kit/fixtures.jac", "vectors.json")
 # Copied with the kit but not part of the digest pin; prose may be refreshed.
 KIT_EXTRAS = ("kit/README.md",)
@@ -263,12 +265,52 @@ public final class Compat {{
 """
 
 
+def render_dotnet(pin: dict) -> str:
+    release, kit = pin["release"], pin["kit"]
+    digests = "".join(f'        new("{name}", "{kit["digests"][name]}"),\n' for name in KIT_FILES)
+    pending = ", ".join(f'"{name}"' for name in kit["pending_decisions"])
+    return f"""// Generated from core-pin.json by scripts/core_pin.py; do not edit by hand.
+
+using System.Collections.Generic;
+
+namespace JacquardLang.Host;
+
+/// <summary>The Jacquard Core release and host protocol this adapter is pinned to.</summary>
+public static class Compat
+{{
+    /// <summary>The host protocol.</summary>
+    public const string Protocol = "{pin["protocol"]}";
+
+    /// <summary>The carrier.</summary>
+    public const string Carrier = "{pin["carrier"]}";
+
+    /// <summary>The pinned Core version.</summary>
+    public const string CoreVersion = "{release["version"]}";
+
+    /// <summary>The pinned Core release tag.</summary>
+    public const string CoreTag = "{release["tag"]}";
+
+    /// <summary>The pinned Core commit.</summary>
+    public const string CoreCommit = "{release["commit"]}";
+
+    /// <summary>SHA-256 digests of the pinned conformance kit files.</summary>
+    public static IReadOnlyList<KeyValuePair<string, string>> KitDigests {{ get; }} = new KeyValuePair<string, string>[]
+    {{
+{digests}    }};
+
+    /// <summary>Decisions Core recorded as pending; replay reproduces them.</summary>
+    public static IReadOnlyList<string> PendingDecisions {{ get; }} = new[] {{ {pending} }};
+}}
+"""
+
+
 GENERATED = {
     "src/jacquard_host/compat.py": render_python,
     "typescript/src/compat.ts": render_typescript,
     "go/protocol/compat.go": render_go,
     "rust/src/compat.rs": render_rust,
     "java/src/main/java/org/jacquardlang/host/Compat.java": render_java,
+    "dotnet/src/JacquardHost/Compat.cs": render_dotnet,
 }
 BLOCKS = {
     "docs/COMPATIBILITY.md": render_compatibility,
