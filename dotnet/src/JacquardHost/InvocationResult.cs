@@ -48,6 +48,8 @@ public enum Failure
 /// <summary>Core's frames and evidence beside the host's observations.</summary>
 public sealed class InvocationResult
 {
+    private volatile bool handlerTokenNotCancelled;
+
     internal InvocationResult(ResultKind kind)
     {
         Kind = kind;
@@ -95,9 +97,19 @@ public sealed class InvocationResult
     /// example when the process is out of memory. That token is then never
     /// cancelled: a handler waiting only on it keeps waiting (until its own
     /// timeout, if it has one), while <see cref="HandlerContext.IsCancelled"/>
-    /// still turns true. False otherwise.
+    /// still turns true. False otherwise. It may be set on a thread disposing
+    /// the worker, so it is read and written as a volatile field. It is shown
+    /// by <see cref="ToString"/> when true, and is not part of
+    /// <see cref="HostEvidence"/>: that evidence describes how the invocation
+    /// ended, in a schema the adapters share, while this flag reports the
+    /// .NET host's own failure to start the token's cancellation, which can
+    /// follow any outcome, including a successful one.
     /// </summary>
-    public bool HandlerTokenNotCancelled { get; internal set; }
+    public bool HandlerTokenNotCancelled
+    {
+        get => handlerTokenNotCancelled;
+        internal set => handlerTokenNotCancelled = value;
+    }
 
     /// <summary>Whether Core returned a successful outcome.</summary>
     public bool Ok => Kind == ResultKind.Ok;
@@ -164,7 +176,8 @@ public sealed class InvocationResult
     }
 
     /// <inheritdoc/>
-    public override string ToString() => "InvocationResult[" + KindName(Kind) + ", " + Message + "]";
+    public override string ToString() =>
+        "InvocationResult[" + KindName(Kind) + ", " + Message + (HandlerTokenNotCancelled ? ", handler token not cancelled" : string.Empty) + "]";
 }
 
 /// <summary>An unsuccessful invocation.</summary>

@@ -130,6 +130,7 @@ public sealed class CancelStartTests
         Assert.That(seen.Done.Wait(TimeSpan.FromSeconds(10)), Is.True, "the handler did not return");
         Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
         Assert.That(result.HandlerTokenNotCancelled, Is.False);
+        Assert.That(result.ToString(), Does.Not.Contain("handler token"), "an unset flag was shown");
         Assert.That(Volatile.Read(ref seen.TokenCancelled), Is.True, "the token was not cancelled");
         Assert.That(Volatile.Read(ref seen.CallbackOnPool), Is.True, "the callback did not run on a pool thread");
         Assert.That(Volatile.Read(ref seen.CallbackThread), Is.Not.EqualTo(Volatile.Read(ref seen.CallerThread)));
@@ -158,6 +159,7 @@ public sealed class CancelStartTests
         }));
         Assert.That(Volatile.Read(ref attempts), Is.EqualTo(2), "the host did not try a thread and then the pool, once");
         Assert.That(result.HandlerTokenNotCancelled, Is.True, "the failure was not recorded");
+        Assert.That(result.ToString(), Does.EndWith(", handler token not cancelled]"), "the flag is not shown");
         if (atTheDeadline)
         {
             Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
@@ -168,6 +170,10 @@ public sealed class CancelStartTests
         else
         {
             Assert.That(result.Ok, Is.True, result.ToString());
+
+            // The flag is not host evidence: the evidence stays empty on success.
+            Assert.That(result.HostEvidence, Is.Empty, "a successful invocation has host evidence");
+            Assert.That(result.ToString(), Is.EqualTo("InvocationResult[ok, Jacquard invocation succeeded, handler token not cancelled]"));
         }
 
         Assert.That(Volatile.Read(ref seen.CallbackThread), Is.EqualTo(-1), "a callback ran");
