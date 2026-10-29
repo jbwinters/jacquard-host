@@ -134,10 +134,37 @@ public sealed class Runtime
     /// <summary>Test seam: runs after the failure cleanup removes each entry, with its path. Null outside tests.</summary>
     internal static volatile Action<string>? CleanupHook;
 
+    /// <summary>Test seam: runs after each Core command succeeds, with its first argument. Null outside tests.</summary>
+    internal static volatile Action<string>? CommandHook;
+
+    /// <summary>
+    /// Test seam: runs just before the cache root's identity is checked
+    /// again, with the use that follows: <c>stage</c>, <c>publish</c>,
+    /// <c>load</c>, or <c>loaded</c>. Null outside tests.
+    /// </summary>
+    internal static volatile Action<string>? RootHook;
+
     private string Command(string executable, CancellationToken cancellationToken, params string[] arguments)
     {
         Interlocked.Increment(ref commands);
-        return Core.Run(executable, Prelude, CommandTimeout, cancellationToken, arguments);
+        string output = Core.Run(executable, Prelude, CommandTimeout, cancellationToken, arguments);
+        CommandHook?.Invoke(arguments[0]);
+        return output;
+    }
+
+    /// <summary>
+    /// Refuses the preparation unless the cache root at <paramref name="cache"/>
+    /// is still the directory that was checked (the same device and inode),
+    /// so a root renamed away and replaced after the check is not used.
+    /// </summary>
+    private static void SameRoot(string cache, Unix.Status pinned, string use)
+    {
+        RootHook?.Invoke(use);
+        Unix.Status now = Core.StatOrFail(cache, follow: false, "cannot read ");
+        if (now.Kind != pinned.Kind || now.Device != pinned.Device || now.Inode != pinned.Inode)
+        {
+            throw JacquardException.Preparation("cache root " + cache + " was replaced after it was checked; prepare again");
+        }
     }
 
     /// <summary>One discovery: empty until a run succeeds; a failed run leaves it empty for the next caller.</summary>
@@ -210,11 +237,17 @@ public sealed class Runtime
         }
     }
 
-    /// <summary>Runs <c>--version</c> once per executable digest; accepts output whose last field is the pinned version.</summary>
-    private void CheckVersion(string executable, string binaryHash, CancellationToken cancellationToken) =>
-        Once("version:" + binaryHash, () =>
+    /// <summary>
+    /// Runs <c>--version</c> once per executable fingerprint (its digest and
+    /// its file identity); accepts output whose last field is the pinned
+    /// version. A run during which the executable changed is refused, and
+    /// is not kept for later callers.
+    /// </summary>
+    private void CheckVersion(string executable, string binaryKey, IReadOnlyList<Core.Pin> pins, CancellationToken cancellationToken) =>
+        Once("version:" + binaryKey, () =>
         {
             string version = Command(executable, cancellationToken, "--version").Trim();
+            Core.Unchanged(pins, cancellationToken);
             string[] fields = version.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (fields.Length == 0 || !string.Equals(fields[^1], Compat.CoreVersion, StringComparison.Ordinal))
             {
@@ -225,8 +258,12 @@ public sealed class Runtime
             return Array.Empty<string>();
         }, cancellationToken);
 
-    /// <summary>Core's <c>hash</c> output for each prelude file, which must parse.</summary>
-    private IReadOnlyList<string> PreludeOutputs(string executable, string key, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// Core's <c>hash</c> output for each prelude file, which must parse.
+    /// Outputs made while the executable or the prelude changed are refused,
+    /// and are not kept for later callers.
+    /// </summary>
+    private IReadOnlyList<string> PreludeOutputs(string executable, string key, IReadOnlyList<Core.Pin> pins, CancellationToken cancellationToken) =>
         Once("prelude:" + key, () =>
         {
             var outputs = new List<string>();
@@ -237,6 +274,7 @@ public sealed class Runtime
                 outputs.Add(output);
             }
 
+            Core.Unchanged(pins, cancellationToken);
             return outputs.AsReadOnly();
         }, cancellationToken);
 
@@ -411,12 +449,18 @@ public sealed class Runtime
 
         string configured = Path.GetFullPath(Core.CheckedPath(options.CacheDir ?? DefaultCacheDir, "cache directory"));
         string executable = Core.Executable(Binary);
-        string binaryHash = Core.FileDigest(executable, cancellationToken);
-        CheckVersion(executable, binaryHash, cancellationToken);
+        string binaryHash = Core.FileDigest(executable, cancellationToken, out Unix.Status binaryStatus);
+
+        // What Core runs is the executable and the prelude as they are when
+        // each command starts; their identities, read as they are
+        // fingerprinted, must be unchanged once the commands have finished.
+        var pins = new List<Core.Pin> { new("Core executable", executable, Follow: true, binaryStatus) };
+        string binaryKey = binaryHash + ":" + Core.IdentityKey(binaryStatus);
+        CheckVersion(executable, binaryKey, pins.ToArray(), cancellationToken);
         string preludeHash;
         try
         {
-            preludeHash = Core.MapDigest(Core.Tree(Prelude, Core.Access.Any, cancellationToken));
+            preludeHash = Core.MapDigest(Core.Tree(Prelude, Core.Access.Any, cancellationToken, pins));
         }
         catch (JacquardException error)
         {
@@ -457,13 +501,17 @@ public sealed class Runtime
         string directory = Path.Combine(cache, Core.MapDigest(identity));
 
         // Only the cache's owner may write it; nothing inside it can resist
-        // someone else who may.
-        Core.Check(cache, Core.Access.OwnerOnly);
+        // someone else who may. The root is used by its path, so its
+        // identity is checked again before each use: another user who may
+        // write its parent could otherwise replace it after this check.
+        Unix.Status root = Core.Check(cache, Core.Access.OwnerOnly);
         if (Unix.Stat(directory, follow: false).Kind != Unix.Kind.Missing)
         {
-            return Load(directory, identity, executable, cancellationToken);
+            Core.Unchanged(pins, cancellationToken);
+            return Load(directory, identity, executable, cache, root, cancellationToken);
         }
 
+        SameRoot(cache, root, "stage");
         string stage = StagingDirectory(cache);
         bool published = false;
         try
@@ -471,11 +519,14 @@ public sealed class Runtime
             string snapshot = Path.Combine(stage, "source" + syntax);
             Write(snapshot, bytes, "cannot write the source snapshot");
             string check = Command(executable, cancellationToken, "check", snapshot, "--print-sigs");
-            IReadOnlyList<string> preludeHashes = PreludeOutputs(executable, binaryHash + preludeHash, cancellationToken);
+            IReadOnlyList<string> preludeHashes = PreludeOutputs(executable, binaryKey + preludeHash, pins, cancellationToken);
             string hash = Command(executable, cancellationToken, "hash", snapshot);
             Bindings bindings = Derive(check, preludeHashes, hash);
             string store = Path.Combine(stage, "store");
             Command(executable, cancellationToken, "run", snapshot, "--store", store);
+
+            // Core's commands have finished: what they ran must be what was fingerprinted.
+            Core.Unchanged(pins, cancellationToken);
             CreateDirectory(Path.Combine(stage, "core"));
             Write(Path.Combine(stage, CheckOutput), Encoding.UTF8.GetBytes(check), "cannot write Core's output");
             Write(Path.Combine(stage, HashOutput), Encoding.UTF8.GetBytes(hash), "cannot write Core's output");
@@ -487,6 +538,7 @@ public sealed class Runtime
             // Core made the store with its own permissions; the entry is owner-only.
             var metadata = new Metadata(identity, bindings, Core.Tree(stage, Core.Access.Restrict, cancellationToken));
             Write(Path.Combine(stage, "program.json"), Encoding.UTF8.GetBytes(metadata.ToJson()), "cannot write program.json");
+            SameRoot(cache, root, "publish");
             try
             {
                 Directory.Move(stage, directory);
@@ -512,7 +564,7 @@ public sealed class Runtime
             }
         }
 
-        return Load(directory, identity, executable, cancellationToken);
+        return Load(directory, identity, executable, cache, root, cancellationToken);
     }
 
     private static string PreludeOutput(string file) => "core/prelude-" + file + ".out";
@@ -736,11 +788,12 @@ public sealed class Runtime
     /// coordinated rewrite of several files is accepted: only the cache's
     /// owner can make one, and the owner is trusted.
     /// </summary>
-    private PreparedProgram Load(string directory, SortedDictionary<string, string> identity, string executable, CancellationToken cancellationToken)
+    private PreparedProgram Load(string directory, SortedDictionary<string, string> identity, string executable, string cache, Unix.Status root, CancellationToken cancellationToken)
     {
         JacquardException Fail(string detail) => JacquardException.Preparation("prepared cache " + directory
             + " is incomplete or changed (" + detail + "); remove that cache entry and prepare again");
 
+        SameRoot(cache, root, "load");
         SortedDictionary<string, string> observed;
         try
         {
@@ -807,6 +860,9 @@ public sealed class Runtime
         {
             throw Fail("program.json bindings differ from Core's cached output");
         }
+
+        // What was read came from the root that was checked.
+        SameRoot(cache, root, "loaded");
 
         var program = new PreparedProgram(this, directory, metadata.Bindings, executable);
         LoadedHook?.Invoke();

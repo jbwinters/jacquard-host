@@ -127,10 +127,12 @@ internal static class Core
     /// The SHA-256 digest of the Core executable's bytes, read in pieces. A
     /// file larger than <see cref="ExecutableLimit"/> is refused from its size
     /// before it is read, and the limit is enforced again while it is read.
-    /// Before each piece it observes the token.
+    /// Before each piece it observes the token. <paramref name="identity"/>
+    /// is the file's status before the read, which must be unchanged after
+    /// it, so the digest describes the file with that identity.
     /// </summary>
     /// <exception cref="JacquardException">A preparation failure.</exception>
-    internal static string FileDigest(string path, CancellationToken cancellationToken)
+    internal static string FileDigest(string path, CancellationToken cancellationToken, out Unix.Status identity)
     {
         JacquardException over = JacquardException.Preparation("Core executable " + path + " exceeds "
             + (ExecutableLimit >> 20).ToString(CultureInfo.InvariantCulture) + " MiB");
@@ -179,8 +181,63 @@ internal static class Core
             throw JacquardException.Preparation("cannot read " + path + ": " + error.Message);
         }
 
+        if (!StatOrFail(path, follow: true, "cannot read ").SameFile(status))
+        {
+            throw Changed("Core executable", path);
+        }
+
+        identity = status;
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
+
+    /// <summary>One file or directory whose identity a preparation keeps until Core's commands have finished.</summary>
+    internal readonly record struct Pin(string What, string Path, bool Follow, Unix.Status Status);
+
+    /// <summary>The identity of <paramref name="status"/> as text, for a key: device, inode, size, and both times.</summary>
+    internal static string IdentityKey(Unix.Status status) => string.Join(
+        ":",
+        status.Device.ToString(CultureInfo.InvariantCulture),
+        status.Inode.ToString(CultureInfo.InvariantCulture),
+        status.Size.ToString(CultureInfo.InvariantCulture),
+        status.Modified.ToString(CultureInfo.InvariantCulture),
+        status.Changed.ToString(CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// Refuses the preparation unless every pinned file and directory still
+    /// has the identity it had when it was fingerprinted (see
+    /// <see cref="Unix.Status.SameFile"/>). It reads one status per pin, at
+    /// most <see cref="TreeEntries"/> plus one, and observes the token before
+    /// each.
+    /// </summary>
+    /// <exception cref="JacquardException">A preparation failure.</exception>
+    internal static void Unchanged(IReadOnlyList<Pin> pins, CancellationToken cancellationToken)
+    {
+        foreach (Pin pin in pins)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                throw JacquardException.Preparation(Aborted);
+            }
+
+            Unix.Status now;
+            try
+            {
+                now = Unix.Stat(pin.Path, pin.Follow);
+            }
+            catch (IOException)
+            {
+                throw Changed(pin.What, pin.Path);
+            }
+
+            if (!now.SameFile(pin.Status))
+            {
+                throw Changed(pin.What, pin.Path);
+            }
+        }
+    }
+
+    private static JacquardException Changed(string what, string path) =>
+        JacquardException.Preparation(what + " " + path + " changed during preparation; prepare again once it no longer changes");
 
     /// <summary>Options that write a file, created owner-only (read and write for its owner) where the file system has POSIX permissions.</summary>
     internal static FileStreamOptions OwnerOnly(FileMode mode)
@@ -229,13 +286,16 @@ internal static class Core
     /// the entry cap is held and no directory depth can exhaust the call
     /// stack; before each entry and each piece of a file it observes the
     /// token. <paramref name="access"/> says whether entries are also checked
-    /// for owner-only access, or made owner-only.
+    /// for owner-only access, or made owner-only. When
+    /// <paramref name="pins"/> is given, the root's status and each entry's
+    /// status, read before the entry is digested, are added to it.
     /// </summary>
     /// <exception cref="JacquardException">A preparation failure.</exception>
-    internal static SortedDictionary<string, string> Tree(string root, Access access, CancellationToken cancellationToken)
+    internal static SortedDictionary<string, string> Tree(string root, Access access, CancellationToken cancellationToken, List<Pin>? pins = null)
     {
         var files = new SortedDictionary<string, string>(Json.CodePointOrder);
         Check(root, access);
+        pins?.Add(new Pin("prelude", root, Follow: true, StatOrFail(root, follow: true, "cannot read ")));
         long total = 0;
         int entries = 0;
         int cap = TreeEntryCap;
@@ -265,6 +325,7 @@ internal static class Core
 
                 string relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
                 Unix.Status status = StatOrFail(path, follow: false, "cannot read ");
+                pins?.Add(new Pin("prelude entry", path, Follow: false, status));
                 if (status.Kind == Unix.Kind.Directory)
                 {
                     Check(path, access);
@@ -464,12 +525,13 @@ internal static class Core
     /// other permission. Nothing inside a cache entry can resist someone who
     /// may rewrite it, so the guarantee is that only the cache's owner can.
     /// </summary>
+    /// <returns>The status that was checked; empty for <see cref="Access.Any"/> or where there are no POSIX permissions.</returns>
     /// <exception cref="JacquardException">A preparation failure.</exception>
-    internal static void Check(string path, Access access)
+    internal static Unix.Status Check(string path, Access access)
     {
         if (access == Access.Any || !Unix.Supported)
         {
-            return;
+            return default;
         }
 
         Unix.Status status = StatOrFail(path, follow: false, "cannot read ");
@@ -490,7 +552,7 @@ internal static class Core
                 }
             }
 
-            return;
+            return status;
         }
 
         if (status.Owner != Unix.EffectiveUser())
@@ -503,5 +565,7 @@ internal static class Core
             throw JacquardException.Preparation("cache path " + path + " is group- or world-writable; only its owner may write the cache"
                 + " (make it owner-only, for example chmod " + (status.Kind == Unix.Kind.Directory ? "700 " : "600 ") + path + ")");
         }
+
+        return status;
     }
 }

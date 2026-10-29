@@ -40,6 +40,8 @@ public sealed class RuntimeTests
         Runtime.LoadedHook = null;
         Runtime.PublishedHook = null;
         Runtime.CleanupHook = null;
+        Runtime.CommandHook = null;
+        Runtime.RootHook = null;
         Core.DigestChunkHook = null;
         Core.TreeFileHook = null;
         Core.TreeEntryCap = Core.TreeEntries;
@@ -752,4 +754,147 @@ public sealed class RuntimeTests
         // Without a stop the same entry loads.
         fake.Runtime.Prepare(sources, fake.Options);
     }
+
+    /// <summary>Replaces <paramref name="path"/> with a new executable file holding <paramref name="text"/>, as an atomic rename does.</summary>
+    private static void Replace(string path, string text)
+    {
+        string next = path + ".next";
+        File.WriteAllText(next, text);
+        File.SetUnixFileMode(next, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.Move(next, path, overwrite: true);
+    }
+
+    private static string ChangedMessage(string what, string path) => what + " " + path + " changed during preparation; prepare again once it no longer changes";
+
+    /// <summary>
+    /// The cache root is checked once and used by its path, so its identity
+    /// is checked again before each use. A test seam renames the checked
+    /// root away and puts a new directory in its place (as another user who
+    /// may write its parent could) just before the staging directory is
+    /// made, before publishing, before a load, and once a load has read the
+    /// entry, on a cold and on a warm preparation; each is refused.
+    /// </summary>
+    [Test]
+    public void ACacheRootReplacedAfterItsCheckIsRefused()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string cache = Path.GetFullPath(fake.Options.CacheDir!);
+        string Swap(string use, string source)
+        {
+            bool swapped = false;
+            Runtime.RootHook = at =>
+            {
+                if (at == use && !swapped)
+                {
+                    swapped = true;
+                    Directory.Move(cache, cache + "-" + use + "-" + Path.GetFileNameWithoutExtension(source));
+                    Directory.CreateDirectory(cache, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
+            };
+            string message = fake.PrepareFails(source).Message;
+            Runtime.RootHook = null;
+            Assert.That(swapped, Is.True, use + " was never reached");
+            return message;
+        }
+
+        string refused = "cache root " + cache + " was replaced after it was checked; prepare again";
+        foreach (string use in new[] { "stage", "publish", "load", "loaded" })
+        {
+            Assert.That(Swap(use, "cold-" + use + ".jac"), Is.EqualTo(refused), "cold " + use);
+        }
+
+        foreach (string use in new[] { "load", "loaded" })
+        {
+            string source = "warm-" + use + ".jac";
+            fake.Runtime.Prepare(new[] { fake.Source(source) }, fake.Options);
+            Assert.That(Swap(use, source), Is.EqualTo(refused), "warm " + use);
+        }
+
+        // Unswapped, the same root is used.
+        fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, fake.Options);
+    }
+
+    /// <summary>
+    /// The executable Core runs must be the one fingerprinted: a test seam
+    /// replaces it (a new file renamed over it) after each kind of Core
+    /// command, and the preparation is refused instead of keying artifacts
+    /// made by other bytes under the old fingerprint.
+    /// </summary>
+    [Test]
+    public void AnExecutableReplacedDuringPreparationIsRefused()
+    {
+        using FakeCore fake = FakeCore.Programs(At("swap"));
+        string script = File.ReadAllText(fake.Binary);
+        foreach (string after in new[] { "--version", "check", "hash", "run" })
+        {
+            bool replaced = false;
+            Runtime.CommandHook = command =>
+            {
+                if (command == after && !replaced)
+                {
+                    replaced = true;
+                    Replace(fake.Binary, script + "# replaced after " + after + "\n");
+                }
+            };
+            string message = fake.PrepareFails("rules" + after.Trim('-') + ".jac").Message;
+            Assert.That(replaced, Is.True, after + " never ran");
+            Assert.That(message, Is.EqualTo(ChangedMessage("Core executable", fake.Binary)), "after " + after);
+            Assert.That(
+                Directory.Exists(Path.Combine(fake.Root, "cache")) ? fake.CacheEntries() : new List<string>(),
+                Is.Empty,
+                "an entry was published or a staging directory left after " + after);
+        }
+
+        Runtime.CommandHook = null;
+        fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, fake.Options);
+    }
+
+    /// <summary>
+    /// The prelude Core reads must be the one fingerprinted: a prelude file
+    /// rewritten in place, or a file added to the prelude directory, while
+    /// the preparation runs is refused.
+    /// </summary>
+    [Test]
+    public void APreludeChangedDuringPreparationIsRefused()
+    {
+        using FakeCore fake = FakeCore.Programs(At("prelude-swap"));
+        string prelude = Path.Combine(fake.Root, "prelude");
+        string file = Path.Combine(prelude, "01-prim.jqd");
+        Runtime.CommandHook = command =>
+        {
+            if (command == "check")
+            {
+                File.AppendAllText(file, "changed\n");
+            }
+        };
+        Assert.That(fake.PrepareFails("first.jac").Message, Is.EqualTo(ChangedMessage("prelude entry", file)));
+        Runtime.CommandHook = command =>
+        {
+            if (command == "run" && !File.Exists(Path.Combine(prelude, "added.jqd")))
+            {
+                File.WriteAllText(Path.Combine(prelude, "added.jqd"), "added\n");
+            }
+        };
+        Assert.That(fake.PrepareFails("second.jac").Message, Is.EqualTo(ChangedMessage("prelude", prelude)));
+        Runtime.CommandHook = null;
+        fake.Runtime.Prepare(new[] { fake.Source("third.jac") }, fake.Options);
+    }
+
+    /// <summary>
+    /// The version check runs once per executable fingerprint, which
+    /// includes the file's identity: the same bytes with a new modification
+    /// time (as a replaced file restored would have) are checked again.
+    /// </summary>
+    [Test]
+    public void TheVersionCheckIsKeyedOnTheExecutablesIdentity()
+    {
+        using FakeCore fake = FakeCore.Programs(At("version-key"));
+        fake.Runtime.Prepare(new[] { fake.Source("one.jac") }, fake.Options);
+        fake.Runtime.Prepare(new[] { fake.Source("two.jac") }, fake.Options);
+        Assert.That(fake.Calls("--version"), Is.EqualTo(1));
+        File.SetLastWriteTimeUtc(fake.Binary, File.GetLastWriteTimeUtc(fake.Binary).AddSeconds(-10));
+        fake.Runtime.Prepare(new[] { fake.Source("three.jac") }, fake.Options);
+        Assert.That(fake.Calls("--version"), Is.EqualTo(2));
+    }
+
 }

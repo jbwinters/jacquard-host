@@ -9,8 +9,9 @@ namespace JacquardLang.Host.Sdk;
 /// The C library calls the SDK makes beyond the carrier's <c>poll(2)</c>:
 /// <c>kill(2)</c> to stop a Core command's process group, <c>geteuid(2)</c>
 /// and a status call (<c>statx(2)</c> on Linux, <c>stat(2)</c> and
-/// <c>lstat(2)</c> on macOS) for the cache's owner check and for file kinds
-/// and sizes, and <c>mkdir(2)</c> to create a staging directory exclusively.
+/// <c>lstat(2)</c> on macOS) for the cache's owner check, for file kinds and
+/// sizes, and for the identities that detect a replaced file, and
+/// <c>mkdir(2)</c> to create a staging directory exclusively.
 /// </summary>
 /// <remarks>
 /// The macOS calls use the 64-bit-inode <c>struct stat</c> layout; they are
@@ -42,8 +43,23 @@ internal static partial class Unix
         Other,
     }
 
-    /// <summary>What the status call reports: the kind, size, owner, and permission bits.</summary>
-    internal readonly record struct Status(Kind Kind, long Size, uint Owner, int Mode);
+    /// <summary>
+    /// What the status call reports: the kind, size, owner, and permission
+    /// bits, and the file's identity: its device and inode, and its
+    /// modification and status-change times in nanoseconds.
+    /// </summary>
+    internal readonly record struct Status(Kind Kind, long Size, uint Owner, int Mode, ulong Device = 0, ulong Inode = 0, long Modified = 0, long Changed = 0)
+    {
+        /// <summary>
+        /// Whether <paramref name="other"/> describes the same file in the
+        /// same state: kind, device, inode, size, mode, owner, and both times.
+        /// Replacing the file changes its inode; writing it, renaming it, or
+        /// changing its mode or owner changes its status-change time.
+        /// </summary>
+        internal bool SameFile(Status other) =>
+            Kind == other.Kind && Device == other.Device && Inode == other.Inode && Size == other.Size
+            && Mode == other.Mode && Owner == other.Owner && Modified == other.Modified && Changed == other.Changed;
+    }
 
     [LibraryImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static partial int NativeKill(int pid, int signal);
@@ -129,6 +145,10 @@ internal static partial class Unix
         int modeOffset;
         int ownerOffset;
         int sizeOffset;
+        ulong device;
+        ulong inode;
+        long modified;
+        long changed;
         if (OperatingSystem.IsMacOS())
         {
             bool arm = RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
@@ -142,6 +162,12 @@ internal static partial class Unix
             modeOffset = 4;
             ownerOffset = 16;
             sizeOffset = 96;
+
+            // st_dev (int32) at 0, st_ino at 8, st_mtimespec at 48, st_ctimespec at 64.
+            device = *(uint*)buffer;
+            inode = *(ulong*)(buffer + 8);
+            modified = Nanoseconds(*(long*)(buffer + 48), *(long*)(buffer + 56));
+            changed = Nanoseconds(*(long*)(buffer + 64), *(long*)(buffer + 72));
         }
         else
         {
@@ -149,6 +175,14 @@ internal static partial class Unix
             modeOffset = 28;
             ownerOffset = 20;
             sizeOffset = 40;
+
+            // stx_ino at 32, stx_ctime at 96, stx_mtime at 112 (each a
+            // 64-bit second and a 32-bit nanosecond), stx_dev_major and
+            // stx_dev_minor at 136 and 140.
+            inode = *(ulong*)(buffer + 32);
+            changed = Nanoseconds(*(long*)(buffer + 96), *(uint*)(buffer + 104));
+            modified = Nanoseconds(*(long*)(buffer + 112), *(uint*)(buffer + 120));
+            device = ((ulong)*(uint*)(buffer + 136) << 32) | *(uint*)(buffer + 140);
         }
 
         if (result != 0)
@@ -172,6 +206,8 @@ internal static partial class Unix
             LinkType => Kind.Link,
             _ => Kind.Other,
         };
-        return new Status(kind, size, owner, mode & 0xFFF);
+        return new Status(kind, size, owner, mode & 0xFFF, device, inode, modified, changed);
     }
+
+    private static long Nanoseconds(long seconds, long nanoseconds) => unchecked((seconds * 1_000_000_000L) + nanoseconds);
 }
