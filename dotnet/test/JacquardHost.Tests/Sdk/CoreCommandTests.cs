@@ -1,0 +1,321 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using JacquardLang.Host.Carrier;
+using JacquardLang.Host.Sdk;
+using NUnit.Framework;
+
+namespace JacquardLang.Host.Tests.Sdk;
+
+/// <summary>
+/// Core commands are bounded: their exit status, bounded output, and added
+/// environment are reported; a timeout or a cancellation kills the command
+/// and its process group; a background child is killed when the command
+/// exits, and an unrelated process holding the output is not; nothing a
+/// descendant holds can hold the caller; and no descriptor is left behind.
+/// </summary>
+[TestFixture]
+[Platform("Linux")]
+public sealed class CoreCommandTests
+{
+    private static readonly TimeSpan Minute = TimeSpan.FromMinutes(1);
+    private string root = string.Empty;
+
+    [SetUp]
+    public void Prepare() => root = SdkSupport.Scratch("command");
+
+    [TearDown]
+    public void CleanUp()
+    {
+        CoreCommand.WithoutGroups = false;
+        CoreCommand.RecordDescendants = true;
+        CoreCommand.RecordedHook = null;
+        CoreCommand.StartedHook = null;
+        CoreCommand.ExitedHook = null;
+        CoreCommand.KillGroupAtExit = true;
+        CoreCommand.KillGroupOnStop = true;
+        foreach (string file in Directory.EnumerateFiles(root, "*.pid"))
+        {
+            Support.Kill(int.Parse(File.ReadAllText(file).Trim(), CultureInfo.InvariantCulture));
+        }
+
+        SdkSupport.RemoveScratch(root);
+    }
+
+    private static bool HasSetsid => CoreCommand.Setsid is not null;
+
+    private string PidPath(string name) => Path.Combine(root, name + ".pid");
+
+    private static CoreCommand.Output Run(string script, TimeSpan? timeout = null, CancellationToken cancellationToken = default, int stdoutLimit = 1 << 20, int stderrLimit = 4096) =>
+        CoreCommand.Run(SdkSupport.Sh(script), null, timeout ?? Minute, stdoutLimit, stderrLimit, cancellationToken);
+
+    [Test]
+    public void TheExitStatusOutputAndAddedEnvironmentAreReported()
+    {
+        CoreCommand.Output output = CoreCommand.Run(
+            SdkSupport.Sh("echo out; echo err >&2; echo \"$JQ_ADDED\"; exit 3"),
+            new Dictionary<string, string> { ["JQ_ADDED"] = "added" },
+            Minute,
+            1 << 20,
+            4096,
+            default);
+        Assert.That(output.ExitStatus, Is.EqualTo(3));
+        Assert.That(SdkSupport.Text(output.Stdout), Is.EqualTo("out\nadded\n"));
+        Assert.That(SdkSupport.Text(output.Stderr), Is.EqualTo("err\n"));
+        Assert.That(output.StdoutOverflow, Is.False);
+
+        // The command's stdin reads end of file at once.
+        Assert.That(SdkSupport.Text(Run("cat; echo done").Stdout), Is.EqualTo("done\n"));
+    }
+
+    [Test]
+    public void OutputBeyondTheLimitsIsReadAndCountedButNotKept()
+    {
+        CoreCommand.Output output = Run("head -c 3000000 /dev/zero; head -c 100000 /dev/zero >&2", stdoutLimit: 1000, stderrLimit: 10);
+        Assert.That(output.ExitStatus, Is.EqualTo(0));
+        Assert.That(output.Stdout, Has.Length.EqualTo(1000));
+        Assert.That(output.StdoutOverflow, Is.True);
+        Assert.That(output.Stderr, Has.Length.EqualTo(10));
+    }
+
+    [Test]
+    public void ACommandThatDoesNotExitInTimeIsKilledWithItsChild()
+    {
+        CarrierException error = Support.Throws<CarrierException>(() =>
+            Run("sleep 300 & echo $! > '" + PidPath("child") + "'; wait", TimeSpan.FromMilliseconds(500)))!;
+        Assert.That(error.IsTimeout, Is.True, error.Message);
+        SdkSupport.Dies("the timed-out command's child", SdkSupport.PidFile(PidPath("child")));
+    }
+
+    [Test]
+    public void CancellationKillsTheCommandAndItsChild()
+    {
+        using var cancel = new CancellationTokenSource();
+        Thread canceller = Support.After(TimeSpan.Zero, () =>
+        {
+            SdkSupport.PidFile(PidPath("child"));
+            cancel.Cancel();
+        });
+        CarrierException error = Support.Throws<CarrierException>(() =>
+            Run("sleep 300 & echo $! > '" + PidPath("child") + "'; wait", cancellationToken: cancel.Token))!;
+        Assert.That(error.IsAborted, Is.True, error.Message);
+        SdkSupport.Dies("the cancelled command's child", SdkSupport.PidFile(PidPath("child")));
+        canceller.Join();
+    }
+
+    /// <summary>Under <c>setsid</c> the command keeps its pid (no fork) and leads its own process group.</summary>
+    [Test]
+    public void TheCommandKeepsItsPidAndLeadsItsOwnGroup()
+    {
+        Assume.That(HasSetsid, "no setsid at /usr/bin or /bin");
+        int started = 0;
+        CoreCommand.StartedHook = pid => started = pid;
+        string[] fields = SdkSupport.Text(Run("echo $$; cut -d')' -f2 /proc/$$/stat | cut -d' ' -f4,5").Stdout).Split('\n');
+        Assert.That(int.Parse(fields[0], CultureInfo.InvariantCulture), Is.EqualTo(started), "setsid forked");
+        string[] ids = fields[1].Split(' ');
+        Assert.That(ids, Is.EqualTo(new[] { started.ToString(CultureInfo.InvariantCulture), started.ToString(CultureInfo.InvariantCulture) }), "pgid and sid");
+    }
+
+    /// <summary>
+    /// <c>sh -c 'sleep 300 &amp; echo $!'</c> exits at once, leaving a child
+    /// that holds its output; the group kill at the exit ends it, and the
+    /// command still succeeds, as in Rust. With that kill disabled (a test
+    /// seam) the child survives: the kill is what ends it.
+    /// </summary>
+    [Test]
+    public void ABackgroundChildIsKilledWhenTheCommandExits()
+    {
+        Assume.That(HasSetsid, "no setsid at /usr/bin or /bin");
+        CoreCommand.Output output = Run("sleep 300 & echo $!");
+        Assert.That(output.ExitStatus, Is.EqualTo(0));
+        SdkSupport.Dies("the background child", int.Parse(SdkSupport.Text(output.Stdout).Trim(), CultureInfo.InvariantCulture));
+
+        CoreCommand.KillGroupAtExit = false;
+        output = Run("sleep 300 & echo $!");
+        int survivor = int.Parse(SdkSupport.Text(output.Stdout).Trim(), CultureInfo.InvariantCulture);
+        File.WriteAllText(PidPath("survivor"), survivor + "\n");
+        Assert.That(Support.Alive(survivor), Is.True, "without the exit kill the child should survive");
+    }
+
+    /// <summary>A child that closed its output and keeps running is in the group, so it is killed at the exit too.</summary>
+    [Test]
+    public void ABackgroundChildThatClosedItsOutputIsKilled()
+    {
+        Assume.That(HasSetsid, "no setsid at /usr/bin or /bin");
+        CoreCommand.Output output = Run("sleep 300 </dev/null >/dev/null 2>&1 & echo $! > '" + PidPath("quiet") + "'");
+        Assert.That(output.ExitStatus, Is.EqualTo(0));
+        SdkSupport.Dies("the quiet child", SdkSupport.PidFile(PidPath("quiet")));
+    }
+
+    /// <summary>
+    /// A process outside the command's group that holds the command's
+    /// output is neither killed nor waited for: the command returns, and the
+    /// holder lives on.
+    /// </summary>
+    [Test]
+    public void AnUnrelatedProcessHoldingTheOutputIsNotKilled()
+    {
+        Assume.That(HasSetsid, "no setsid at /usr/bin or /bin");
+        Process? holder = null;
+        CoreCommand.StartedHook = pid =>
+        {
+            // Started by the test, not the command: it opens the command's stdout pipe through /proc.
+            holder = Process.Start(new ProcessStartInfo("/bin/sh", new[] { "-c", "exec sleep 300 >>/proc/" + pid.ToString(CultureInfo.InvariantCulture) + "/fd/1" })
+            {
+                UseShellExecute = false,
+            });
+        };
+        try
+        {
+            CoreCommand.Output output = Support.Within(Minute, () => Run("sleep 0.5; echo done"));
+            Assert.That(SdkSupport.Text(output.Stdout), Is.EqualTo("done\n"));
+            Assert.That(holder, Is.Not.Null);
+            Assert.That(Support.Alive(holder!.Id), Is.True, "an unrelated holder was killed");
+        }
+        finally
+        {
+            if (holder is not null)
+            {
+                Support.Kill(holder.Id);
+                holder.WaitForExit(10_000);
+                holder.Dispose();
+            }
+        }
+    }
+
+    /// <summary>A stop during a long command kills its whole group: a child and a grandchild.</summary>
+    [Test]
+    public void AStopKillsTheWholeGroup()
+    {
+        Assume.That(HasSetsid, "no setsid at /usr/bin or /bin");
+        using var cancel = new CancellationTokenSource();
+        string grandchild = PidPath("grandchild");
+        string child = PidPath("child");
+        Thread canceller = Support.After(TimeSpan.Zero, () =>
+        {
+            SdkSupport.PidFile(grandchild);
+            cancel.Cancel();
+        });
+        Support.Throws<CarrierException>(() => Run(
+            "(sleep 300 & echo $! > '" + grandchild + "'; wait) & echo $! > '" + child + "'; wait",
+            cancellationToken: cancel.Token));
+        canceller.Join();
+        SdkSupport.Dies("the child", SdkSupport.PidFile(child));
+        SdkSupport.Dies("the grandchild", SdkSupport.PidFile(grandchild));
+    }
+
+    /// <summary>
+    /// Without a group (a test seam), a background child recorded while the
+    /// command ran is killed when it exits; with recording off it survives,
+    /// so the recorded kill is what ends it.
+    /// </summary>
+    [Test]
+    public void WithoutGroupsARecordedDescendantIsKilledAtTheExit()
+    {
+        CoreCommand.WithoutGroups = true;
+        var recorded = new List<int>();
+        CoreCommand.RecordedHook = pids =>
+        {
+            lock (recorded)
+            {
+                recorded.Clear();
+                recorded.AddRange(pids);
+            }
+        };
+        string script = "sleep 300 </dev/null >/dev/null 2>&1 & echo $! > '" + PidPath("recorded") + "'; sleep 0.3";
+        Assert.That(Run(script).ExitStatus, Is.EqualTo(0));
+        int pid = SdkSupport.PidFile(PidPath("recorded"));
+        lock (recorded)
+        {
+            Assert.That(recorded, Does.Contain(pid), "the child was never recorded");
+        }
+
+        SdkSupport.Dies("the recorded child", pid);
+
+        CoreCommand.RecordDescendants = false;
+        File.Delete(PidPath("recorded"));
+        Run(script);
+        Assert.That(Support.Alive(SdkSupport.PidFile(PidPath("recorded"))), Is.True, "without recording the child should survive");
+    }
+
+    [Test]
+    public void WithoutGroupsAStopKillsTheCommandAndItsChild()
+    {
+        CoreCommand.WithoutGroups = true;
+        CarrierException error = Support.Throws<CarrierException>(() =>
+            Run("sleep 300 & echo $! > '" + PidPath("child") + "'; wait", TimeSpan.FromMilliseconds(500)))!;
+        Assert.That(error.IsTimeout, Is.True);
+        SdkSupport.Dies("the child", SdkSupport.PidFile(PidPath("child")));
+    }
+
+    /// <summary>A cancellation that lands during the exit cleanup is reported, not the output.</summary>
+    [Test]
+    public void AStopDuringTheExitCleanupIsReported()
+    {
+        using var cancel = new CancellationTokenSource();
+        CoreCommand.ExitedHook = cancel.Cancel;
+        CarrierException error = Support.Throws<CarrierException>(() => Run("echo hi", cancellationToken: cancel.Token))!;
+        Assert.That(error.IsAborted, Is.True);
+    }
+
+    [Test]
+    public void ACommandThatCannotStartIsALoss()
+    {
+        CarrierException error = Support.Throws<CarrierException>(() =>
+            CoreCommand.Run(new[] { Path.Combine(root, "missing") }, null, Minute, 1024, 1024, default))!;
+        Assert.That(error.IsLoss && !error.IsTimeout && !error.IsAborted, Is.True);
+        Assert.That(error.Message, Does.StartWith("could not start "));
+        CoreCommand.WithoutGroups = true;
+        Assert.That(Support.Throws<CarrierException>(() =>
+            CoreCommand.Run(new[] { Path.Combine(root, "missing") }, null, Minute, 1024, 1024, default))!.Message, Does.StartWith("could not start "));
+    }
+
+    /// <summary>An executable <c>setsid</c> cannot exec (its interpreter is missing) is a start failure, not the command's exit status.</summary>
+    [Test]
+    public void ACommandSetsidCannotExecIsALoss()
+    {
+        Assume.That(HasSetsid, "no setsid at /usr/bin or /bin");
+        string broken = Path.Combine(root, "broken");
+        File.WriteAllText(broken, "#!/no/such/interpreter\n");
+        File.SetUnixFileMode(broken, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        CarrierException error = Support.Throws<CarrierException>(() => CoreCommand.Run(new[] { broken }, null, Minute, 1024, 1024, default))!;
+        Assert.That(error.IsLoss, Is.True);
+        Assert.That(error.Message, Does.StartWith("could not start " + broken + " (setsid: "), error.Message);
+    }
+
+    /// <summary>
+    /// A descendant that escapes the group and floods the output holds
+    /// neither the caller nor the heap: the command returns once it exits,
+    /// with at most the kept limit of output.
+    /// </summary>
+    [Test]
+    public void AnEscapedFlooderHoldsNeitherTheCallerNorTheHeap()
+    {
+        string flooder = PidPath("flooder");
+        CoreCommand.Output output = Support.Within(Minute, () =>
+            Run("setsid sh -c 'echo $$ > \"" + flooder + "\"; exec yes' & sleep 0.2", stdoutLimit: 4096));
+        Assert.That(output.Stdout.Length, Is.LessThanOrEqualTo(4096));
+        // It is not the host's to kill (it left the group); its next write
+        // after the host closed the pipe fails, and the test ends it.
+        Support.Kill(SdkSupport.PidFile(flooder));
+    }
+
+    /// <summary>Commands release every descriptor they opened by the time they return (counted at once, with no wait a finalizer could satisfy).</summary>
+    [Test]
+    public void CommandsLeaveNoDescriptorsBehind()
+    {
+        Run("true");
+        int before = Support.Descriptors();
+        for (int i = 0; i < 20; i++)
+        {
+            Run("echo $i; echo e >&2");
+            Support.Throws<CarrierException>(() => Run("sleep 300", TimeSpan.FromMilliseconds(50)));
+        }
+
+        Assert.That(Support.Descriptors(), Is.EqualTo(before));
+    }
+}
