@@ -81,8 +81,16 @@ public sealed class Invocation
 
     /// <summary>
     /// Writes the invocation's frames and host evidence. The record contains
-    /// argument and result values; it is written only when called. A new file
-    /// is created owner-only; an existing file keeps its permissions.
+    /// argument and result values; it is written only when called. The
+    /// record is written to a new file, created exclusively in the target's
+    /// directory, owned by this process's user and owner-only (read and write
+    /// for its owner) where the file system has POSIX permissions; that file
+    /// is then renamed over <paramref name="path"/>. Whatever was at the path
+    /// is replaced, never written through: an existing file's permissions and
+    /// owner are not kept, and a symbolic link there is replaced, not
+    /// followed. The target's directory must be writable; where it is
+    /// sticky (such as <c>/tmp</c>), a file another user owns cannot be
+    /// replaced and the save fails.
     /// </summary>
     /// <exception cref="IOException">The file cannot be written, or the path is longer than any path.</exception>
     /// <exception cref="UnauthorizedAccessException">The file may not be written.</exception>
@@ -116,8 +124,45 @@ public sealed class Invocation
         }
 
         byte[] bytes = Encoding.UTF8.GetBytes(text + "\n");
-        using var stream = new FileStream(path, Core.OwnerOnly(FileMode.Create));
-        stream.Write(bytes);
+        string full = Path.GetFullPath(path);
+        string directory = Path.GetDirectoryName(full) ?? throw new IOException(Identities.Excerpt(path) + " names no file");
+        string temporary = Path.Combine(directory, string.Format(
+            CultureInfo.InvariantCulture,
+            ".jacquard-save-{0}-{1}",
+            Environment.ProcessId,
+            Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8)).ToLowerInvariant()));
+        bool renamed = false;
+        try
+        {
+            using (var stream = new FileStream(temporary, Core.OwnerOnly(FileMode.CreateNew)))
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    // Exactly owner-only, whatever the umask left.
+                    File.SetUnixFileMode(stream.SafeFileHandle, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                }
+
+                stream.Write(bytes);
+            }
+
+            File.Move(temporary, full, overwrite: true);
+            renamed = true;
+        }
+        finally
+        {
+            if (!renamed)
+            {
+                // Only the file this call created exclusively.
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    // Left behind under its distinctive name.
+                }
+            }
+        }
     }
 
     /// <inheritdoc/>

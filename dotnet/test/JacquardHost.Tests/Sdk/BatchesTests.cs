@@ -254,4 +254,38 @@ public sealed class BatchesTests
         Assert.That(Support.Throws<JacquardException>(() => scalar.MapBatches(Codecs.Int, Codecs.Int, Rows(3), 1)).Kind, Is.EqualTo(JacquardErrorKind.Binding));
         Assert.That(Support.Throws<JacquardException>(() => Ints().MapBatches(Codecs.Int, Codecs.Int, Rows(3), 0)).Message, Is.EqualTo("batch size must be positive"));
     }
+
+    /// <summary>
+    /// Save writes a new owner-only file and renames it over the target: an
+    /// existing world-writable file becomes owner-only (0600) with the
+    /// record, a symbolic link at the target is replaced by the file while
+    /// the link's target is left unchanged, and no temporary file is left.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void SaveReplacesTheTargetWithANewOwnerOnlyFile()
+    {
+        Invocation invocation = Ints().Invoke(Argument.Of(Codecs.List(Codecs.Int), new long[] { 1 }));
+        Assert.That(Support.Reason(invocation.Raw), Is.EqualTo("worker_spawn_failed"));
+        const UnixFileMode Open = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.OtherRead | UnixFileMode.OtherWrite;
+        string existing = Path.Combine(root, "existing.json");
+        File.WriteAllText(existing, "old");
+        File.SetUnixFileMode(existing, Open);
+        invocation.Save(existing);
+        Assert.That(File.GetUnixFileMode(existing), Is.EqualTo(UnixFileMode.UserRead | UnixFileMode.UserWrite));
+        Assert.That(File.ReadAllText(existing), Does.StartWith("{").And.EndWith("}\n"));
+
+        string victim = Path.Combine(root, "victim.txt");
+        File.WriteAllText(victim, "keep");
+        File.SetUnixFileMode(victim, Open);
+        string link = Path.Combine(root, "link.json");
+        File.CreateSymbolicLink(link, victim);
+        invocation.Save(link);
+        Assert.That(new FileInfo(link).LinkTarget, Is.Null, "the link was followed");
+        Assert.That(File.GetUnixFileMode(link), Is.EqualTo(UnixFileMode.UserRead | UnixFileMode.UserWrite));
+        Assert.That(File.ReadAllText(link), Is.EqualTo(File.ReadAllText(existing)));
+        Assert.That(File.ReadAllText(victim), Is.EqualTo("keep"));
+        Assert.That(File.GetUnixFileMode(victim), Is.EqualTo(Open));
+        Assert.That(Directory.EnumerateFiles(root).Select(Path.GetFileName), Is.EquivalentTo(new[] { "existing.json", "victim.txt", "link.json" }));
+    }
 }
