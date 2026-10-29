@@ -444,4 +444,67 @@ public sealed class HostTests
         Assert.That(watch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(5)));
         Assert.That(Eventually(() => worker.Signal == "SIGKILL"), Is.True, "the worker was not killed");
     }
+
+    [Test]
+    public void PollTimeoutsAreNeverNegativeNorPastTheDeadline()
+    {
+        // Each poll waits whole milliseconds, at most one slice (5 ms), and
+        // never past the deadline, however far away the deadline is.
+        long now = 1_000;
+        long ms = Stopwatch.Frequency / 1000;
+        foreach (long left in new[] { long.MaxValue - now, Stopwatch.Frequency * 86_400 * 365, Stopwatch.Frequency * 86_400 * 200, 5 * ms, 5 * ms - 1, ms, ms - 1, 1, 0, -1, -Stopwatch.Frequency })
+        {
+            int timeout = Worker.RemainingMs(now + left, now);
+            Assert.That(timeout, Is.InRange(0, 5), "left " + left);
+            Assert.That(timeout * ms, Is.LessThanOrEqualTo(Math.Max(0, left)), "a poll could end after the deadline; left " + left);
+        }
+
+        Assert.That(Worker.RemainingMs(now + Stopwatch.Frequency * 86_400 * 365, now), Is.EqualTo(5));
+        Assert.That(Worker.RemainingMs(now + ms - 1, now), Is.EqualTo(0));
+        foreach (TimeSpan deadline in new[] { TimeSpan.FromDays(365), Worker.MaxDeadline, TimeSpan.MaxValue })
+        {
+            Assert.That(Worker.Expires(now, deadline), Is.GreaterThan(now + (Stopwatch.Frequency * 86_400 * 364)), deadline.ToString());
+        }
+
+        Assert.That(Worker.Expires(long.MaxValue - 10, TimeSpan.MaxValue), Is.EqualTo(long.MaxValue));
+    }
+
+    [Test]
+    public void CancellationEndsAReadUnderTheLongestDeadlines()
+    {
+        // A deadline past about 107 days once overflowed the poll timeout to
+        // a negative value, which waits forever.
+        foreach (TimeSpan deadline in new[] { TimeSpan.FromDays(365), TimeSpan.MaxValue })
+        {
+            using var cancel = new CancellationTokenSource();
+            Worker worker = Worker.Start("unused", Standin("silent", string.Empty, deadline), cancel.Token);
+            try
+            {
+                After(TimeSpan.FromMilliseconds(300), cancel.Cancel);
+                var watch = Stopwatch.StartNew();
+                CarrierException error = Within(TimeSpan.FromSeconds(10), () => Throws<CarrierException>(() => worker.ReadFrame(Hard))!);
+                Assert.That(error.IsAborted, Is.True, deadline + ": " + error.Message);
+                Assert.That(watch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(5)), deadline.ToString());
+            }
+            finally
+            {
+                Within(TimeSpan.FromSeconds(10), () =>
+                {
+                    worker.Dispose();
+                    return true;
+                });
+            }
+        }
+    }
+
+    [Test]
+    public void ALongDeadlineStillEndsAnInvocationAtCancellation()
+    {
+        using var cancel = new CancellationTokenSource();
+        After(TimeSpan.FromMilliseconds(300), cancel.Cancel);
+        var watch = Stopwatch.StartNew();
+        InvocationResult result = Within(TimeSpan.FromSeconds(10), () => InvokeReady(Faulty("silent", TimeSpan.MaxValue), cancel.Token));
+        Assert.That(Reason(result), Is.EqualTo("aborted"), result.ToString());
+        Assert.That(watch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(5)));
+    }
 }

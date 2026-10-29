@@ -108,6 +108,12 @@ public sealed class Worker : IDisposable
         stderrFd = Descriptor(stderr);
     }
 
+    /// <summary>
+    /// The longest lifetime: a longer <see cref="WorkerOptions.Deadline"/>,
+    /// up to <see cref="TimeSpan.MaxValue"/>, is clamped to it (about 73 years).
+    /// </summary>
+    public static TimeSpan MaxDeadline { get; } = TimeSpan.FromDays(73 * 365);
+
     /// <summary>The worker lifetime when <see cref="WorkerOptions.Deadline"/> is null.</summary>
     public static TimeSpan DefaultDeadline { get; } = TimeSpan.FromSeconds(30);
 
@@ -158,9 +164,7 @@ public sealed class Worker : IDisposable
         options.Validate();
         TimeSpan deadline = options.Deadline ?? DefaultDeadline;
 
-        // Clamp to about 73 years so the deadline in timestamp ticks cannot overflow.
-        double ticks = Math.Min(deadline.TotalSeconds, 73 * 365.25 * 86400) * Stopwatch.Frequency;
-        long expires = Stopwatch.GetTimestamp() + (long)ticks;
+        long expires = Expires(Stopwatch.GetTimestamp(), deadline);
         if (!Posix.Supported)
         {
             return Failed(expires, "unsupported platform", "the .NET host runs workers on Linux and macOS only", cancellationToken);
@@ -224,6 +228,17 @@ public sealed class Worker : IDisposable
             process.Dispose();
             return Failed(expires, error.Message, "could not poll the worker's pipes (" + error.Message + ")", cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// The timestamp <paramref name="deadline"/> after <paramref name="now"/>.
+    /// Any positive <see cref="TimeSpan"/> is accepted; the lifetime is
+    /// clamped to <see cref="MaxDeadline"/>, so the sum cannot overflow.
+    /// </summary>
+    internal static long Expires(long now, TimeSpan deadline)
+    {
+        double ticks = Math.Min(deadline.TotalSeconds, MaxDeadline.TotalSeconds) * Stopwatch.Frequency;
+        return ticks >= long.MaxValue - now ? long.MaxValue : now + (long)ticks;
     }
 
     private static int Descriptor(Stream stream) =>
@@ -331,16 +346,26 @@ public sealed class Worker : IDisposable
         }
     }
 
-    private static int RemainingMs(long expires)
+    /// <summary>
+    /// The poll timeout: whole milliseconds left before the deadline, rounded
+    /// down so a poll never ends after it, and at most one slice. It is
+    /// capped in timestamp ticks before any multiplication, so a long
+    /// deadline cannot overflow into a negative (infinite) poll timeout.
+    /// </summary>
+    internal static int RemainingMs(long expires, long now)
     {
-        long left = expires - Stopwatch.GetTimestamp();
+        long left = expires - now;
         if (left <= 0)
         {
             return 0;
         }
 
-        long ms = (left * 1000 / Stopwatch.Frequency) + 1;
-        return (int)Math.Min(ms, PollSliceMs);
+        if (left >= PollSliceMs * Stopwatch.Frequency / 1000)
+        {
+            return PollSliceMs;
+        }
+
+        return (int)(left * 1000 / Stopwatch.Frequency);
     }
 
     /// <summary>
@@ -363,7 +388,7 @@ public sealed class Worker : IDisposable
             fds[count++] = new Posix.PollFd { Fd = stderrFd, Events = Posix.PollIn };
         }
 
-        int timeout = RemainingMs(expires);
+        int timeout = RemainingMs(expires, Stopwatch.GetTimestamp());
         if (count == 0)
         {
             Thread.Sleep(timeout);
@@ -649,7 +674,8 @@ public sealed class Worker : IDisposable
     }
 
     /// <summary>The time left in the lifetime, or zero.</summary>
-    internal TimeSpan Remaining => TimeSpan.FromSeconds(Math.Max(0, expires - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
+    internal TimeSpan Remaining =>
+        TimeSpan.FromSeconds(Math.Min(Math.Max(0, expires - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency, MaxDeadline.TotalSeconds));
 
     /// <summary>Closes the worker's stdin. Nothing is writing, so this never blocks.</summary>
     public void CloseInput()

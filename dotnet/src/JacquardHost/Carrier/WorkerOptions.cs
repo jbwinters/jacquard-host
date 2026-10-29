@@ -32,7 +32,9 @@ public sealed record WorkerOptions
 
     /// <summary>
     /// Bounds the whole lifetime: spawn, pipes, handlers, and exit; null
-    /// means <see cref="Worker.DefaultDeadline"/>.
+    /// means <see cref="Worker.DefaultDeadline"/>. Any positive value up to
+    /// <see cref="TimeSpan.MaxValue"/> is accepted; a value above
+    /// <see cref="Worker.MaxDeadline"/> is clamped to it.
     /// </summary>
     public TimeSpan? Deadline { get; init; }
 

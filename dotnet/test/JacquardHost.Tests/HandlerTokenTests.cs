@@ -205,4 +205,23 @@ public sealed class HandlerTokenTests
         Thread.Sleep(1000);
         Assert.Pass("the process survived the callback's exception");
     }
+
+    [Test]
+    public void AHandlerTokenUnderAYearLongDeadlineIsCancelledByTheCaller()
+    {
+        // A lifetime longer than any single timer wait: the token still
+        // works, and the caller's cancellation ends the call promptly.
+        using var cancel = new CancellationTokenSource();
+        bool sawCancelled = false;
+        var watch = Stopwatch.StartNew();
+        InvocationResult result = Within(TimeSpan.FromSeconds(15), () => InvokeEcho(Replaying("one-once-effect-success", TimeSpan.FromDays(365)), (context, args) =>
+        {
+            cancel.CancelAfter(300);
+            sawCancelled = context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));
+            return new TextValue("late");
+        }, cancel.Token));
+        Assert.That(Reason(result), Is.EqualTo("aborted"), result.ToString());
+        Assert.That(watch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(5)));
+        Assert.That(Eventually(() => Volatile.Read(ref sawCancelled), TimeSpan.FromSeconds(5)), Is.True, "the handler's token was not cancelled");
+    }
 }
