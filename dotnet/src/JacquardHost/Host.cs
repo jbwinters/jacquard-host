@@ -86,6 +86,12 @@ public sealed class Host
     internal static volatile Action? HandlerCheckHook;
 
     /// <summary>
+    /// Test seam: maps the lifetime left to the delay of the handlers' token
+    /// timer, so a test can make the timer fire early. Null outside tests.
+    /// </summary>
+    internal static volatile Func<TimeSpan, TimeSpan>? HandlerTimerHook;
+
+    /// <summary>
     /// Runs <paramref name="target"/> with <paramref name="args"/>. The invoke
     /// frame is validated before a worker starts. Cancelling
     /// <paramref name="cancellationToken"/> kills the worker; nothing is
@@ -400,6 +406,16 @@ public sealed class Host
                 }
 
                 answer = RunHandler(handler, request.Arguments);
+
+                // A cancelled handler token means the call is stopping. Its
+                // deadline timer may fire a moment before the worker's clock
+                // reaches the deadline, and a handler that returned on it must
+                // not have its answer sent: wait for the worker to report the
+                // stop (at most that moment), which throws.
+                if (handlerStop is { IsCancellationRequested: true })
+                {
+                    Worker.Await(static () => false);
+                }
             }
 
             CarrierException? fault = Worker.Fault();
@@ -472,10 +488,10 @@ public sealed class Host
                 handlerStop = new CancellationTokenSource();
                 // A timer cannot wait longer than about 24 days; IsCancelled
                 // sees a later deadline exactly in any case.
-                TimeSpan remaining = Worker.Remaining;
-                if (remaining <= TimeSpan.FromMilliseconds(int.MaxValue))
+                TimeSpan remaining = HandlerTimerHook is { } hook ? hook(Worker.Remaining) : Worker.Remaining;
+                if (remaining <= TimeSpan.FromMilliseconds(int.MaxValue - 1))
                 {
-                    handlerStop.CancelAfter(remaining);
+                    handlerStop.CancelAfter(TimeSpan.FromMilliseconds(Math.Ceiling(remaining.TotalMilliseconds)));
                 }
                 callerRegistration = cancellationToken.UnsafeRegister(static state => ((CancellationTokenSource)state!).Cancel(), handlerStop);
             }
