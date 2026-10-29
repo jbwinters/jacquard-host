@@ -8,9 +8,13 @@
     <AssemblyName>JacquardLang.Host.Tests</AssemblyName>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- One test crafts the records libc fills, to check they are read only within their buffer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AnalysisLevel>8.0</AnalysisLevel>
-    <!-- Test names read as sentences. -->
-    <NoWarn>$(NoWarn);CA1707</NoWarn>
+    <!-- Test names read as sentences. The SDK fixtures run on Linux and macOS
+         only (they carry NUnit's Platform attribute), where the Unix file mode
+         APIs they use exist. -->
+    <NoWarn>$(NoWarn);CA1707;CA1416</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,6 +33,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/JacquardHost/JacquardHost.csproj" />
     <ProjectReference Include="../JacquardHost.StandIn/JacquardHost.StandIn.csproj" />
+    <ProjectReference Include="../../examples/JacquardExamples/JacquardExamples.csproj" />
   </ItemGroup>
 
 </Project>

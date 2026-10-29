@@ -146,12 +146,15 @@ fails if they differ).
 
 ## .NET
 
-The independent .NET adapter lives in `dotnet/` as package `JacquardLang.Host`
-(`dotnet/src/JacquardHost`). It targets .NET 8, has no runtime dependencies
-beyond the .NET base class library, and does not call Python, Node.js, Go,
-Rust, or Java; it calls the C library's `poll(2)` and runs workers on Linux
-and macOS only. NUnit, its adapter, and the test SDK are its only (test)
-dependencies. The .NET 8 or 10 SDK is required.
+The independent .NET adapter and SDK live in `dotnet/` as package
+`JacquardLang.Host` (`dotnet/src/JacquardHost`, the SDK in its `Sdk/`
+directory). It targets .NET 8, has no runtime dependencies beyond the .NET base
+class library, and does not call Python, Node.js, Go, Rust, or Java; it calls
+the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`, `mkdir(2)`,
+`statx(2)` or `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, and `lgetxattr(2)`; it also runs `getent passwd`) and runs on Linux and macOS only. On Linux the
+SDK runs Core's commands through util-linux `setsid` when one is installed.
+NUnit, its adapter, and the test SDK are its only (test) dependencies. The
+.NET 8 or 10 SDK is required.
 
 ```sh
 cd dotnet
@@ -159,17 +162,38 @@ dotnet test test/JacquardHost.Tests -f net8.0
 dotnet test test/JacquardHost.Tests -f net10.0   # with a .NET 10 SDK
 # With the pinned Core configured (eval "$(python3 ../scripts/core_pin.py install)"):
 JACQUARD_REQUIRE_LIVE=1 dotnet test test/JacquardHost.Tests -f net8.0
+dotnet build examples/JacquardExamples
+dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll quickstart
 ```
 
-CI runs the offline tests on .NET 8 and 10, and the live tests on both in the
-shared pinned-Core job. The build treats warnings as errors, with nullable
+The example command's program cache is under `dotnet/.scratch/`, and the SDK
+refuses it when another user could write a directory above it: one writable
+by others, or by its group unless that group is your private group (named
+after you, listing no other member, and no other account in the password
+database having it as its primary group; a clone made with a `umask` of 002
+under user-private groups passes). The refusal names every such directory;
+run `chmod go-w` on each, or pass `--workdir` under directories only you or
+root may write.
+
+The SDK tests make their scratch directories under `TMPDIR` when neither a
+group nor another user may write it or any directory above it (unless
+sticky), and otherwise under `/tmp` when that holds, so the refusals they
+expect name only the levels they make; when neither does, they fail asking
+for such a `TMPDIR`.
+
+CI runs the offline tests on .NET 8 and 10, and the live tests on both and the
+four example projects in the shared pinned-Core job. The build treats warnings as errors, with nullable
 reference types and the `8.0-recommended` analyzers.
 `dotnet/src/JacquardHost/Compat.cs` is generated and
 `dotnet/src/JacquardHost/kit/` is a byte copy of the pinned kit.
 `scripts/core_pin.py` maintains both; do not edit them by hand. The
 `JacquardHost.StandIn` program under `dotnet/test/` is a fixture for the
-offline tests. Copy the repository `NOTICE` to `dotnet/NOTICE` when it changes
-(a test fails if they differ).
+offline tests. The `JacquardExamples` command under `dotnet/examples/` reads the
+rules and inputs from `examples/` directly, so there is no copy to keep in
+sync. The README's C# examples are compiled test sources under
+`dotnet/test/JacquardHost.Tests/Readme/` (a test fails if they differ). Copy
+the repository `NOTICE` to `dotnet/NOTICE` when it changes (a test fails if
+they differ).
 
 ## Releasing
 

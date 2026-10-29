@@ -60,7 +60,7 @@ internal static class Support
     }
 
     /// <summary>The dotnet executable that runs the stand-in.</summary>
-    private static string Muxer()
+    internal static string Muxer()
     {
         string? host = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
         if (!string.IsNullOrEmpty(host) && File.Exists(host))

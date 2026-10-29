@@ -213,10 +213,81 @@ jobs:
           dotnet-version: |
             8.0.x
             10.0.x
-      - name: Run independent .NET adapter against Core
+      - name: Run independent .NET adapter and SDK against Core
         run: |
           dotnet test test/JacquardHost.Tests -f net8.0
           dotnet test test/JacquardHost.Tests -f net10.0
         working-directory: dotnet
         env:
           JACQUARD_REQUIRE_LIVE: "1"
+      - name: Run the four example projects through the .NET SDK
+        working-directory: dotnet
+        run: |
+          set -euo pipefail
+          # The SDK refuses a program cache under a directory another user
+          # could write; check $RUNNER_TEMP's ancestry here by the same rule,
+          # so a runner set up otherwise fails clearly rather than inside the
+          # SDK. A group-writable level passes only when its group is the
+          # user's private group: the user's primary group, named as the user,
+          # no other listed member, and no access ACL; and getent passwd
+          # succeeds, prints at most 16 MiB ending in a newline, lists at most
+          # 100,000 well-formed entries with no name twice, lists the user
+          # with that primary group, and lists no account of another uid
+          # with it.
+          me=$(id -un); uid=$(id -u); gid=$(id -g)
+          private=no
+          listing=$(mktemp)
+          trap 'rm -f "$listing"' EXIT
+          passwd_status=0
+          # At most one byte over the cap is kept; a longer listing fails (getent is stopped) and is refused.
+          getent passwd | head -c 16777217 > "$listing" || passwd_status=$?
+          size=$(wc -c < "$listing")
+          group_status=0
+          group_entry=$(getent group "$gid") || group_status=$?
+          if [ "$passwd_status" = 0 ] && [ "$group_status" = 0 ] \
+            && [ "$size" -gt 0 ] && [ "$size" -le 16777216 ] \
+            && [ "$(tail -c 1 "$listing" | od -An -tx1 | tr -d ' \n')" = 0a ] \
+            && awk -F: -v n="$me" -v u="$uid" -v g="$gid" '
+                NF != 7 || $1 == "" || $3 !~ /^(0|[1-9][0-9]*)$/ || $4 !~ /^(0|[1-9][0-9]*)$/ || seen[$1]++ { bad = 1; exit }
+                $1 == n { if ($3 != u || $4 != g) { bad = 1; exit }; listed = 1; next }
+                $4 == g && $3 != u { bad = 1; exit }
+                END { exit (bad || !listed || NR > 100000) }' "$listing" \
+            && [ "$(printf '%s\n' "$group_entry" | cut -d: -f1)" = "$me" ] \
+            && [ -z "$(printf '%s\n' "$group_entry" | cut -d: -f4 | tr , '\n' | grep -vx "$me")" ]; then
+            private=yes
+          fi
+          rm -f "$listing"
+          d=$(realpath "$RUNNER_TEMP")
+          while :; do
+            mode=$(stat -c %a "$d"); owner=$(stat -c %u "$d"); group=$(stat -c %g "$d")
+            bad=
+            if [ "$owner" != "$uid" ] && [ "$owner" != 0 ]; then
+              bad="owned by another user"
+            elif [ $((0$mode & 01000)) = 0 ] && [ $((0$mode & 02)) != 0 ]; then
+              bad="writable by others"
+            elif [ $((0$mode & 01000)) = 0 ] && [ $((0$mode & 020)) != 0 ]; then
+              if [ "$group" != "$gid" ] || [ "$private" != yes ]; then
+                bad="writable by its group, which is not your private group"
+              elif ls -ld "$d" | cut -c11 | grep -q '+'; then
+                bad="writable by its group, with an access control list"
+              fi
+            fi
+            if [ -n "$bad" ]; then
+              echo "::error::$d (mode $mode, owner $owner, group $group) is $bad; the .NET SDK refuses a cache under it" >&2
+              exit 1
+            fi
+            [ "$d" = / ] && break
+            d=$(dirname "$d")
+          done
+          dotnet build examples/JacquardExamples
+          run() { dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll --workdir "$RUNNER_TEMP/dotnet-examples" "$@"; }
+          run quickstart
+          run planner | grep -q '"score": 16'
+          run triage | grep -q '"urgency": "WATCH"'
+          run fulfillment | grep -q '"$tag": "Fulfilled"'
+          run fulfillment | grep -q '"$tag": "DuplicateOrder"'
+          status=0
+          run --workdir "$RUNNER_TEMP/dotnet-recovery" --fault publish-failed fulfillment || status=$?
+          test "$status" = 1
+          run --workdir "$RUNNER_TEMP/dotnet-recovery" --deliver-pending fulfillment | grep -q '{"delivered":1}'
+          run --workdir "$RUNNER_TEMP/dotnet-recovery" --deliver-pending fulfillment | grep -q '{"delivered":0}'

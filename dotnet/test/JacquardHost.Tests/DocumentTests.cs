@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -15,18 +16,26 @@ public sealed class DocumentTests
         typeof(DocumentTests).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>().Single(attribute => attribute.Key == "DotnetRoot").Value!;
 
     [Test]
-    public void TheReadmeExampleIsTheCompiledOne()
+    public void TheReadmeExamplesAreTheCompiledOnes()
     {
-        // The README's example is Readme/Echo.cs, which a live test runs
-        // against Core, minus its namespace line.
+        // The README's examples are the files below under Readme/, in this
+        // order, minus their namespace lines; the live tests run them.
+        string[] sources = { "Shipping.cs", "Incidents.cs", "Documents.cs", "Echo.cs" };
         string readme = File.ReadAllText(Path.Combine(DotnetRoot(), "README.md"));
-        int start = readme.IndexOf("```csharp\n", StringComparison.Ordinal);
-        Assert.That(start, Is.GreaterThanOrEqualTo(0), "README.md has no csharp example");
-        int end = readme.IndexOf("```", start + 10, StringComparison.Ordinal);
-        string example = readme[(start + 10)..end];
-        string source = File.ReadAllText(Path.Combine(DotnetRoot(), "test", "JacquardHost.Tests", "Readme", "Echo.cs"));
-        string body = source[(source.IndexOf('\n', source.IndexOf("namespace ", StringComparison.Ordinal)) + 1)..].TrimStart();
-        Assert.That(example, Is.EqualTo(body), "README.md's example differs from test/JacquardHost.Tests/Readme/Echo.cs");
+        var examples = new List<string>();
+        for (int start = readme.IndexOf("```csharp\n", StringComparison.Ordinal); start >= 0; start = readme.IndexOf("```csharp\n", start + 10, StringComparison.Ordinal))
+        {
+            int end = readme.IndexOf("```", start + 10, StringComparison.Ordinal);
+            examples.Add(readme[(start + 10)..end]);
+        }
+
+        Assert.That(examples, Has.Count.EqualTo(sources.Length), "README.md's csharp examples");
+        for (int i = 0; i < sources.Length; i++)
+        {
+            string source = File.ReadAllText(Path.Combine(DotnetRoot(), "test", "JacquardHost.Tests", "Readme", sources[i]));
+            string body = source[(source.IndexOf('\n', source.IndexOf("namespace ", StringComparison.Ordinal)) + 1)..].TrimStart();
+            Assert.That(examples[i], Is.EqualTo(body), "README.md's example " + (i + 1) + " differs from test/JacquardHost.Tests/Readme/" + sources[i]);
+        }
     }
 
     [Test]

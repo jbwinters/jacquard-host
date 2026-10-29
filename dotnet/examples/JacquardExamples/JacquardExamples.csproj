@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JacquardLang.Host.Examples</RootNamespace>
+    <AssemblyName>JacquardExamples</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <!-- A command, not a library: its own types need no XML documentation. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/JacquardHost/JacquardHost.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -78,8 +78,7 @@
   codecs that parse integers exactly from their text, the session state
   machine, a bounded process carrier for `jacquard host worker`, and a `Host`
   with a closed operation registry. It carries the pinned kit as embedded
-  resources and replays all 21 recordings. It is protocol-level only, with no
-  SDK layer. .NET cannot start the worker in its own process group or
+  resources and replays all 21 recordings. .NET cannot start the worker in its own process group or
   interrupt a pipe read or write, so the carrier never calls one that can
   block: it waits on the C library's `poll(2)` and runs workers on Linux and
   macOS only. It kills the worker's process tree with `Process.Kill(true)`,
@@ -88,6 +87,48 @@
   `scripts/core_pin.py` now generates `dotnet/src/JacquardHost/Compat.cs` and
   keeps the .NET kit copy in sync, and CI runs the offline tests on .NET 8 and
   10 and the live tests against the pinned Core.
+- .NET SDK (`JacquardLang.Host.Sdk`): prepares and caches checked programs
+  with Core's public commands, maps .NET values through explicit `Codec<T>`
+  objects (records through field readers and a constructor function,
+  enumerations, type hierarchies, `Option<T>`, `Unit`, lazy codecs for
+  recursive types, and `Dynamic` for untyped code) without reflection over
+  members (enumeration codecs read `Enum` names and values, and hierarchy
+  codecs check case types with `Type`), binds
+  handlers to exact operation identities with the `HandlerContext` and its
+  `CancellationToken`, checks arguments against the checked signature before a
+  worker starts, and keeps each invocation's raw evidence. `MapBatches` runs
+  explicit batches. There is no `decimal` mapping: money crosses as integer
+  minor units, and `decimal`, `ulong`, `nuint`, `char`, `float`, and the
+  other numeric types with no Jacquard type do not compile as arguments.
+  Caller names over 4,096 chars are refused before they are looked up.
+  Core's commands run on the caller's thread through `poll(2)`, bounded in
+  time and output, and on Linux through `setsid`, whose process group is
+  killed when a command exits or is stopped; without `setsid`, descendants
+  are recorded from `/proc` within entry and byte caps, and on a stop Core
+  is frozen with `SIGSTOP` before the last record and the cleanup ends
+  within 750 ms. Only the cache's owner may write it: the root, each entry,
+  and each file must be owned by the current user and not group- or
+  world-writable, every directory above the root must be owned by the user
+  or root and not group- or world-writable unless it is sticky or the group
+  is the user's private group (Debian OpenSSH's rule, which looks for
+  another account with that primary group in the password database, listed
+  here by `getent passwd` in a separate process, with it and the `setsid`
+  it runs through root's alone, at most once per preparation or save,
+  limited to 5 seconds (then stopped within 750 ms) and 16 MiB, stopped by
+  the token, and refused on any failure or malformed entry; with stricter conditions, so a clone made with a `umask` of 002
+  under user-private groups is accepted), a refusal names
+  every such directory and creates nothing, and the root's device and inode
+  are checked again before each use, each worker a prepared program starts
+  included. Replacement by the same user is not covered.
+  Every binding is derived again from Core's cached output on load, and a
+  preparation during which the Core executable or prelude changed is
+  refused. `Invocation.Save` refuses a target directory another user could
+  write, by the same directory rule, writes a new owner-only file through one
+  exclusively created handle, flushes it, checks the file at its path is the
+  one written, and renames it over the target.
+  The four example projects run through a `JacquardExamples` command in
+  `dotnet/examples/`, and CI runs them and the SDK's live tests against the
+  pinned Core.
 
 ## 0.2.0 — 2026-10-25
 
