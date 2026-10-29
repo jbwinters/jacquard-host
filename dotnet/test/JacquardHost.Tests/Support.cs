@@ -243,8 +243,37 @@ internal static class Support
         return value!;
     }
 
-    /// <summary>Open descriptors of this process (Linux).</summary>
-    internal static int Descriptors() => Directory.GetFiles("/proc/self/fd").Length;
+    /// <summary>
+    /// Open descriptors of this process (Linux), except those on assembly
+    /// files: the runtime opens an assembly when it first loads it, which
+    /// can happen in the middle of a test (for example when tiered
+    /// compilation recompiles a method), and keeps it open. The adapter opens
+    /// no assembly files.
+    /// </summary>
+    internal static int Descriptors()
+    {
+        int count = 0;
+        foreach (string fd in Directory.GetFiles("/proc/self/fd"))
+        {
+            string? target;
+            try
+            {
+                target = new FileInfo(fd).LinkTarget;
+            }
+            catch (IOException)
+            {
+                // Closed while it was listed.
+                continue;
+            }
+
+            if (target is null || !target.EndsWith(".dll", StringComparison.Ordinal))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
 
     /// <summary>Live threads of this process named by the adapter (Linux, names truncated to 15 bytes).</summary>
     internal static int AdapterThreads()
