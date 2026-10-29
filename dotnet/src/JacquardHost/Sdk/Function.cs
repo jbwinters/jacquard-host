@@ -19,9 +19,11 @@ public sealed class Function
     private readonly Hash target;
     private readonly OperationRegistry registry;
     private readonly Host host;
+    private readonly Action? rootCheck;
 
-    internal Function(string name, CallInterface signature, Hash target, OperationRegistry registry, Host host, ProgramData data)
+    internal Function(string name, CallInterface signature, Hash target, OperationRegistry registry, Host host, ProgramData data, Action? rootCheck = null)
     {
+        this.rootCheck = rootCheck;
         Name = name;
         Signature = signature;
         this.target = target;
@@ -123,8 +125,20 @@ public sealed class Function
         return values;
     }
 
-    private Invocation Run(List<Value> values, CancellationToken cancellationToken) =>
-        new(host.Invoke(target, Signature, values, registry, cancellationToken), this);
+    /// <summary>
+    /// Runs one worker on the prepared store, by its path, once the cache
+    /// root is checked to be the directory that was prepared (a cancelled
+    /// call starts no worker and is reported as aborted, as before).
+    /// </summary>
+    private Invocation Run(List<Value> values, CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.IsCancellationRequested)
+        {
+            rootCheck?.Invoke();
+        }
+
+        return new(host.Invoke(target, Signature, values, registry, cancellationToken), this);
+    }
 
     /// <summary>
     /// Validates the arguments locally, then runs one worker. The exception

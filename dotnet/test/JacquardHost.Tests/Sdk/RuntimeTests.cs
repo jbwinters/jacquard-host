@@ -815,6 +815,87 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// No other user may write a directory above the cache root, so none can
+    /// rename the root away and put another directory at its path: a parent
+    /// that its group or others may write is refused, naming it, unless it
+    /// has the sticky bit (in which only an entry's owner may rename it).
+    /// Links in the root's path are resolved once, so the mode of a link
+    /// itself (always 0777) does not matter and its target is checked.
+    /// </summary>
+    [Test]
+    public void ACacheParentOthersMayWriteIsRefusedUnlessItIsSticky()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute).FullName;
+        var options = new PrepareOptions { CacheDir = Path.Combine(parent, "cache") };
+        string Refused(UnixFileMode mode)
+        {
+            File.SetUnixFileMode(parent, mode);
+            return Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options))!.Message;
+        }
+
+        const UnixFileMode Owner = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        string expected = "cache directory parent " + parent + " is group- or world-writable without the sticky bit,"
+            + " so another user could replace the cache (make it, for example, chmod go-w " + parent + ")";
+        Assert.That(Refused(Owner | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute), Is.EqualTo(expected), "others may write");
+        Assert.That(Refused(Owner | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute), Is.EqualTo(expected), "the group may write");
+
+        // A grandparent is checked as well.
+        string nested = Directory.CreateDirectory(Path.Combine(parent, "nested"), Owner).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1FF);
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = Path.Combine(nested, "cache") }))!.Message,
+            Is.EqualTo(expected));
+
+        // Sticky and world-writable, as /tmp is: accepted.
+        File.SetUnixFileMode(parent, (UnixFileMode)0x3FF);
+        Assert.That(fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options).Directory, Does.StartWith(Path.Combine(parent, "cache") + "/"));
+        File.SetUnixFileMode(parent, Owner | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options);
+
+        // Through a link (mode 0777) to the parent: the real path is used.
+        string link = At("link");
+        File.CreateSymbolicLink(link, parent);
+        PreparedProgram linked = fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = Path.Combine(link, "cache") });
+        Assert.That(linked.Directory, Does.StartWith(Path.Combine(parent, "cache") + "/"));
+    }
+
+    /// <summary>
+    /// A prepared program's workers run on its store by path, so the cache
+    /// root's device and inode are checked again before each worker starts.
+    /// After preparation the root is renamed away and back (the same
+    /// directory: calls still start a worker), then renamed away and
+    /// replaced by a new owner-only directory, as another user who could
+    /// write a parent could: the next call is refused before any worker
+    /// starts, for a function bound before the swap and one bound after it.
+    /// </summary>
+    [Test]
+    public void ACacheRootReplacedAfterPreparationIsRefusedAtTheNextCall()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string cache = Path.GetFullPath(fake.Options.CacheDir!);
+        PreparedProgram program = fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, fake.Options);
+        Function before = program.Function("first");
+        long Workers() => File.ReadAllLines(Path.Combine(fake.Root, "log")).Length;
+
+        long started = Workers();
+        Assert.That(before.Invoke().Ok, Is.False, "the fake worker answers nothing");
+        Assert.That(Workers(), Is.EqualTo(started + 1), "a worker started");
+
+        Directory.Move(cache, cache + "-away");
+        Directory.Move(cache + "-away", cache);
+        before.Invoke();
+        Assert.That(Workers(), Is.EqualTo(started + 2), "the same root renamed back is used");
+
+        Directory.Move(cache, cache + "-away");
+        Directory.CreateDirectory(cache, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        string refused = "cache root " + cache + " was replaced after it was checked; prepare again";
+        Assert.That(Support.Throws<JacquardException>(() => before.Invoke())!.Message, Is.EqualTo(refused));
+        Assert.That(Support.Throws<JacquardException>(() => program.Function("second").Invoke())!.Message, Is.EqualTo(refused));
+        Assert.That(Workers(), Is.EqualTo(started + 2), "no worker started from the replacement");
+    }
+
+    /// <summary>
     /// The executable Core runs must be the one fingerprinted: a test seam
     /// replaces it (a new file renamed over it) after each kind of Core
     /// command, and the preparation is refused instead of keying artifacts

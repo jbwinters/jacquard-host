@@ -581,4 +581,50 @@ internal static class Core
 
         return status;
     }
+
+    /// <summary>
+    /// Refuses the cache root <paramref name="root"/>, a real path with no
+    /// links in it, unless every directory above it, up to <c>/</c>, is owned
+    /// by this user or by root, and neither its group nor others may write it
+    /// unless it has the sticky bit (as OpenSSH checks the directories above
+    /// its configuration). Otherwise another user could rename the root away
+    /// and put another directory at its path at any time, and every later
+    /// use of the path, a prepared program's workers included, would use it.
+    /// In a sticky directory only the owner of an entry (or root) may rename
+    /// it, and the next directory down is checked in turn.
+    /// </summary>
+    /// <exception cref="JacquardException">A preparation failure naming the directory.</exception>
+    internal static void CheckAncestors(string root)
+    {
+        if (!Unix.Supported)
+        {
+            return;
+        }
+
+        uint user = Unix.EffectiveUser();
+        string? directory = Path.GetDirectoryName(root);
+        while (directory is not null)
+        {
+            Unix.Status status = StatOrFail(directory, follow: false, "cannot read ");
+            if (status.Kind != Unix.Kind.Directory)
+            {
+                throw JacquardException.Preparation("cache directory parent " + directory + " is not a directory");
+            }
+
+            if (status.Owner != user && status.Owner != 0)
+            {
+                throw JacquardException.Preparation("cache directory parent " + directory + " is owned by another user, who could replace the cache;"
+                    + " keep the cache under directories owned by you or root");
+            }
+
+            // 0o022: group or other write; 0o1000: sticky.
+            if ((status.Mode & 0x12) != 0 && (status.Mode & 0x200) == 0)
+            {
+                throw JacquardException.Preparation("cache directory parent " + directory + " is group- or world-writable without the sticky bit,"
+                    + " so another user could replace the cache (make it, for example, chmod go-w " + directory + ")");
+            }
+
+            directory = Path.GetDirectoryName(directory);
+        }
+    }
 }

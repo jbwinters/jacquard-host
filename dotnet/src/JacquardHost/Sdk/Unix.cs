@@ -12,8 +12,9 @@ namespace JacquardLang.Host.Sdk;
 /// and a status call (<c>statx(2)</c> on Linux, <c>stat(2)</c> and
 /// <c>lstat(2)</c> on macOS) for the cache's owner check, for file kinds and
 /// sizes, and for the identities that detect a replaced file,
-/// <c>access(2)</c> for the execute permission, and <c>mkdir(2)</c> to
-/// create a staging directory exclusively.
+/// <c>access(2)</c> for the execute permission, <c>mkdir(2)</c> to
+/// create a staging directory exclusively, and <c>realpath(3)</c> to resolve
+/// the cache root's path once.
 /// </summary>
 /// <remarks>
 /// The macOS calls use the 64-bit-inode <c>struct stat</c> layout; they are
@@ -75,6 +76,12 @@ internal static partial class Unix
     [LibraryImport("libc", EntryPoint = "access", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int NativeAccess(string path, int mode);
 
+    [LibraryImport("libc", EntryPoint = "realpath", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial IntPtr NativeRealpath(string path, IntPtr resolved);
+
+    [LibraryImport("libc", EntryPoint = "free")]
+    private static partial void NativeFree(IntPtr pointer);
+
     [LibraryImport("libc", EntryPoint = "mkdir", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int NativeMkdir(string path, uint mode);
 
@@ -132,6 +139,29 @@ internal static partial class Unix
 
     /// <summary>Whether this process may execute <paramref name="path"/>, as <c>access(path, X_OK)</c> reports.</summary>
     internal static bool MayExecute(string path) => NativeAccess(path, 1) == 0;
+
+    /// <summary>
+    /// The absolute path of <paramref name="path"/> with every symbolic link,
+    /// <c>.</c>, and <c>..</c> resolved, as <c>realpath(3)</c> reports it.
+    /// </summary>
+    /// <exception cref="IOException">The path cannot be resolved.</exception>
+    internal static string RealPath(string path)
+    {
+        IntPtr resolved = NativeRealpath(path, IntPtr.Zero);
+        if (resolved == IntPtr.Zero)
+        {
+            throw new IOException("realpath failed with errno " + Marshal.GetLastPInvokeError().ToString(CultureInfo.InvariantCulture));
+        }
+
+        try
+        {
+            return Marshal.PtrToStringUTF8(resolved) ?? throw new IOException("realpath returned no path");
+        }
+        finally
+        {
+            NativeFree(resolved);
+        }
+    }
 
     /// <summary>Creates <paramref name="path"/> with <paramref name="mode"/>; false when it already exists.</summary>
     /// <exception cref="IOException">The directory cannot be created for another reason.</exception>

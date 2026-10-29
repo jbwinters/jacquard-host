@@ -29,8 +29,9 @@ public sealed class PreparedProgram
     private Host host;
 
     [SuppressMessage("Design", "CA1031", Justification = "No exception from reading one signature may fail the preparation; the function is left unbound with the reason.")]
-    internal PreparedProgram(Runtime runtime, string directory, Runtime.Bindings bindings, string executable)
+    internal PreparedProgram(Runtime runtime, string directory, Runtime.Bindings bindings, string executable, Action rootCheck)
     {
+        RootCheck = rootCheck;
         Runtime = runtime;
         Directory = directory;
         var names = new Dictionary<string, Hash>(StringComparer.Ordinal);
@@ -100,6 +101,9 @@ public sealed class PreparedProgram
 
         Data = new ProgramData(names, constructors, bindings.Groups, runtime.Limits);
     }
+
+    /// <summary>Refuses a call once the cache root is no longer the directory that was checked.</summary>
+    internal Action RootCheck { get; }
 
     private sealed record EffectGroup(Hash Identity, IReadOnlyList<Identities.Entry> Operations);
 
@@ -309,7 +313,7 @@ public sealed class PreparedProgram
                     + ". Bind every operation in each declared effect before calling");
             }
 
-            return new Function(name, signature, target, registry, host, Data);
+            return new Function(name, signature, target, registry, host, Data, RootCheck);
         }
     }
 

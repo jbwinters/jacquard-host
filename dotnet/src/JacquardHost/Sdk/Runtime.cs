@@ -140,7 +140,8 @@ public sealed class Runtime
     /// <summary>
     /// Test seam: runs just before the cache root's identity is checked
     /// again, with the use that follows: <c>stage</c>, <c>publish</c>,
-    /// <c>load</c>, or <c>loaded</c>. Null outside tests.
+    /// <c>load</c>, <c>loaded</c>, or <c>call</c> (a prepared program's
+    /// worker start). Null outside tests.
     /// </summary>
     internal static volatile Action<string>? RootHook;
 
@@ -153,9 +154,10 @@ public sealed class Runtime
     }
 
     /// <summary>
-    /// Refuses the preparation unless the cache root at <paramref name="cache"/>
-    /// is still the directory that was checked (the same device and inode),
-    /// so a root renamed away and replaced after the check is not used.
+    /// Refuses the preparation, or a prepared program's call, unless the
+    /// cache root at <paramref name="cache"/> is still the directory that was
+    /// checked (the same device and inode), so a root renamed away and
+    /// replaced after the check is not used.
     /// </summary>
     private static void SameRoot(string cache, Unix.Status pinned, string use)
     {
@@ -489,9 +491,10 @@ public sealed class Runtime
                 Directory.CreateDirectory(configured, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
-            // A symbolic link at the cache root is followed once, here; the
-            // directory it names is checked, and nothing inside is followed.
-            cache = new DirectoryInfo(configured).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? configured;
+            // Every symbolic link in the cache root's path is resolved once,
+            // here, and the real directory is checked and used from then on;
+            // nothing inside it is followed.
+            cache = Unix.Supported ? Unix.RealPath(configured) : new DirectoryInfo(configured).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? configured;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -501,10 +504,12 @@ public sealed class Runtime
         string directory = Path.Combine(cache, Core.MapDigest(identity));
 
         // Only the cache's owner may write it; nothing inside it can resist
-        // someone else who may. The root is used by its path, so its
-        // identity is checked again before each use: another user who may
-        // write its parent could otherwise replace it after this check.
+        // someone else who may. The root is used by its path, so no other
+        // user may write a directory above it (one who could would rename it
+        // away and put another directory there), and its identity is checked
+        // again before each use, a prepared program's worker starts included.
         Unix.Status root = Core.Check(cache, Core.Access.OwnerOnly);
+        Core.CheckAncestors(cache);
         if (Unix.Stat(directory, follow: false).Kind != Unix.Kind.Missing)
         {
             Core.Unchanged(pins, cancellationToken);
@@ -864,7 +869,7 @@ public sealed class Runtime
         // What was read came from the root that was checked.
         SameRoot(cache, root, "loaded");
 
-        var program = new PreparedProgram(this, directory, metadata.Bindings, executable);
+        var program = new PreparedProgram(this, directory, metadata.Bindings, executable, () => SameRoot(cache, root, "call"));
         LoadedHook?.Invoke();
         return program;
     }

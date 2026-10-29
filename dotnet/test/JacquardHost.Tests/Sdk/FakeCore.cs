@@ -43,6 +43,9 @@ internal sealed class FakeCore : IDisposable
     /// </summary>
     internal static FakeCore Create(string root, string version, string? versionCase, string cases)
     {
+        // Owner-only whatever the umask: the cache under it must have no parent others may write.
+        Directory.CreateDirectory(root);
+        File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         Directory.CreateDirectory(Path.Combine(root, "prelude"));
         File.WriteAllText(Path.Combine(root, "prelude", "01-prim.jqd"), "prelude\n");
         File.WriteAllText(Path.Combine(root, "rules.jac"), "rules\n");
