@@ -49,7 +49,8 @@ namespace JacquardLang.Host.Sdk;
 /// and every recorded descendant still alive with that start time is killed
 /// when the command returns. Each record reads at most
 /// <see cref="ProcEntries"/> process entries and <see cref="ProcBytes"/>
-/// bytes (at most <see cref="StatBytes"/> of each <c>stat</c> file), keeps
+/// bytes in all (at most <see cref="StatBytes"/> of each <c>stat</c> file,
+/// and never more than the bytes left), keeps
 /// at most <see cref="ProcEntries"/> descendants in all, and observes the
 /// deadline and the token before each entry, ending at once on a stop; the
 /// kills at the exit observe them before each descendant too, so a stop
@@ -327,7 +328,8 @@ internal static class CoreCommand
                     break;
                 }
 
-                if (ReadStat(entry, ref bytes, stoppable: !final) is { } stat)
+                // Never more than the bytes left, so a record reads at most its cap.
+                if (ReadStat(entry, ref bytes, (int)Math.Min(StatBytes, byteCap - bytes), stoppable: !final) is { } stat)
                 {
                     if (!children.TryGetValue(stat.Parent, out List<(int, string)>? list))
                     {
@@ -384,7 +386,7 @@ internal static class CoreCommand
                     return;
                 }
 
-                if (ReadStat(Path.Combine(ProcRoot, pid.ToString(CultureInfo.InvariantCulture)), ref bytes, stoppable) is { } stat && stat.Start == start && !stat.Zombie)
+                if (ReadStat(Path.Combine(ProcRoot, pid.ToString(CultureInfo.InvariantCulture)), ref bytes, StatBytes, stoppable) is { } stat && stat.Start == start && !stat.Zombie)
                 {
                     Unix.Kill(pid);
                 }
@@ -443,16 +445,16 @@ internal static class CoreCommand
     /// <summary>
     /// A process's pid, parent, start time, and whether it is a zombie, from
     /// at most <see cref="StatBytes"/> of <c>/proc/&lt;pid&gt;/stat</c>,
-    /// read after the last <c>)</c> (the command name may hold any byte);
-    /// null when it cannot be read. Adds the bytes read to
-    /// <paramref name="bytes"/>.
+    /// read after the last <c>)</c> (the command name may hold any byte),
+    /// and at most <paramref name="limit"/>; null when it cannot be read.
+    /// Adds the bytes read to <paramref name="bytes"/>.
     /// </summary>
-    private static (int Pid, int Parent, int Group, string Start, bool Zombie)? ReadStat(string directory, ref long bytes, bool stoppable = false)
+    private static (int Pid, int Parent, int Group, string Start, bool Zombie)? ReadStat(string directory, ref long bytes, int limit = StatBytes, bool stoppable = false)
     {
         try
         {
             string path = Path.Combine(directory, "stat");
-            byte[] buffer = new byte[StatBytes];
+            byte[] buffer = new byte[Math.Clamp(limit, 0, StatBytes)];
             int read = 0;
             using (var stream = new FileStream(path, new FileStreamOptions { Mode = FileMode.Open, Access = FileAccess.Read, Share = FileShare.ReadWrite, BufferSize = 0 }))
             {

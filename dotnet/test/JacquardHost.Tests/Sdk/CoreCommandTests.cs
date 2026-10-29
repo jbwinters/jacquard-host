@@ -359,6 +359,39 @@ public sealed class CoreCommandTests
     }
 
     /// <summary>
+    /// The byte cap holds when it is not a multiple of the 1,024 bytes read
+    /// of each <c>stat</c> file: with a 1,025-byte cap, a record reads 1,024
+    /// bytes and then the 1 byte left, never a second full file.
+    /// </summary>
+    [Test]
+    public void AProcRecordNeverReadsPastANonAlignedByteCap()
+    {
+        CoreCommand.WithoutGroups = true;
+        CoreCommand.ProcRoot = FakeProc("proc", 10, 1);
+        CoreCommand.ProcByteCap = 1025;
+        var reads = new List<int>();
+        int records = 0;
+        using var cancel = new CancellationTokenSource();
+        CoreCommand.StatReadHook = (path, bytes, stoppable) =>
+        {
+            if (stoppable && records == 0)
+            {
+                reads.Add(bytes);
+            }
+        };
+        CoreCommand.RecordedHook = pids =>
+        {
+            if (++records == 1)
+            {
+                cancel.Cancel();
+            }
+        };
+        CarrierException error = Support.Throws<CarrierException>(() => Run(Waiting(Path.Combine(root, "never")), cancellationToken: cancel.Token))!;
+        Assert.That(error.IsAborted, Is.True);
+        Assert.That(reads, Is.EqualTo(new[] { 1024, 1 }));
+    }
+
+    /// <summary>
     /// A cancellation that lands during a record ends it at the next entry:
     /// of 50 fake entries, the record stops after the third read, and the
     /// command is stopped (the last record on the stop is bounded by the cap
