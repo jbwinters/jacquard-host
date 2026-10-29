@@ -46,8 +46,52 @@ internal static class SdkSupport
     /// <summary>A shell command line.</summary>
     internal static string[] Sh(string script) => new[] { "/bin/sh", "-c", script };
 
-    /// <summary>A fresh scratch directory.</summary>
-    internal static string Scratch(string prefix) => Directory.CreateTempSubdirectory("jacquard-dotnet-sdk-" + prefix + "-").FullName;
+    /// <summary>
+    /// A fresh owner-only scratch directory, under the temporary directory
+    /// when no other user may write it or a directory above it, and
+    /// otherwise under <c>/tmp</c> when that is so, so the SDK's directory
+    /// rule finds nothing unsafe above the scratch directory and the tests
+    /// that expect its exact refusals see only the levels they make. Fails
+    /// naming the requirement when neither is.
+    /// </summary>
+    internal static string Scratch(string prefix)
+    {
+        string name = "jacquard-dotnet-sdk-" + prefix + "-" + Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(6)).ToLowerInvariant();
+        if (!Unix.Supported)
+        {
+            return Directory.CreateTempSubdirectory("jacquard-dotnet-sdk-" + prefix + "-").FullName;
+        }
+
+        foreach (string candidate in new[] { Path.GetTempPath(), "/tmp" })
+        {
+            if (Directory.Exists(candidate) && SafeAncestry(Unix.RealPath(candidate)))
+            {
+                return Directory.CreateDirectory(Path.Combine(Unix.RealPath(candidate), name), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute).FullName;
+            }
+        }
+
+        throw new AssertionException("the SDK tests need a temporary directory that no other user, nor any group, may write, nor any directory above it (unless sticky); set TMPDIR to one");
+    }
+
+    /// <summary>
+    /// Whether <paramref name="directory"/>, a real path, and every directory
+    /// above it is owned by this user or root and neither its group nor
+    /// others may write it unless it is sticky (without the private-group
+    /// exception, which tests answer through seams).
+    /// </summary>
+    internal static bool SafeAncestry(string directory)
+    {
+        for (string? level = directory; level is not null; level = Path.GetDirectoryName(level))
+        {
+            Unix.Status status = Unix.Stat(level, follow: false);
+            if (status.Kind != Unix.Kind.Directory || (status.Owner != Unix.EffectiveUser() && status.Owner != 0) || ((status.Mode & 0x12) != 0 && (status.Mode & 0x200) == 0))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Answers the private-group lookups as a user "me" whose primary group

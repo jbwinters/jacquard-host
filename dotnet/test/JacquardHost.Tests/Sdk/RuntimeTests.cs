@@ -1096,6 +1096,42 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// The scratch directories the SDK tests use are made where no group or
+    /// other user may write any directory above them, so a group-writable
+    /// TMPDIR (here 0775) does not add levels to the exact refusals the
+    /// tests expect: <c>/tmp</c> is used instead.
+    /// </summary>
+    [Test]
+    public void TheScratchDirectoriesAvoidAGroupWritableTemporaryDirectory()
+    {
+        string shared = Directory.CreateDirectory(At("tmpdir")).FullName;
+        File.SetUnixFileMode(shared, (UnixFileMode)0x1FD);
+        string? saved = Environment.GetEnvironmentVariable("TMPDIR");
+        string probe;
+        try
+        {
+            Environment.SetEnvironmentVariable("TMPDIR", shared);
+            Assert.That(Path.GetTempPath(), Does.StartWith(shared));
+            probe = SdkSupport.Scratch("probe");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TMPDIR", saved);
+        }
+
+        try
+        {
+            Assert.That(probe, Does.Not.StartWith(shared));
+            Assert.That(SdkSupport.SafeAncestry(probe), Is.True, probe);
+            Assert.That(File.GetUnixFileMode(probe), Is.EqualTo(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute));
+        }
+        finally
+        {
+            SdkSupport.RemoveScratch(probe);
+        }
+    }
+
+    /// <summary>
     /// A directory writable by the private group is still refused when it
     /// has an access ACL: on Linux the group bits show the ACL's mask, and
     /// an entry may grant another user write (here <c>nobody</c>, set with
