@@ -147,8 +147,12 @@ one per invocation, so a busy thread pool does not delay it. If no thread can
 be created, it queues the cancellation as a thread-pool work item instead,
 which runs when a pool thread is free; if that cannot be queued either, the
 host gives up: the token is never cancelled, `IsCancelled` still turns true,
-and the result's `HandlerTokenNotCancelled` is set. `Invoke` still returns
-its result and disposes the worker. Callbacks registered on the token run on
+and the result's `HandlerTokenNotCancelled` is set (its `ToString()` then
+ends with `handler token not cancelled`). The flag is not part of
+`HostEvidence`, which describes how the invocation ended in the schema the
+adapters share and stays empty on success; giving up can follow any outcome,
+including a successful one. `Invoke` still returns its result and disposes
+the worker. Callbacks registered on the token run on
 that thread (or that pool thread), never on the caller's thread or the thread
 that cancelled the caller's token; the host does not wait for them, and
 anything they throw is discarded. A callback that blocks holds only that
@@ -188,8 +192,13 @@ thread. The carrier is built around both:
   most 1 MiB per read pass, and only a bounded prefix
   (`max_stderr_bytes`) is kept.
 - **Expiry kills a process tree, not a group.** At expiry, cancellation, or
-  disposal of a running worker, the host calls `Process.Kill(true)`: .NET
-  stops the worker, lists its children from the process table, kills it, and
+  disposal of a running worker, and when the spawned worker's pipes cannot
+  be set up (redirected streams that are not pipe streams), the host calls
+  `Process.Kill(true)` through one kill path, which first starts the
+  cancellation of the handlers' token. Disposal waits up to one second for a
+  killed worker to exit. So does a failed setup, which reports a spawn
+  failure and says so if the worker was still running then. .NET stops the
+  worker, lists its children from the process table, kills it, and
   does the same for each child. A descendant that was already reparented is
   not found and keeps running: one whose parent exited, or one that
   daemonized. So is one started after its parent was listed. Descendants are
