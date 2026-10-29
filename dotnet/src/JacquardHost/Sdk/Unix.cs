@@ -15,8 +15,9 @@ namespace JacquardLang.Host.Sdk;
 /// sizes, and for the identities that detect a replaced file,
 /// <c>access(2)</c> for the execute permission, <c>mkdir(2)</c> to
 /// create a staging directory exclusively, <c>realpath(3)</c> to resolve
-/// the cache root's path once, and <c>getpwuid_r(3)</c> and
-/// <c>getgrgid_r(3)</c> to recognize the user's private group.
+/// the cache root's path once, and <c>getpwuid_r(3)</c>,
+/// <c>getgrgid_r(3)</c>, and on Linux <c>lgetxattr(2)</c> (for an access
+/// ACL) to recognize a directory writable only by the user's private group.
 /// </summary>
 /// <remarks>
 /// The macOS calls use the 64-bit-inode <c>struct stat</c> layout; they are
@@ -37,6 +38,8 @@ internal static partial class Unix
     private const int AtSymlinkNofollow = 0x100;
     private const int AtEmptyPath = 0x1000;
     private const int Erange = 34;
+    private const int Enodata = 61;
+    private const int Eopnotsupp = 95;
 
     /// <summary>The most bytes a user or group lookup may use; a larger entry is treated as not found.</summary>
     internal const int AccountBytes = 64 * 1024;
@@ -106,6 +109,9 @@ internal static partial class Unix
 
     [LibraryImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
     private static unsafe partial int MacFstatIntel(int descriptor, byte* buffer);
+
+    [LibraryImport("libc", EntryPoint = "lgetxattr", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial nint NativeLgetxattr(string path, string name, IntPtr value, nuint size);
 
     [LibraryImport("libc", EntryPoint = "getpwuid_r")]
     private static unsafe partial int NativeGetpwuid(uint uid, byte* entry, byte* buffer, nuint length, byte** result);
@@ -335,6 +341,28 @@ internal static partial class Unix
             _ => Kind.Other,
         };
         return new Status(kind, size, owner, mode & 0xFFF, device, inode, modified, changed, group);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/>, not followed if it is a link, may
+    /// have a POSIX access ACL beyond its mode bits: on Linux, whether it
+    /// has the <c>system.posix_acl_access</c> attribute (true when that
+    /// cannot be read for another reason than its absence); false elsewhere.
+    /// </summary>
+    internal static bool HasAccessAcl(string path)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return false;
+        }
+
+        if (NativeLgetxattr(path, "system.posix_acl_access", IntPtr.Zero, 0) >= 0)
+        {
+            return true;
+        }
+
+        int error = Marshal.GetLastPInvokeError();
+        return error != Enodata && error != Eopnotsupp;
     }
 
     /// <summary>A user's name and primary group, from the password database.</summary>

@@ -639,7 +639,8 @@ internal static class Core
     /// next directory down is checked in turn. The private group is Debian
     /// OpenSSH's rule: the directory's group is the user's primary group,
     /// that group's name is the user's name, and it lists no members or only
-    /// the user. Every unsafe directory is named, nearest first, up to
+    /// the user, and the directory has no access ACL (whose mask, on Linux,
+    /// is what the group bits show). Every unsafe directory is named, nearest first, up to
     /// <see cref="UnsafeListed"/>.
     /// </summary>
     /// <param name="first">The nearest directory to check.</param>
@@ -693,6 +694,11 @@ internal static class Core
                     if (!PrivateGroup(status, account, group))
                     {
                         reason = "writable by its group, which is not your private group";
+                    }
+                    else if (Unix.HasAccessAcl(directory))
+                    {
+                        // On Linux an ACL's mask shows in the group bits, and its entries may grant others write.
+                        reason = "writable by its group, with an access control list";
                     }
                 }
             }

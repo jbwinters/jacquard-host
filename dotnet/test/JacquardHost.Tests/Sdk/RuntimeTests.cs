@@ -943,6 +943,37 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// A directory writable by the private group is still refused when it
+    /// has an access ACL: on Linux the group bits show the ACL's mask, and
+    /// an entry may grant another user write (here <c>nobody</c>, set with
+    /// <c>setfacl</c>).
+    /// </summary>
+    [Test]
+    public void APrivateGroupParentWithAnAccessListIsRefused()
+    {
+        if (!File.Exists("/usr/bin/setfacl"))
+        {
+            Assert.Ignore("setfacl is not installed");
+        }
+
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent")).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1C0);
+        using (var setfacl = System.Diagnostics.Process.Start("/usr/bin/setfacl", new[] { "-m", "u:nobody:rwx", parent }))
+        {
+            Assert.That(setfacl.WaitForExit(30_000), Is.True);
+            Assert.That(setfacl.ExitCode, Is.EqualTo(0), "setfacl");
+        }
+
+        Assert.That(File.GetUnixFileMode(parent), Is.EqualTo((UnixFileMode)0x1F8), "the mask shows in the group bits");
+        Accounts(parent, "me");
+        string cache = Path.Combine(parent, "cache");
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = cache }))!.Message,
+            Is.EqualTo(Unsafe(cache, parent + " (writable by its group, with an access control list)")));
+    }
+
+    /// <summary>
     /// The real password and group databases answer for this user: its name
     /// is the one .NET reports, and its primary group has an entry.
     /// </summary>
