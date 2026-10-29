@@ -1219,7 +1219,7 @@ public sealed class RuntimeTests
         bool Altered(string path, Func<Unix.Status, Unix.Status> change)
         {
             Core.GetentPaths = new[] { "/usr/bin/getent" };
-            Core.GetentStatHook = p => p == path ? change(Unix.Stat(p, follow: false)) : Unix.Stat(p, follow: false);
+            Core.GetentStatHook = (_, p) => p == path ? change(Unix.Stat(p, follow: false)) : Unix.Stat(p, follow: false);
             try
             {
                 return Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None);
@@ -1252,7 +1252,8 @@ public sealed class RuntimeTests
     /// root's) printing a valid listing, the listing is accepted, and refused
     /// when <c>setsid</c>'s file is another user's, writable by its group or
     /// others, or not a regular file, or a directory above it is not root's
-    /// alone (statuses altered through a seam). Without groups
+    /// alone (statuses altered through a seam, for setsid's check only, so
+    /// the stand-in getent's own check passes). Without groups
     /// <c>setsid</c> is not run, so its status does not matter.
     /// </summary>
     [Test]
@@ -1265,9 +1266,11 @@ public sealed class RuntimeTests
         Core.GetentPaths = new[] { "/bin/sh" };
         Core.GetentArguments = new[] { "-c", "echo me:x:" + me.ToString(CultureInfo.InvariantCulture) + ":4242::/:/bin/sh" };
         string setsid = Unix.RealPath(CoreCommand.Setsid!);
+        // Only setsid's statuses are altered: the stand-in getent's real path
+        // may share a directory with setsid's (/usr/bin/dash beside /usr/bin/setsid).
         bool Altered(string path, Func<Unix.Status, Unix.Status> change)
         {
-            Core.GetentStatHook = p => p == path ? change(Unix.Stat(p, follow: false)) : Unix.Stat(p, follow: false);
+            Core.GetentStatHook = (file, p) => file == setsid && p == path ? change(Unix.Stat(p, follow: false)) : Unix.Stat(p, follow: false);
             try
             {
                 return Core.OnlyUserHasPrimaryGroup("me", me, Group, CancellationToken.None);

@@ -676,9 +676,12 @@ internal static class Core
     /// <summary>
     /// Test seam: reads the status (not following a final link) of the
     /// <c>getent</c> and <c>setsid</c> files and the directories above them in place of
-    /// <see cref="Unix.Stat(string, bool)"/>. Null outside tests.
+    /// <see cref="Unix.Stat(string, bool)"/>, given the real path of the
+    /// file being checked (getent's or setsid's) and the path read, so a
+    /// directory above both can be altered for one of them. Null outside
+    /// tests.
     /// </summary>
-    internal static volatile Func<string, Unix.Status>? GetentStatHook;
+    internal static volatile Func<string, string, Unix.Status>? GetentStatHook;
 
     /// <summary>Test seam: the arguments <c>getent</c> runs with.</summary>
     internal static volatile string[] GetentArguments = { "passwd" };
@@ -902,14 +905,14 @@ internal static class Core
             }
 
             string real = Unix.RealPath(candidate);
-            if (Lstat(real) is not { Kind: Unix.Kind.Regular } file || !RootOnly(file))
+            if (Lstat(real, real) is not { Kind: Unix.Kind.Regular } file || !RootOnly(file))
             {
                 return null;
             }
 
             for (string? directory = Path.GetDirectoryName(real); directory is not null; directory = Path.GetDirectoryName(directory))
             {
-                if (Lstat(directory) is not { Kind: Unix.Kind.Directory } level || !RootOnly(level))
+                if (Lstat(real, directory) is not { Kind: Unix.Kind.Directory } level || !RootOnly(level))
                 {
                     return null;
                 }
@@ -920,7 +923,7 @@ internal static class Core
 
         return null;
 
-        static Unix.Status Lstat(string path) => GetentStatHook is { } hook ? hook(path) : Unix.Stat(path, follow: false);
+        static Unix.Status Lstat(string file, string path) => GetentStatHook is { } hook ? hook(file, path) : Unix.Stat(path, follow: false);
     }
 
     /// <summary>Whether <paramref name="status"/> is root's and neither its group nor others may write it.</summary>
