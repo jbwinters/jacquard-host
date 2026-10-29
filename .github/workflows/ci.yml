@@ -105,6 +105,14 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ matrix.dotnet }}.x
+      # The runner may also have a newer SDK, which dotnet would pick by
+      # default. Pin this job to the .NET 8 SDK so it builds as an 8.0-only
+      # toolchain would (the test project targets net8.0 alone there).
+      - name: Pin the .NET 8 SDK
+        if: matrix.dotnet == '8.0'
+        run: |
+          printf '{"sdk":{"version":"8.0.100","rollForward":"latestFeature"}}\n' > global.json
+          dotnet --version | grep '^8\.0\.'
       - name: Offline tests
         run: dotnet test test/JacquardHost.Tests -f net${{ matrix.dotnet }}
 
