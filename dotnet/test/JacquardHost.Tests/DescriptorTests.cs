@@ -14,7 +14,10 @@ namespace JacquardLang.Host.Tests;
 /// <summary>
 /// Open descriptors, adapter threads, and the heap across invocations and
 /// failures, read from <c>/proc</c>. The adapter starts no thread of its own
-/// except one per handler call, named <c>jacquard-handler</c>.
+/// except one per handler call, named <c>jacquard-handler</c>, and one short-lived
+/// <c>jacquard-handler-cancel</c> per invocation that gave a handler a token.
+/// Both names read as <c>jacquard-handle</c> in <c>/proc</c> (15 bytes), so
+/// the counts include both.
 /// </summary>
 [TestFixture]
 [Platform("Linux")]
@@ -48,7 +51,10 @@ public sealed class DescriptorTests
         Assert.That(threads, Is.EqualTo(0), "escaped descendant: adapter threads remain");
 
         // Handlers run on their own threads, which end with the handler; the
-        // count sees a handler thread while one runs.
+        // count sees a handler thread while one runs. Each invocation then
+        // starts a cancel thread as it ends; the loop waits for it to finish
+        // before the next invocation, so the handler counts only its own
+        // thread.
         int during = -1;
         OperationRegistry registry = new OperationRegistry().Bind(Pinned.Identity("kit-world"), Pinned.Identity("send"), (context, args) =>
         {
@@ -58,6 +64,7 @@ public sealed class DescriptorTests
         Host replaying = Replaying("one-once-effect-success");
         for (int i = 0; i < 3; i++)
         {
+            Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "an earlier invocation's threads remain");
             InvocationResult result = replaying.Invoke(Pinned.Identity("kit-echo"), Echo(), new Value[] { new TextValue("ping") }, registry);
             Assert.That(result.Ok, Is.True, result.ToString());
         }
