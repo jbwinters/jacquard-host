@@ -151,7 +151,7 @@ The independent .NET adapter and SDK live in `dotnet/` as package
 directory). It targets .NET 8, has no runtime dependencies beyond the .NET base
 class library, and does not call Python, Node.js, Go, Rust, or Java; it calls
 the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`, `mkdir(2)`,
-`statx(2)` or `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, `getpwent_r(3)`, and `lgetxattr(2)`) and runs on Linux and macOS only. On Linux the
+`statx(2)` or `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, and `lgetxattr(2)`; it also runs `getent passwd`) and runs on Linux and macOS only. On Linux the
 SDK runs Core's commands through util-linux `setsid` when one is installed.
 NUnit, its adapter, and the test SDK are its only (test) dependencies. The
 .NET 8 or 10 SDK is required.

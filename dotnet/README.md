@@ -20,7 +20,7 @@ The assembly has two layers:
 Linux is exercised. macOS should work but has no CI: the carrier and the SDK
 call the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`,
 `mkdir(2)`, `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, and on Linux
-`getpwent_r(3)` and `lgetxattr(2)`; see [process carrier](#process-carrier) and
+`lgetxattr(2)` and the `getent passwd` command; see [process carrier](#process-carrier) and
 [Core's commands](#cores-commands)), and the macOS status calls are compiled
 but not run by any test. Windows is not supported: the worker reports a spawn
 failure and `Prepare` refuses. **Experimental:** the protocol is Core's pinned
@@ -168,15 +168,27 @@ OpenSSH's rule (no account but you has the group as its primary group, and
 the group lists no member but you) with stricter conditions. All of these
 must hold: the directory's group is your primary group; the group's name is
 your user name; the group lists no members or only you (read with
-`getpwuid_r(3)` and `getgrgid_r(3)`); on Linux, the password database,
-enumerated with `getpwent_r(3)`, lists you with that primary group and no
-other account with it; and, on Linux, the directory has no access ACL, whose
-mask is what its group bits show. Elsewhere a group-writable directory is
-refused. So a clone made with a `umask` of 002 under user-private groups is
-accepted, and no other account the password database lists can rename the
-root away and put another directory at its path. An account that a name
-service does not enumerate (LDAP or sssd with enumeration off) cannot be seen;
-see [limits](../docs/LIMITS.md). Otherwise preparation is refused
+`getpwuid_r(3)` and `getgrgid_r(3)`); on Linux, the password database, as
+`getent passwd` lists it in a separate process (so no enumeration position
+is shared with code in yours), lists your account with your user id and that
+primary group and no account of another user id with it; and, on Linux, the
+directory has no access ACL, whose mask is what its group bits show.
+Elsewhere a group-writable directory is refused. `getent` must be
+`/usr/bin/getent` or, if that is missing, `/bin/getent`, owned by root and not
+writable by group or others, as must every directory above it. It runs like
+Core's commands, for at most 5 seconds, with at most 16 MiB of output, and the
+preparation's token stops it (`Invocation.Save` takes no token, so there only
+the 5 seconds bound it). A timeout, a nonzero exit status, more output, output
+that is not UTF-8 or not complete lines, more than 100,000 entries, a line
+that is not seven colon-separated fields with decimal ids, a name listed twice
+(also when two name services list one account), or your account missing or
+listed otherwise refuses the directory. So a clone made with a `umask` of 002
+under user-private groups is accepted, and no other account the password
+database lists can rename the root away and put another directory at its
+path. An account that a name service does not enumerate (LDAP or sssd with
+enumeration off), or does not list because it failed partway without
+`getent` reporting it, cannot be seen; see [limits](../docs/LIMITS.md).
+Otherwise preparation is refused
 with a message naming every such directory, nearest first, with its reason
 (at most 16 named, the rest counted): run `chmod go-w` on each, or choose a
 cache under directories only you or root may write. The existing directories
