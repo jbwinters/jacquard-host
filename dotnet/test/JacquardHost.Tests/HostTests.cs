@@ -446,6 +446,27 @@ public sealed class HostTests
     }
 
     [Test]
+    public void AnOperationBoundAfterTheInvokeFrameIsNotDispatched()
+    {
+        // The seam binds `send` after the invoke frame advertised no
+        // operations and before the request is dispatched. The host must
+        // answer from what it advertised.
+        var registry = new OperationRegistry();
+        bool ran = false;
+        Host.RequestDecodedHook = () => registry.Bind(Pinned.Identity("kit-world"), Pinned.Identity("send"), (context, args) =>
+        {
+            ran = true;
+            return new TextValue("pong");
+        });
+        InvocationResult result = Replaying("one-once-effect-success").Invoke(Pinned.Identity("kit-echo"), Echo(), new Value[] { new TextValue("ping") }, registry);
+        Assert.That(result.HostFrames, Has.Count.EqualTo(3), result.ToString());
+        Assert.That(((JsonObject)result.HostFrames[1]["capabilities"])["operations"].AsArray(), Is.Empty, "the invoke frame advertised an operation");
+        Assert.That(registry.Count, Is.EqualTo(1), "the seam did not bind");
+        Assert.That(Volatile.Read(ref ran), Is.False, "the host ran an operation it never advertised");
+        AssertFailure(result.HostFrames[2], FailureCategory.UnsupportedOperation, "operation is not configured");
+    }
+
+    [Test]
     public void CancellationWhileAHugeResultIsEncodedEndsTheCallPromptly()
     {
         using var cancel = new CancellationTokenSource();

@@ -125,11 +125,41 @@ public sealed class OperationRegistry
         }
     }
 
-    internal Handler? Find(EffectRequest request)
+    /// <summary>
+    /// An immutable copy for one invocation, or null when more than
+    /// <paramref name="maxOperations"/> are bound; the count is checked
+    /// before anything is copied.
+    /// </summary>
+    internal RegistrySnapshot? Snapshot(int maxOperations)
     {
         lock (sync)
         {
-            return handlers.TryGetValue(new OperationEntry(request.Effect, request.Operation), out Handler? handler) ? handler : null;
+            return handlers.Count > maxOperations ? null : new RegistrySnapshot(new SortedDictionary<OperationEntry, Handler>(handlers));
         }
     }
+}
+
+/// <summary>
+/// The operations one invocation advertises and dispatches: a copy taken
+/// once, so a concurrent <see cref="OperationRegistry.Bind"/> cannot make
+/// the host run an operation it did not advertise.
+/// </summary>
+internal sealed class RegistrySnapshot
+{
+    private readonly SortedDictionary<OperationEntry, Handler> handlers;
+
+    internal RegistrySnapshot(SortedDictionary<OperationEntry, Handler> handlers)
+    {
+        this.handlers = handlers;
+        Entries = new List<OperationEntry>(handlers.Keys);
+    }
+
+    /// <summary>No operations.</summary>
+    internal static RegistrySnapshot Empty { get; } = new(new SortedDictionary<OperationEntry, Handler>());
+
+    /// <summary>The advertised operations in protocol order.</summary>
+    internal IReadOnlyList<OperationEntry> Entries { get; }
+
+    internal Handler? Find(EffectRequest request) =>
+        handlers.TryGetValue(new OperationEntry(request.Effect, request.Operation), out Handler? handler) ? handler : null;
 }

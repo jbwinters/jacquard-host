@@ -68,8 +68,8 @@ public sealed class Host
 
     /// <summary>
     /// Test seam: runs on the caller's thread once an effect request is
-    /// decoded, just before the caller's check. Null outside tests. It is
-    /// global, so tests that set it must not run in parallel.
+    /// decoded, before its handler is looked up and before the caller's
+    /// check.
     /// </summary>
     internal static volatile Action? RequestDecodedHook;
 
@@ -106,16 +106,14 @@ public sealed class Host
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(registry);
         IReadOnlyList<OperationEntry> entries;
+        RegistrySnapshot operations;
         Value[] arguments;
         try
         {
-            // The caller's registry and arguments are bounded before they are copied.
-            if (registry.Count > Limits.MaxOperations)
-            {
-                throw ProtocolException.Exceeded("registry exceeds max_operations");
-            }
-
-            entries = registry.Entries();
+            // The caller's registry and arguments are bounded before they are
+            // copied. The invocation advertises and dispatches one snapshot.
+            operations = registry.Snapshot(Limits.MaxOperations) ?? throw ProtocolException.Exceeded("registry exceeds max_operations");
+            entries = operations.Entries;
             JsonObject frame = Codec.InvokeFrame(target, spec, args, entries, Limits);
             JsonCodec.FrameBytes(frame, Limits.MaxFrameBytes, Limits.MaxJsonDepth);
             arguments = args.ToArray();
@@ -132,12 +130,12 @@ public sealed class Host
             };
         }
 
-        return Run(session => session.Invoke(target, spec, arguments, entries), registry, cancellationToken);
+        return Run(session => session.Invoke(target, spec, arguments, entries), operations, cancellationToken);
     }
 
     /// <summary>Negotiates a session and shuts it down without invoking.</summary>
     public InvocationResult ShutdownProbe(CancellationToken cancellationToken = default) =>
-        Run(session => session.Shutdown(), new OperationRegistry(), cancellationToken);
+        Run(session => session.Shutdown(), RegistrySnapshot.Empty, cancellationToken);
 
     /// <summary>
     /// At most <paramref name="limit"/> UTF-8 bytes of <paramref name="text"/>,
@@ -175,7 +173,7 @@ public sealed class Host
         return output.ToString();
     }
 
-    private InvocationResult Run(Func<Session, JsonObject> opening, OperationRegistry registry, CancellationToken cancellationToken)
+    private InvocationResult Run(Func<Session, JsonObject> opening, RegistrySnapshot registry, CancellationToken cancellationToken)
     {
         var session = new Session();
         var result = new InvocationResult(ResultKind.CarrierLoss);
@@ -257,14 +255,14 @@ public sealed class Host
         /// </summary>
         private static readonly TimeSpan MaxTimerDelay = TimeSpan.FromDays(1);
 
-        private readonly OperationRegistry registry;
+        private readonly RegistrySnapshot registry;
         private readonly CancellationToken cancellationToken;
         private volatile bool ended;
         private CancellationTokenSource? handlerStop;
         private Timer? handlerTimer;
         private CancellationTokenRegistration callerRegistration;
 
-        internal Call(Worker worker, Session session, InvocationResult result, OperationRegistry registry, CancellationToken cancellationToken)
+        internal Call(Worker worker, Session session, InvocationResult result, RegistrySnapshot registry, CancellationToken cancellationToken)
         {
             Worker = worker;
             Session = session;
@@ -399,6 +397,7 @@ public sealed class Host
         /// </summary>
         private JsonObject Respond(EffectRequest request)
         {
+            RequestDecodedHook?.Invoke();
             Handler? handler = registry.Find(request);
             Answer answer;
             if (handler is null)
@@ -411,7 +410,6 @@ public sealed class Host
                 // begin once the call is cancelled or the lifetime passed. The
                 // caller checks before creating the handler thread, and the
                 // thread checks again before calling the handler.
-                RequestDecodedHook?.Invoke();
                 CarrierException? early = Worker.Fault();
                 if (early is not null)
                 {
