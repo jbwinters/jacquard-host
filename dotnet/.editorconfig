@@ -1,0 +1,8 @@
+# Analyzer choices for the .NET adapter. Everything else follows
+# AnalysisLevel 8.0-recommended with warnings as errors.
+[*.cs]
+# Hash and OperationEntry implement IComparable only so they sort in protocol
+# order; comparison operators would add surface nothing uses.
+dotnet_diagnostic.CA1036.severity = none
+# JsonObject is named for JSON's object, not as a collection.
+dotnet_diagnostic.CA1710.severity = none
