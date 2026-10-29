@@ -33,6 +33,31 @@ public sealed class DescriptorTests
         Worker.ExpireHook = null;
     }
 
+    [Test]
+    public void ADescriptorOnADllOutsideTheRuntimeAndTestDirectoriesIsCounted()
+    {
+        // Only assembly files the runtime loads from its own directory or the
+        // test output are left out of the count; any other .dll is counted.
+        string dir = Directory.CreateTempSubdirectory("jacquard-dll-").FullName;
+        string path = Path.Combine(dir, "Leak.dll");
+        try
+        {
+            File.WriteAllBytes(path, new byte[] { 0 });
+            int before = Descriptors();
+            using (File.OpenRead(path))
+            {
+                Assert.That(Descriptors(), Is.EqualTo(before + 1), "a descriptor on " + path + " was not counted");
+            }
+
+            Assert.That(Descriptors(), Is.EqualTo(before));
+        }
+        finally
+        {
+            File.Delete(path);
+            Directory.Delete(dir);
+        }
+    }
+
     /// <summary>Where the seam fails the worker's setup after <c>Process.Start</c> succeeded.</summary>
     public enum SetupFailure
     {

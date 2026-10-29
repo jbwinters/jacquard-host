@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using JacquardLang.Host.Carrier;
@@ -244,11 +245,20 @@ internal static class Support
     }
 
     /// <summary>
-    /// Open descriptors of this process (Linux), except those on assembly
-    /// files: the runtime opens an assembly when it first loads it, which
-    /// can happen in the middle of a test (for example when tiered
-    /// compilation recompiles a method), and keeps it open. The adapter opens
-    /// no assembly files.
+    /// The directories whose assembly files the runtime may open in the
+    /// middle of a test (for example when tiered compilation recompiles a
+    /// method) and keep open: the shared runtime's and the test output's.
+    /// </summary>
+    private static readonly string[] AssemblyDirectories =
+    {
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(RuntimeEnvironment.GetRuntimeDirectory())) + Path.DirectorySeparatorChar,
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory)) + Path.DirectorySeparatorChar,
+    };
+
+    /// <summary>
+    /// Open descriptors of this process (Linux), except those on
+    /// <c>.dll</c> files directly in <see cref="AssemblyDirectories"/>. The
+    /// adapter opens no assembly files; any other <c>.dll</c> is counted.
     /// </summary>
     internal static int Descriptors()
     {
@@ -266,13 +276,32 @@ internal static class Support
                 continue;
             }
 
-            if (target is null || !target.EndsWith(".dll", StringComparison.Ordinal))
+            if (target is null || !IsRuntimeAssembly(target))
             {
                 count++;
             }
         }
 
         return count;
+    }
+
+    private static bool IsRuntimeAssembly(string target)
+    {
+        if (!target.EndsWith(".dll", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string directory = Path.GetDirectoryName(target) + Path.DirectorySeparatorChar;
+        foreach (string allowed in AssemblyDirectories)
+        {
+            if (string.Equals(directory, allowed, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Live threads of this process named by the adapter (Linux, names truncated to 15 bytes).</summary>
