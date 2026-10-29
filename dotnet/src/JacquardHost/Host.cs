@@ -255,8 +255,10 @@ public sealed class Host
     private sealed class Call
     {
         private readonly RegistrySnapshot registry;
+        private readonly object stopSync = new();
         private volatile bool ended;
         private CancellationTokenSource? handlerStop;
+        private bool stopRequested;
         private bool handlersStopped;
 
         internal Call(Worker worker, Session session, InvocationResult result, RegistrySnapshot registry)
@@ -265,6 +267,10 @@ public sealed class Host
             Session = session;
             Result = result;
             this.registry = registry;
+
+            // Every kill of the worker, whichever check or thread sees the
+            // stop first, starts the token's cancellation before it.
+            worker.StopNotice = StopHandlers;
         }
 
         internal Worker Worker { get; }
@@ -466,10 +472,12 @@ public sealed class Host
             }
 
             HandlerThreadStartedHook?.Invoke();
-            // The wait ends as soon as the call is stopping, before the
-            // worker is killed (which can take a while), so the handlers'
+            // The wait usually ends as soon as the call is stopping, before
+            // the worker is killed (which can take a while), so the handlers'
             // token is cancelled first; the fault check after the wait then
-            // kills the worker and reports why.
+            // kills the worker and reports why. A stop that lands between the
+            // wait's checks, or after it, is seen by a fault check, whose
+            // kill gives the worker's stop notice (StopHandlers) first.
             Worker.Await(() => completion.Answer is not null || Worker.Stopping);
             if (Worker.Stopping)
             {
@@ -480,34 +488,57 @@ public sealed class Host
 
         /// <summary>
         /// The handlers' token, created on the caller's thread for the first
-        /// handler. Only <see cref="StopHandlers"/> cancels it, once the
-        /// caller's thread has seen the call stop or end: there is no timer,
-        /// no registration on the caller's token, and no pool work item
-        /// unless no thread can be created. The source is never disposed,
+        /// handler. Only <see cref="StopHandlers"/> cancels it, once the call
+        /// has been seen to stop or end: there is no timer, no registration
+        /// on the caller's token, and no pool work item unless no thread can
+        /// be created. A token created after the stop was seen starts
+        /// cancelled (no callback can be registered on it yet, so none runs
+        /// here); its handler does not start. The source is never disposed,
         /// because an abandoned handler may still hold its token.
         /// </summary>
         private CancellationToken HandlerToken()
         {
-            handlerStop ??= new CancellationTokenSource();
-            return handlerStop.Token;
+            lock (stopSync)
+            {
+                if (handlerStop is null)
+                {
+                    handlerStop = new CancellationTokenSource();
+                    if (stopRequested)
+                    {
+                        handlersStopped = true;
+                        handlerStop.Cancel();
+                    }
+                }
+
+                return handlerStop.Token;
+            }
         }
 
         /// <summary>
-        /// Called only on the caller's thread, when it sees the call stopping
-        /// while a handler runs and at <see cref="End"/>: starts, at most
+        /// Called when the caller's thread sees the call stopping while a
+        /// handler runs, at <see cref="End"/>, and through the worker's
+        /// <see cref="Worker.StopNotice"/> before any kill (on the caller's
+        /// thread, or on a thread disposing the worker): starts, at most
         /// once, a dedicated background thread that cancels the handlers'
-        /// token and discards whatever its callbacks throw. Nothing waits for that thread, so a callback that
-        /// blocks holds only it, and the shared thread pool is not involved.
+        /// token and discards whatever its callbacks throw. Nothing waits for
+        /// that thread, so a callback that blocks holds only it, and the
+        /// shared thread pool is not involved.
         /// </summary>
         private void StopHandlers()
         {
-            CancellationTokenSource? source = handlerStop;
-            if (source is null || handlersStopped)
+            CancellationTokenSource? source;
+            lock (stopSync)
             {
-                return;
+                stopRequested = true;
+                source = handlerStop;
+                if (source is null || handlersStopped)
+                {
+                    return;
+                }
+
+                handlersStopped = true;
             }
 
-            handlersStopped = true;
             var thread = new Thread(static state => CancelQuietly((CancellationTokenSource)state!))
             {
                 IsBackground = true,

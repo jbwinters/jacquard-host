@@ -126,11 +126,27 @@ public sealed class Worker : IDisposable
     internal static volatile Func<long>? ClockHook;
 
     /// <summary>
-    /// Test seam: runs on the caller's thread when the worker's lifetime
-    /// ends by expiry or cancellation, before its process tree is killed.
-    /// Process-global; null outside tests.
+    /// Test seam: runs on the thread that is about to kill the worker's live
+    /// process tree (at expiry, cancellation, or disposal), after
+    /// <see cref="StopNotice"/> and before the kill. Process-global; null
+    /// outside tests.
     /// </summary>
     internal static volatile Action? ExpireHook;
+
+    private volatile Action? stopNotice;
+
+    /// <summary>
+    /// Runs whenever the worker's lifetime ends by expiry, cancellation, or
+    /// disposal, before its process tree is killed, on the thread that ends
+    /// it (the caller's thread, or the disposing thread). The host uses it to
+    /// start the cancellation of its handlers' token before any kill. It must
+    /// not throw or block, and may run more than once.
+    /// </summary>
+    internal Action? StopNotice
+    {
+        get => stopNotice;
+        set => stopNotice = value;
+    }
 
     /// <summary>The lifetime clock: <see cref="Stopwatch.GetTimestamp"/> outside tests.</summary>
     private static long Now() => ClockHook is { } clock ? clock() : Stopwatch.GetTimestamp();
@@ -320,10 +336,9 @@ public sealed class Worker : IDisposable
 
     private CarrierException FaultOr(CarrierException fallback) => FaultCore() ?? fallback;
 
-    /// <summary>Kills the worker's process tree and closes its input.</summary>
+    /// <summary>Ends the lifetime: kills the worker's process tree (after the stop notice) and closes its input.</summary>
     private void Expire()
     {
-        ExpireHook?.Invoke();
         expired = true;
         KillTree();
         CloseInputCore();
@@ -341,7 +356,10 @@ public sealed class Worker : IDisposable
         }
     }
 
-    /// <summary>Kills the worker and the descendants .NET finds, while the worker is alive.</summary>
+    /// <summary>
+    /// Kills the worker and the descendants .NET finds, while the worker is
+    /// alive. Every kill comes through here, after the stop notice.
+    /// </summary>
     private void KillTree()
     {
         if (process is null || HasExited())
@@ -349,6 +367,8 @@ public sealed class Worker : IDisposable
             return;
         }
 
+        stopNotice?.Invoke();
+        ExpireHook?.Invoke();
         killed = true;
         KillQuietly(process);
     }
@@ -672,9 +692,11 @@ public sealed class Worker : IDisposable
     /// Waits until <paramref name="isDone"/> returns true, the deadline
     /// passes, the call is cancelled, or the worker is disposed, reading
     /// stderr meanwhile. <paramref name="isDone"/> is asked before each
-    /// check, so a condition that includes <see cref="Stopping"/> returns
-    /// before the worker is killed; the caller must then check
-    /// <see cref="Fault"/>.
+    /// check, so a condition that includes <see cref="Stopping"/> usually
+    /// returns before the worker is killed; the caller must then check
+    /// <see cref="Fault"/>. A stop that lands between the two (the deadline,
+    /// a cancellation, or a disposal) is seen by the check, which gives the
+    /// <see cref="StopNotice"/> before it kills the worker.
     /// </summary>
     /// <exception cref="CarrierException">The lifetime ended first.</exception>
     public void Await(Func<bool> isDone)
