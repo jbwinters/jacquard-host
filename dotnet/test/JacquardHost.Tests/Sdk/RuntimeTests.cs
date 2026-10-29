@@ -999,6 +999,24 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// The directories that exist above a missing cache root are checked
+    /// before any missing level is made, so a refused preparation leaves
+    /// nothing behind.
+    /// </summary>
+    [Test]
+    public void ARefusedPreparationMakesNoDirectory()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent")).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1FF);
+        string cache = Path.Combine(parent, "x", "y", "cache");
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = cache }))!.Message,
+            Is.EqualTo(Unsafe(cache, parent + " (writable by others)")));
+        Assert.That(Directory.EnumerateFileSystemEntries(parent), Is.Empty);
+    }
+
+    /// <summary>
     /// The directories a preparation makes for a missing cache root are each
     /// owner-only (0700), whatever the umask, so a cache under new
     /// directories is not refused for parents the SDK itself made writable.

@@ -505,9 +505,17 @@ public sealed class Runtime
                 // Each missing level is made owner-only, whatever the umask,
                 // since no directory above the root may be writable by others.
                 var missing = new Stack<string>();
-                for (string? level = configured; level is not null && !Directory.Exists(level); level = Path.GetDirectoryName(level))
+                string? level = configured;
+                for (; level is not null && !Directory.Exists(level); level = Path.GetDirectoryName(level))
                 {
                     missing.Push(level);
+                }
+
+                // The directories that exist are checked before any level
+                // is made, so a refused preparation makes nothing.
+                if (missing.Count > 0 && level is not null && Unix.Supported)
+                {
+                    Core.CheckDirectories(Unix.RealPath(level), configured);
                 }
 
                 while (missing.Count > 0)
