@@ -42,6 +42,8 @@ public sealed class CoreCommandTests
         CoreCommand.ProcEntryCap = CoreCommand.ProcEntries;
         CoreCommand.ProcByteCap = CoreCommand.ProcBytes;
         CoreCommand.StatReadHook = null;
+        CoreCommand.ClockHook = null;
+        CoreCommand.SignalHook = null;
         foreach (string file in Directory.EnumerateFiles(root, "*.pid"))
         {
             Support.Kill(int.Parse(File.ReadAllText(file).Trim(), CultureInfo.InvariantCulture));
@@ -391,46 +393,123 @@ public sealed class CoreCommandTests
         Assert.That(reads, Is.EqualTo(new[] { 1024, 1 }));
     }
 
+    /// <summary>The state letter of a live process, from <c>/proc/&lt;pid&gt;/stat</c>.</summary>
+    private static char State(int pid)
+    {
+        string stat = File.ReadAllText("/proc/" + pid.ToString(CultureInfo.InvariantCulture) + "/stat");
+        return stat[(stat.LastIndexOf(')') + 2)..][0];
+    }
+
     /// <summary>
-    /// A cancellation that lands during a record ends it at the next entry:
-    /// of 50 fake entries, the record stops after the third read, and the
-    /// command is stopped (the last record on the stop is bounded by the cap
-    /// instead).
+    /// On a stop without groups, the command is frozen with SIGSTOP before
+    /// the last record, the last record ends at its 250 ms budget, and only
+    /// then is the command killed. A cancellation during a record ends that
+    /// record at the next entry (the third of 50). The budget is measured on
+    /// a test clock that each read of the last record advances by 100 ms
+    /// (and each reading by 1 ms), so exactly three entries fit in it: the
+    /// fourth would start 304 ms after the stop. Without the budget, the
+    /// last record would read all 40 entries of its cap.
     /// </summary>
     [Test]
-    public void ACancelDuringAProcRecordEndsIt()
+    public void AStopFreezesTheCommandBeforeItsLastRecordAndBoundsIt()
     {
         CoreCommand.WithoutGroups = true;
         CoreCommand.ProcRoot = FakeProc("proc", 50, 1);
         CoreCommand.ProcEntryCap = 40;
+        long clock = 1_000_000;
+        long hundredMs = Stopwatch.Frequency / 10;
+        long oneMs = Stopwatch.Frequency / 1000;
+        CoreCommand.ClockHook = () => Interlocked.Add(ref clock, oneMs);
+        int command = 0;
+        CoreCommand.StartedHook = pid => command = pid;
+        var events = new List<string>();
         int stoppable = 0;
-        int final = 0;
+        char frozen = '?';
         using var cancel = new CancellationTokenSource();
+        CoreCommand.SignalHook = (pid, signal) => events.Add((pid == command ? "command " : "other ") + signal.ToString(CultureInfo.InvariantCulture));
         CoreCommand.StatReadHook = (path, bytes, canStop) =>
         {
-            if (!canStop)
+            if (canStop)
             {
-                final++;
+                if (++stoppable == 3)
+                {
+                    cancel.Cancel();
+                }
+
+                return;
             }
-            else if (++stoppable == 3)
+
+            if (!events.Contains("read"))
             {
-                cancel.Cancel();
+                // SIGSTOP is delivered asynchronously; the command must reach the stopped state.
+                Support.Eventually(() => State(command) == 'T', TimeSpan.FromSeconds(10));
+                frozen = State(command);
             }
+
+            events.Add("read");
+            Interlocked.Add(ref clock, hundredMs);
         };
         CarrierException error = Support.Throws<CarrierException>(() => Run(Waiting(Path.Combine(root, "never")), cancellationToken: cancel.Token))!;
         Assert.That(error.IsAborted, Is.True);
         Assert.That(stoppable, Is.EqualTo(3));
-        Assert.That(final, Is.EqualTo(40));
+        Assert.That(events, Is.EqualTo(new[] { "command 19", "read", "read", "read", "command 9" }));
+        Assert.That(frozen, Is.EqualTo('T'));
+        SdkSupport.Dies("the command", command);
     }
 
     /// <summary>
-    /// The kills of recorded descendants when the command exits observe a
-    /// stop before each descendant: ten fake descendants are recorded, the
-    /// command exits, and a cancellation during the second kill check ends
-    /// the kills there and is reported.
+    /// The whole cleanup after a stop, on the real clock, ends within
+    /// <see cref="CoreCommand.StopBudgetMs"/> (750 ms) plus scheduling slack,
+    /// even when the last record and the kills of 300 recorded descendants
+    /// would take 600 ms each (each fake <c>stat</c> read after the stop
+    /// takes at least 2 ms): the record and the kills are cut at their
+    /// budgets. The measured time is written to the test output.
     /// </summary>
     [Test]
-    public void AStopDuringTheExitKillsEndsThem()
+    public void TheCleanupAfterAStopEndsWithinItsBudget()
+    {
+        CoreCommand.WithoutGroups = true;
+        string proc = Path.Combine(root, "proc");
+        CoreCommand.ProcRoot = proc;
+        CoreCommand.StartedHook = pid => FakeProc("proc", 300, pid);
+        int recorded = 0;
+        using var cancel = new CancellationTokenSource();
+        long cancelled = 0;
+        CoreCommand.RecordedHook = pids =>
+        {
+            if (recorded == 0)
+            {
+                recorded = pids.Count;
+                cancelled = Stopwatch.GetTimestamp();
+                cancel.Cancel();
+            }
+        };
+        int after = 0;
+        CoreCommand.StatReadHook = (path, bytes, canStop) =>
+        {
+            if (!canStop)
+            {
+                after++;
+                Thread.Sleep(2);
+            }
+        };
+        Support.Throws<CarrierException>(() => Run(Waiting(Path.Combine(root, "never")), cancellationToken: cancel.Token));
+        double elapsed = Stopwatch.GetElapsedTime(cancelled).TotalMilliseconds;
+        TestContext.Out.WriteLine("cleanup after the stop: " + elapsed.ToString("F1", CultureInfo.InvariantCulture) + " ms; reads after the stop: " + after.ToString(CultureInfo.InvariantCulture));
+        Assert.That(recorded, Is.EqualTo(300));
+        Assert.That(after, Is.LessThan(600), "the record and the kills were not cut at their budgets");
+        Assert.That(elapsed, Is.LessThan(CoreCommand.StopBudgetMs + 500));
+    }
+
+    /// <summary>
+    /// A stop that lands during the kills of recorded descendants when the
+    /// command exits does not leave the rest running: ten fake descendants
+    /// are recorded, the command exits, a cancellation lands during the
+    /// second kill check, the other eight are still checked (within the kill
+    /// budget), and the stop is reported.
+    /// </summary>
+    [Test]
+    public void AStopDuringTheExitKillsFinishesThem()
     {
         CoreCommand.WithoutGroups = true;
         string release = Path.Combine(root, "release");
@@ -445,10 +524,15 @@ public sealed class CoreCommandTests
             File.WriteAllText(release, string.Empty);
         };
         int checks = 0;
+        int afterStop = 0;
         using var cancel = new CancellationTokenSource();
         CoreCommand.StatReadHook = (path, bytes, stoppable) =>
         {
-            if (stoppable && !CoreCommand.RecordDescendants && ++checks == 2)
+            if (!stoppable)
+            {
+                afterStop++;
+            }
+            else if (!CoreCommand.RecordDescendants && ++checks == 2)
             {
                 cancel.Cancel();
             }
@@ -457,6 +541,7 @@ public sealed class CoreCommandTests
         Assert.That(error.IsAborted, Is.True);
         Assert.That(recorded, Is.EqualTo(10));
         Assert.That(checks, Is.EqualTo(2));
+        Assert.That(afterStop, Is.EqualTo(8));
     }
 
     [Test]

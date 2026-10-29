@@ -7,7 +7,8 @@ namespace JacquardLang.Host.Sdk;
 
 /// <summary>
 /// The C library calls the SDK makes beyond the carrier's <c>poll(2)</c>:
-/// <c>kill(2)</c> to stop a Core command's process group, <c>geteuid(2)</c>
+/// <c>kill(2)</c> to stop a Core command's process group (or freeze and
+/// kill the command where there is none), <c>geteuid(2)</c>
 /// and a status call (<c>statx(2)</c> on Linux, <c>stat(2)</c> and
 /// <c>lstat(2)</c> on macOS) for the cache's owner check, for file kinds and
 /// sizes, and for the identities that detect a replaced file,
@@ -22,6 +23,9 @@ namespace JacquardLang.Host.Sdk;
 internal static partial class Unix
 {
     internal const int Sigkill = 9;
+
+    /// <summary>SIGSTOP on Linux (macOS numbers it 17; the SDK sends it only on Linux).</summary>
+    internal const int Sigstop = 19;
 
     private const int Enoent = 2;
     private const int Enotdir = 20;
@@ -114,6 +118,15 @@ internal static partial class Unix
         if (pid > 1)
         {
             _ = NativeKill(pid, Sigkill);
+        }
+    }
+
+    /// <summary>Sends <paramref name="signal"/> to <paramref name="pid"/>, never to a pid of one or less.</summary>
+    internal static void Signal(int pid, int signal)
+    {
+        if (pid > 1)
+        {
+            _ = NativeKill(pid, signal);
         }
     }
 
