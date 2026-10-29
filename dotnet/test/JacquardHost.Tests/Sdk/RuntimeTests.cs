@@ -1170,8 +1170,9 @@ public sealed class RuntimeTests
         Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.False, "no getent");
         Core.GetentPaths = new[] { missing, mine, "/usr/bin/getent" };
         Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.False, "a getent this user owns");
+        bool machine = MachineVerdict(account.Name, me, account.Group);
         Core.GetentPaths = new[] { missing, "/usr/bin/getent" };
-        Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.EqualTo(ExpectedVerdict(account.Name, me, account.Group)), "the first present is used");
+        Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.EqualTo(machine), "the first present is used");
 
         // The real getent's file or a directory above it, as another user's or writable by group or others.
         string getent = Unix.RealPath("/usr/bin/getent");
@@ -1189,7 +1190,7 @@ public sealed class RuntimeTests
             }
         }
 
-        Assert.That(Altered(getent, s => s), Is.EqualTo(ExpectedVerdict(account.Name, me, account.Group)), "unaltered");
+        Assert.That(Altered(getent, s => s), Is.EqualTo(machine), "unaltered");
         Assert.That(Altered(getent, s => s with { Owner = me == 0 ? 1u : me }), Is.False, "getent owned by another user");
         Assert.That(Altered(getent, s => s with { Mode = s.Mode | 0x10 }), Is.False, "getent writable by its group");
         Assert.That(Altered(getent, s => s with { Mode = s.Mode | 0x2 }), Is.False, "getent writable by others");
@@ -1255,27 +1256,66 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
-    /// Whether <c>/etc/passwd</c> lists <paramref name="name"/> with the ids
-    /// and no account of another user id with that primary group: what the
-    /// listing should conclude on a machine whose other password database
-    /// sources add no account with it.
+    /// What <paramref name="file"/> run with <paramref name="arguments"/>
+    /// prints (here <c>getent passwd</c>, or a stand-in printing its listing
+    /// and more), run by the test itself rather than the SDK's runner: its
+    /// lines.
     /// </summary>
-    private static bool ExpectedVerdict(string name, uint uid, uint gid)
+    private static string[] Listing(string file, string[] arguments)
     {
+        var info = new System.Diagnostics.ProcessStartInfo(file)
+        {
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+        };
+        foreach (string argument in arguments)
+        {
+            info.ArgumentList.Add(argument);
+        }
+
+        using System.Diagnostics.Process process = System.Diagnostics.Process.Start(info) ?? throw new AssertionException("could not start " + file);
+        process.StandardInput.Close();
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        if (!process.WaitForExit(30_000))
+        {
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+            Assert.Fail(file + " did not exit within 30 seconds");
+        }
+
+        Assert.That(process.ExitCode, Is.EqualTo(0), file + " exit status");
+        return stdout.GetAwaiter().GetResult().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    /// <summary>
+    /// The private-group rule's password database half applied by the test
+    /// to a listing: <paramref name="name"/> listed with exactly these ids,
+    /// no name listed twice, no malformed line, and no account of another
+    /// user id with <paramref name="gid"/> as its primary group.
+    /// </summary>
+    private static bool Oracle(string[] lines, string name, uint uid, uint gid)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
         bool listed = false;
-        foreach (string line in File.ReadLines("/etc/passwd"))
+        foreach (string line in lines)
         {
             string[] fields = line.Split(':');
-            if (fields.Length != 7)
+            if (fields.Length != 7 || !names.Add(fields[0])
+                || !uint.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out uint entryUid)
+                || !uint.TryParse(fields[3], NumberStyles.None, CultureInfo.InvariantCulture, out uint entryGid))
             {
-                continue;
+                return false;
             }
 
-            uint entryUid = uint.Parse(fields[2], CultureInfo.InvariantCulture);
-            uint entryGid = uint.Parse(fields[3], CultureInfo.InvariantCulture);
             if (fields[0] == name)
             {
-                listed = entryUid == uid && entryGid == gid;
+                if (entryUid != uid || entryGid != gid)
+                {
+                    return false;
+                }
+
+                listed = true;
             }
             else if (entryGid == gid && entryUid != uid)
             {
@@ -1286,15 +1326,22 @@ public sealed class RuntimeTests
         return listed;
     }
 
+    /// <summary>The verdict <see cref="Oracle"/> gives for this machine's <c>getent passwd</c> listing.</summary>
+    private static bool MachineVerdict(string name, uint uid, uint gid) =>
+        Oracle(Listing(Unix.RealPath(new[] { "/usr/bin/getent", "/bin/getent" }.First(File.Exists)), new[] { "passwd" }), name, uid, gid);
+
     /// <summary>
-    /// The real <c>getent passwd</c> on this machine lists this user with its
-    /// primary group, and the verdict is what <c>/etc/passwd</c> shows (on
-    /// this machine, and a standard CI runner, accepted). Another
-    /// enumeration of the password database in this process, here a full
-    /// <c>setpwent</c>/<c>getpwent</c>/<c>endpwent</c> pass run while
+    /// The SDK's verdict on this machine's real <c>getent passwd</c> listing
+    /// is the one the test reaches by running <c>getent passwd</c> itself and
+    /// applying the rule, whichever it is (private, or shared as where every
+    /// account has the primary group <c>users</c>), and so is its verdict on
+    /// that listing with another account of this user's primary group added
+    /// (a stand-in printing both), which the test's rule finds shared.
+    /// Another enumeration of the password database in this process, here a
+    /// full <c>setpwent</c>/<c>getpwent</c>/<c>endpwent</c> pass run while
     /// <c>getent</c> runs, cannot hide an entry, as it could while the SDK
-    /// shared libc's process-global position: an account whose primary
-    /// group another user id shares is still refused.
+    /// shared libc's process-global position: an account this machine lists
+    /// whose primary group another user id shares is refused too.
     /// </summary>
     [Test]
     [Platform("Linux")]
@@ -1302,23 +1349,42 @@ public sealed class RuntimeTests
     {
         uint me = Unix.EffectiveUser();
         Unix.Account account = Unix.User(me) ?? throw new AssertionException("no passwd entry for this user");
-        Assert.That(ExpectedVerdict(account.Name, me, account.Group), Is.True, "this user's group is private by /etc/passwd");
+        string getent = Unix.RealPath(new[] { "/usr/bin/getent", "/bin/getent" }.First(File.Exists));
+        string second = "jacquard-test-second:x:" + (me + 1).ToString(CultureInfo.InvariantCulture) + ":" + account.Group.ToString(CultureInfo.InvariantCulture) + "::/:/bin/sh";
+        var listings = new (string What, string File, string[] Arguments)[]
+        {
+            ("this machine's listing", getent, new[] { "passwd" }),
+            ("this machine's listing and another account with this user's primary group", "/bin/sh", new[] { "-c", "\"$0\" passwd && echo '" + second + "'", getent }),
+        };
+        var expected = new bool[listings.Length];
         int consumed = 0;
         CoreCommand.StartedHook = _ => consumed += SdkSupport.Libc.ReadWholePasswordDatabase();
         try
         {
-            Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.True, "this user");
-            string[][] file = File.ReadLines("/etc/passwd").Select(l => l.Split(':')).Where(f => f.Length == 7).ToArray();
-            string[]? shared = file.FirstOrDefault(f => file.Any(o => o[3] == f[3] && o[2] != f[2]));
+            for (int i = 0; i < listings.Length; i++)
+            {
+                (string what, string file, string[] arguments) = listings[i];
+                expected[i] = Oracle(Listing(file, arguments), account.Name, me, account.Group);
+                Core.GetentPaths = new[] { file };
+                Core.GetentArguments = arguments;
+                consumed = 0;
+                Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.EqualTo(expected[i]), what);
+                Assert.That(consumed, Is.GreaterThan(0), what + ": the in-process enumeration ran while getent ran");
+            }
+
+            Assert.That(expected[1], Is.False, "the test's rule finds the group shared once another account has it");
+
+            string[][] entries = Listing(getent, new[] { "passwd" }).Select(l => l.Split(':')).Where(f => f.Length == 7).ToArray();
+            string[]? shared = entries.FirstOrDefault(f => entries.Any(o => o[3] == f[3] && o[2] != f[2]));
             if (shared is not null)
             {
+                Core.GetentPaths = new[] { getent };
+                Core.GetentArguments = new[] { "passwd" };
                 Assert.That(
                     Core.OnlyUserHasPrimaryGroup(shared[0], uint.Parse(shared[2], CultureInfo.InvariantCulture), uint.Parse(shared[3], CultureInfo.InvariantCulture), CancellationToken.None),
                     Is.False,
                     shared[0] + " shares its primary group " + shared[3]);
             }
-
-            Assert.That(consumed, Is.GreaterThan(0), "the in-process enumeration ran");
         }
         finally
         {
