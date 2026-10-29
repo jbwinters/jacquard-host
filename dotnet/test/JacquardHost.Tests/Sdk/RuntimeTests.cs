@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using JacquardLang.Host.Carrier;
 using JacquardLang.Host.Protocol;
 using JacquardLang.Host.Sdk;
 using NUnit.Framework;
@@ -969,77 +970,255 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
-    /// The password database enumeration is bounded and fails closed: a pass
-    /// reading more than <see cref="Core.PasswdEntries"/> entries, a lookup
-    /// error (a null entry) anywhere in it, a name listed twice (as a pass
-    /// restarted by another enumeration in the process would show), a
-    /// database that does not list the user with the group, and two passes
-    /// that differ (as a position moved by another enumeration would make
-    /// them) each mean "not private"; exactly the cap is accepted.
+    /// The preparation's token reaches the password database listing: a
+    /// listing that sees the token cancelled stops the preparation as
+    /// cancelled, and nothing is made.
     /// </summary>
     [Test]
-    public void ThePasswordDatabaseScanRefusesOnItsCapAnErrorOrInterference()
+    public void APreparationCancelledWhileThePasswordDatabaseIsListedStops()
     {
-        uint me = Unix.EffectiveUser();
-        const uint Group = 4242;
-        var self = new Unix.PasswdEntry("me", me, Group);
-        IEnumerable<Unix.PasswdEntry?> Others(int count)
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent")).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1F8);
+        string cache = Path.Combine(parent, "cache");
+        SdkSupport.Accounts(parent, "me", Array.Empty<string>());
+        Func<CancellationToken, CoreCommand.Output> listing = Core.GetentHook!;
+        using var cancel = new CancellationTokenSource();
+        var seen = new List<CancellationToken>();
+        Core.GetentHook = token =>
         {
-            for (int i = 0; i < count; i++)
-            {
-                yield return new Unix.PasswdEntry("user" + i.ToString(CultureInfo.InvariantCulture), me + 1 + (uint)i, Group + 1);
-            }
-        }
-
-        bool Verdict(Func<IEnumerable<Unix.PasswdEntry?>> source)
-        {
-            Core.PasswdHook = source;
-            return Core.OnlyUserHasPrimaryGroup(me, Group);
-        }
-
-        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self }), Is.True, "only the user");
-        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self }.Concat(Others(Core.PasswdEntries - 1))), Is.True, "exactly the cap");
-        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self }.Concat(Others(Core.PasswdEntries))), Is.False, "one past the cap");
-        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self, null }), Is.False, "a lookup error after the user");
-        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { null, self }), Is.False, "a lookup error before the user");
-        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self, self }), Is.False, "a name listed twice");
-        Assert.That(Verdict(() => Others(3)), Is.False, "the user is not listed with the group");
-        int passes = 0;
-        Assert.That(Verdict(() => ++passes == 1 ? new Unix.PasswdEntry?[] { self } : new Unix.PasswdEntry?[] { self }.Concat(Others(1))), Is.False, "the passes differ");
-        Assert.That(passes, Is.EqualTo(2));
+            seen.Add(token);
+            cancel.Cancel();
+            throw CarrierException.Aborted("command aborted");
+        };
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = cache }, cancel.Token))!.Message,
+            Is.EqualTo(Core.Aborted));
+        Assert.That(seen, Is.EqualTo(new[] { cancel.Token }));
+        Assert.That(Directory.Exists(cache), Is.False, "a cancelled preparation made the root");
+        Core.GetentHook = listing;
+        Assert.That(fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = cache }).Directory, Does.StartWith(cache + "/"));
     }
 
     /// <summary>
-    /// The real password database enumerates without a lookup error, lists
-    /// this user with its primary group, and includes every account
-    /// <c>/etc/passwd</c> gives that primary group; the verdict is whether
-    /// any of those is another account.
+    /// The password database listing (<c>getent passwd</c>'s output and exit
+    /// status, from a seam) is parsed strictly and fails closed: only the
+    /// user with the group is accepted, and exactly the entry cap; another
+    /// account with the group as its primary group, a nonzero exit, a
+    /// timeout, output over the limit or cut short, a malformed line,
+    /// invalid UTF-8, a name listed twice, entries past the cap, and the user
+    /// missing or listed with other ids each mean "not private". A
+    /// cancellation is a cancelled preparation.
     /// </summary>
     [Test]
-    public void ThePasswordDatabaseScanReadsTheRealDatabase()
+    public void ThePasswordDatabaseListingIsParsedStrictlyAndFailsClosed()
+    {
+        uint me = Unix.EffectiveUser();
+        const uint Group = 4242;
+        string self = SdkSupport.Passwd(new[] { new Unix.PasswdEntry("me", me, Group) });
+        string Others(int count) => SdkSupport.Passwd(Enumerable.Range(0, count).Select(i => new Unix.PasswdEntry("user" + i.ToString(CultureInfo.InvariantCulture), me + 1 + (uint)i, Group + 1)));
+        bool Verdict(Func<CancellationToken, CoreCommand.Output> getent)
+        {
+            Core.GetentHook = getent;
+            return Core.OnlyUserHasPrimaryGroup("me", me, Group, CancellationToken.None);
+        }
+
+        bool Listing(string stdout) => Verdict(SdkSupport.Getent(stdout));
+
+        Assert.That(Listing(self), Is.True, "only the user");
+        Assert.That(Listing(self + Others(Core.PasswdEntries - 1)), Is.True, "exactly the cap");
+        Assert.That(Listing(self + "alias:x:" + me.ToString(CultureInfo.InvariantCulture) + ":4242::/:/bin/sh\n"), Is.True, "another name for the same user id");
+        Assert.That(Listing(self + "attacker:x:" + (me + 1).ToString(CultureInfo.InvariantCulture) + ":4242::/home/attacker:/bin/sh\n"), Is.False, "another account with the group as its primary group");
+        Assert.That(Listing(self + Others(Core.PasswdEntries)), Is.False, "one past the cap");
+        Assert.That(Verdict(SdkSupport.Getent(self, status: 2)), Is.False, "a nonzero exit");
+        Assert.That(Verdict(SdkSupport.Getent(self, overflow: true)), Is.False, "output over the limit");
+        Assert.That(Verdict(_ => throw CarrierException.Timeout("command did not exit in time")), Is.False, "a timeout");
+        Assert.That(Verdict(_ => throw CarrierException.Loss("could not start getent")), Is.False, "a start failure");
+        Assert.That(Listing(self + "daemon:x:1:1:daemon:/usr/sbin"), Is.False, "output cut short within a line");
+        Assert.That(Listing(self[..^1]), Is.False, "output cut short before the newline");
+        Assert.That(Listing(string.Empty), Is.False, "no output");
+        Assert.That(Listing(self + "\n"), Is.False, "an empty line");
+        Assert.That(Listing(self + "daemon:x:1:1:daemon:/usr/sbin\n"), Is.False, "six fields");
+        Assert.That(Listing(self + "daemon:x:1:1:daemon:/usr/sbin:/bin/sh:extra\n"), Is.False, "eight fields");
+        Assert.That(Listing(self + ":x:1:1:daemon:/usr/sbin:/bin/sh\n"), Is.False, "an empty name");
+        foreach (string id in new[] { string.Empty, "-1", "+1", "01", "1a", " 1", "4294967296", "0x1" })
+        {
+            Assert.That(Listing(self + "daemon:x:" + id + ":1::/:/bin/sh\n"), Is.False, "user id \"" + id + "\"");
+            Assert.That(Listing(self + "daemon:x:1:" + id + "::/:/bin/sh\n"), Is.False, "group id \"" + id + "\"");
+        }
+
+        Assert.That(Listing(self + "daemon:x:0:0::/:/bin/sh\n"), Is.True, "id zero");
+        byte[] invalid = Encoding.UTF8.GetBytes(self + "da?mon:x:1:1::/:/bin/sh\n");
+        invalid[Array.IndexOf(invalid, (byte)'?')] = 0xFF;
+        Assert.That(Verdict(_ => new CoreCommand.Output(0, invalid, false, Array.Empty<byte>())), Is.False, "invalid UTF-8");
+        Assert.That(Listing(self + self), Is.False, "the user listed twice");
+        Assert.That(Listing(self + "daemon:x:1:1::/:/bin/sh\ndaemon:x:2:2::/:/bin/sh\n"), Is.False, "another name listed twice");
+        Assert.That(Listing(Others(3)), Is.False, "the user is missing");
+        Assert.That(Listing(SdkSupport.Passwd(new[] { new Unix.PasswdEntry("me", me, Group + 1) })), Is.False, "the user with another primary group");
+        Assert.That(Listing(SdkSupport.Passwd(new[] { new Unix.PasswdEntry("me", me + 1, Group) })), Is.False, "the user's name with another user id");
+
+        var cancel = new CancellationTokenSource();
+        CancellationToken seen = default;
+        Core.GetentHook = token =>
+        {
+            seen = token;
+            cancel.Cancel();
+            throw CarrierException.Aborted("command aborted");
+        };
+        Assert.That(Support.Throws<JacquardException>(() => Core.OnlyUserHasPrimaryGroup("me", me, Group, cancel.Token))!.Message, Is.EqualTo(Core.Aborted));
+        Assert.That(seen, Is.EqualTo(cancel.Token), "getent runs with the caller's token");
+    }
+
+    /// <summary>
+    /// <c>getent</c> runs through the bounded command runner: a real command
+    /// in its place (<c>/bin/sh</c>, root's) that prints a valid listing but
+    /// exits 1 is refused, one that does not exit within the time limit
+    /// (here 100 ms) is refused, and one whose token is cancelled once it has
+    /// started stops the preparation as cancelled. No command it started is
+    /// left running.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void ThePasswordDatabaseListingIsBoundedAndStoppedByTheToken()
+    {
+        uint me = Unix.EffectiveUser();
+        const uint Group = 4242;
+        string self = "me:x:" + me.ToString(CultureInfo.InvariantCulture) + ":4242::/:/bin/sh";
+        Core.GetentPaths = new[] { "/bin/sh" };
+        Core.GetentArguments = new[] { "-c", "echo " + self + "; exit 0" };
+        Assert.That(Core.OnlyUserHasPrimaryGroup("me", me, Group, CancellationToken.None), Is.True, "the stand-in's listing");
+        Core.GetentArguments = new[] { "-c", "echo " + self + "; exit 1" };
+        Assert.That(Core.OnlyUserHasPrimaryGroup("me", me, Group, CancellationToken.None), Is.False, "a nonzero exit");
+
+        var started = new List<int>();
+        CoreCommand.StartedHook = started.Add;
+        try
+        {
+            Core.GetentArguments = new[] { "-c", "echo " + self + "; exec sleep 30" };
+            Core.GetentTimeoutCap = 100;
+            Assert.That(Core.OnlyUserHasPrimaryGroup("me", me, Group, CancellationToken.None), Is.False, "a timeout");
+            Core.GetentTimeoutCap = Core.GetentTimeoutMs;
+            var cancel = new CancellationTokenSource();
+            CoreCommand.StartedHook = pid =>
+            {
+                started.Add(pid);
+                cancel.Cancel();
+            };
+            Assert.That(Support.Throws<JacquardException>(() => Core.OnlyUserHasPrimaryGroup("me", me, Group, cancel.Token))!.Message, Is.EqualTo(Core.Aborted));
+        }
+        finally
+        {
+            CoreCommand.StartedHook = null;
+        }
+
+        Assert.That(started, Has.Count.EqualTo(2));
+        foreach (int pid in started)
+        {
+            Assert.That(Directory.Exists("/proc/" + pid.ToString(CultureInfo.InvariantCulture)), Is.False, "the stopped command " + pid.ToString(CultureInfo.InvariantCulture) + " is gone");
+        }
+    }
+
+    /// <summary>
+    /// <c>getent</c> is the first of the configured paths present, and it
+    /// must be root's and not writable by group or others: a missing path is
+    /// passed over, an executable this user owns (which would print a valid
+    /// listing) is refused without falling through to a later path, and the
+    /// ownership rule refuses a file or directory another user owns or that
+    /// group or others may write.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void TheGetentExecutableMustBeRootsAndNotWritable()
     {
         uint me = Unix.EffectiveUser();
         Unix.Account account = Unix.User(me) ?? throw new AssertionException("no passwd entry for this user");
-        List<Unix.PasswdEntry?> entries;
-        lock (Unix.PasswdLock)
-        {
-            entries = Unix.Passwd().Take(Core.PasswdEntries + 1).ToList();
-        }
+        string missing = Path.Combine(scratch, "missing");
+        string mine = Path.Combine(scratch, "getent");
+        File.WriteAllText(mine, "#!/bin/sh\necho '" + account.Name + ":x:" + me.ToString(CultureInfo.InvariantCulture) + ":" + account.Group.ToString(CultureInfo.InvariantCulture) + "::/:/bin/sh'\n");
+        File.SetUnixFileMode(mine, (UnixFileMode)0x1ED);
+        Core.GetentPaths = new[] { missing };
+        Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.False, "no getent");
+        Core.GetentPaths = new[] { missing, mine, "/usr/bin/getent" };
+        Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.False, "a getent this user owns");
+        Core.GetentPaths = new[] { missing, "/usr/bin/getent" };
+        Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.EqualTo(ExpectedVerdict(account.Name, me, account.Group)), "the first present is used");
 
-        Assert.That(entries, Has.None.Null, "a lookup error");
-        Assert.That(entries, Has.Count.LessThanOrEqualTo(Core.PasswdEntries));
-        Assert.That(entries, Does.Contain(new Unix.PasswdEntry(account.Name, me, account.Group)));
+        Assert.That(Core.RootOnly(new Unix.Status(Unix.Kind.Regular, 0, 0, 0x1ED)), Is.True, "root's 0755");
+        Assert.That(Core.RootOnly(new Unix.Status(Unix.Kind.Regular, 0, me == 0 ? 1u : me, 0x1ED)), Is.False, "another owner");
+        Assert.That(Core.RootOnly(new Unix.Status(Unix.Kind.Regular, 0, 0, 0x1FD)), Is.False, "group-writable");
+        Assert.That(Core.RootOnly(new Unix.Status(Unix.Kind.Regular, 0, 0, 0x1EF)), Is.False, "writable by others");
+    }
+
+    /// <summary>
+    /// Whether <c>/etc/passwd</c> lists <paramref name="name"/> with the ids
+    /// and no account of another user id with that primary group: what the
+    /// listing should conclude on a machine whose other password database
+    /// sources add no account with it.
+    /// </summary>
+    private static bool ExpectedVerdict(string name, uint uid, uint gid)
+    {
+        bool listed = false;
         foreach (string line in File.ReadLines("/etc/passwd"))
         {
             string[] fields = line.Split(':');
-            if (fields.Length >= 4 && fields[3] == account.Group.ToString(CultureInfo.InvariantCulture))
+            if (fields.Length != 7)
             {
-                Assert.That(entries.Select(e => e!.Value.Name), Does.Contain(fields[0]), "/etc/passwd lists " + fields[0]);
+                continue;
+            }
+
+            uint entryUid = uint.Parse(fields[2], CultureInfo.InvariantCulture);
+            uint entryGid = uint.Parse(fields[3], CultureInfo.InvariantCulture);
+            if (fields[0] == name)
+            {
+                listed = entryUid == uid && entryGid == gid;
+            }
+            else if (entryGid == gid && entryUid != uid)
+            {
+                return false;
             }
         }
 
-        bool others = entries.Any(e => e!.Value.Group == account.Group && e.Value.Uid != me);
-        Assert.That(Core.OnlyUserHasPrimaryGroup(me, account.Group), Is.EqualTo(!others));
+        return listed;
+    }
+
+    /// <summary>
+    /// The real <c>getent passwd</c> on this machine lists this user with its
+    /// primary group, and the verdict is what <c>/etc/passwd</c> shows (on
+    /// this machine, and a standard CI runner, accepted). Another
+    /// enumeration of the password database in this process, here a full
+    /// <c>setpwent</c>/<c>getpwent</c>/<c>endpwent</c> pass run while
+    /// <c>getent</c> runs, cannot hide an entry, as it could while the SDK
+    /// shared libc's process-global position: an account whose primary
+    /// group another user id shares is still refused.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void ThePasswordDatabaseListingOfThisMachineIsReadInAnotherProcess()
+    {
+        uint me = Unix.EffectiveUser();
+        Unix.Account account = Unix.User(me) ?? throw new AssertionException("no passwd entry for this user");
+        Assert.That(ExpectedVerdict(account.Name, me, account.Group), Is.True, "this user's group is private by /etc/passwd");
+        int consumed = 0;
+        CoreCommand.StartedHook = _ => consumed += SdkSupport.Libc.ReadWholePasswordDatabase();
+        try
+        {
+            Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.True, "this user");
+            string[][] file = File.ReadLines("/etc/passwd").Select(l => l.Split(':')).Where(f => f.Length == 7).ToArray();
+            string[]? shared = file.FirstOrDefault(f => file.Any(o => o[3] == f[3] && o[2] != f[2]));
+            if (shared is not null)
+            {
+                Assert.That(
+                    Core.OnlyUserHasPrimaryGroup(shared[0], uint.Parse(shared[2], CultureInfo.InvariantCulture), uint.Parse(shared[3], CultureInfo.InvariantCulture), CancellationToken.None),
+                    Is.False,
+                    shared[0] + " shares its primary group " + shared[3]);
+            }
+
+            Assert.That(consumed, Is.GreaterThan(0), "the in-process enumeration ran");
+        }
+        finally
+        {
+            CoreCommand.StartedHook = null;
+        }
     }
 
     /// <summary>

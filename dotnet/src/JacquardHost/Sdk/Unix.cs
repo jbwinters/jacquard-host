@@ -17,10 +17,10 @@ namespace JacquardLang.Host.Sdk;
 /// <c>access(2)</c> for the execute permission, <c>mkdir(2)</c> to
 /// create a staging directory exclusively, <c>realpath(3)</c> to resolve
 /// the cache root's path once, and <c>getpwuid_r(3)</c>,
-/// <c>getgrgid_r(3)</c>, and on Linux <c>setpwent(3)</c>,
-/// <c>getpwent_r(3)</c>, <c>endpwent(3)</c>, and <c>lgetxattr(2)</c> (for an
-/// access ACL) to recognize a directory writable only by the user's private
-/// group.
+/// <c>getgrgid_r(3)</c>, and on Linux <c>lgetxattr(2)</c> (for an access
+/// ACL) to recognize a directory writable only by the user's private group
+/// (the password database is listed by <c>getent passwd</c> in another
+/// process, so no enumeration position is shared).
 /// </summary>
 /// <remarks>
 /// The macOS calls use the 64-bit-inode <c>struct stat</c> layout; they are
@@ -121,15 +121,6 @@ internal static partial class Unix
 
     [LibraryImport("libc", EntryPoint = "getgrgid_r")]
     private static unsafe partial int NativeGetgrgid(uint gid, byte* entry, byte* buffer, nuint length, byte** result);
-
-    [LibraryImport("libc", EntryPoint = "setpwent")]
-    private static partial void NativeSetpwent();
-
-    [LibraryImport("libc", EntryPoint = "getpwent_r")]
-    private static unsafe partial int NativeGetpwent(byte* entry, byte* buffer, nuint length, byte** result);
-
-    [LibraryImport("libc", EntryPoint = "endpwent")]
-    private static partial void NativeEndpwent();
 
     [LibraryImport("libc", EntryPoint = "stat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static unsafe partial int MacStatArm(string path, byte* buffer);
@@ -387,12 +378,6 @@ internal static partial class Unix
     internal readonly record struct PasswdEntry(string Name, uint Uid, uint Group);
 
     /// <summary>
-    /// Serializes every enumeration of the password database in this
-    /// process: <c>getpwent_r(3)</c>'s position is process-global.
-    /// </summary>
-    internal static readonly object PasswdLock = new();
-
-    /// <summary>
     /// The password database entry of <paramref name="uid"/>
     /// (<c>getpwuid_r(3)</c>); null when there is none, it cannot be read,
     /// it needs more than <see cref="AccountBytes"/>, or libc returns a
@@ -554,94 +539,6 @@ internal static partial class Unix
         catch (DecoderFallbackException)
         {
             return null;
-        }
-    }
-
-    /// <summary>
-    /// Every entry of the password database in turn, as
-    /// <c>setpwent(3)</c>, <c>getpwent_r(3)</c>, and <c>endpwent(3)</c>
-    /// enumerate it (on Linux; elsewhere one lookup error). A null element is
-    /// a lookup error: an entry larger than <see cref="AccountBytes"/>, an
-    /// error other than the end, or a pointer outside the buffer; the
-    /// enumeration ends after it. The caller holds
-    /// <see cref="PasswdLock"/> while it enumerates; the position is
-    /// process-global, so an enumeration elsewhere in the process that does
-    /// not take the lock can move it.
-    /// </summary>
-    internal static IEnumerable<PasswdEntry?> Passwd()
-    {
-        if (!OperatingSystem.IsLinux() || IntPtr.Size != 8)
-        {
-            yield return null;
-            yield break;
-        }
-
-        NativeSetpwent();
-        try
-        {
-            byte[] buffer = new byte[1024];
-            while (true)
-            {
-                int status = NextPasswd(ref buffer, out PasswdEntry? entry);
-                if (status == 0)
-                {
-                    yield break;
-                }
-
-                yield return status > 0 ? entry : null;
-                if (status < 0)
-                {
-                    yield break;
-                }
-            }
-        }
-        finally
-        {
-            NativeEndpwent();
-        }
-    }
-
-    /// <summary>
-    /// Reads the next password database entry into <paramref name="entry"/>:
-    /// 1 when there is one, 0 at the end, -1 on a lookup error. The buffer
-    /// doubles on ERANGE (which leaves the position on the same entry) up to
-    /// <see cref="AccountBytes"/>.
-    /// </summary>
-    private static unsafe int NextPasswd(ref byte[] buffer, out PasswdEntry? entry)
-    {
-        entry = null;
-        byte* record = stackalloc byte[256];
-        while (true)
-        {
-            byte* result = null;
-            int error;
-            int length = buffer.Length;
-            fixed (byte* data = buffer)
-            {
-                error = NativeGetpwent(record, data, (nuint)length, &result);
-                if (error == 0)
-                {
-                    if (result == null)
-                    {
-                        return 0;
-                    }
-
-                    entry = ReadAccount(record, data, length);
-                    return entry is null ? -1 : 1;
-                }
-            }
-
-            if (error == Enoent)
-            {
-                return 0;
-            }
-
-            if (error != Erange || length >= AccountBytes)
-            {
-                return -1;
-            }
-
-            buffer = new byte[length * 2];
         }
     }
 

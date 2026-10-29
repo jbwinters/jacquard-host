@@ -10,7 +10,7 @@ using NUnit.Framework;
 namespace JacquardLang.Host.Tests.Sdk;
 
 /// <summary>Helpers for the SDK tests.</summary>
-internal static class SdkSupport
+internal static partial class SdkSupport
 {
     /// <summary>Waits up to a minute for <paramref name="path"/> to hold a complete pid line and returns it.</summary>
     internal static int PidFile(string path)
@@ -100,13 +100,48 @@ internal static class SdkSupport
     /// password database listing "me" with that primary group followed by
     /// <paramref name="others"/>.
     /// </summary>
-    internal static void Accounts(string directory, string name, string[] members, params Unix.PasswdEntry?[] others)
+    internal static void Accounts(string directory, string name, string[] members, params Unix.PasswdEntry[] others)
     {
         uint group = Unix.Stat(directory, follow: false).Group;
         uint me = Unix.EffectiveUser();
         Core.UserHook = uid => uid == me ? new Unix.Account("me", group) : null;
         Core.GroupHook = gid => gid == group ? new Unix.GroupEntry(name, members) : null;
-        Core.PasswdHook = () => new Unix.PasswdEntry?[] { new Unix.PasswdEntry("me", me, group) }.Concat(others);
+        Core.GetentHook = Getent(Passwd(new[] { new Unix.PasswdEntry("me", me, group) }.Concat(others)));
+    }
+
+    /// <summary>The <c>getent passwd</c> lines of <paramref name="entries"/>.</summary>
+    internal static string Passwd(System.Collections.Generic.IEnumerable<Unix.PasswdEntry> entries) =>
+        string.Concat(entries.Select(e => string.Format(CultureInfo.InvariantCulture, "{0}:x:{1}:{2}:{0}:/home/{0}:/bin/sh\n", e.Name, e.Uid, e.Group)));
+
+    /// <summary>A <c>getent</c> stand-in that prints <paramref name="stdout"/> and exits with <paramref name="status"/>.</summary>
+    internal static Func<CancellationToken, CoreCommand.Output> Getent(string stdout, int status = 0, bool overflow = false) =>
+        _ => new CoreCommand.Output(status, Encoding.UTF8.GetBytes(stdout), overflow, Array.Empty<byte>());
+
+    /// <summary>libc's own password database enumeration, as other native code in the process would run it.</summary>
+    internal static partial class Libc
+    {
+        /// <summary>Reads every entry with <c>setpwent</c>, <c>getpwent</c>, and <c>endpwent</c>; how many.</summary>
+        internal static int ReadWholePasswordDatabase()
+        {
+            int count = 0;
+            Setpwent();
+            while (Getpwent() != IntPtr.Zero && count < 1_000_000)
+            {
+                count++;
+            }
+
+            Endpwent();
+            return count;
+        }
+
+        [System.Runtime.InteropServices.LibraryImport("libc", EntryPoint = "setpwent")]
+        private static partial void Setpwent();
+
+        [System.Runtime.InteropServices.LibraryImport("libc", EntryPoint = "getpwent")]
+        private static partial IntPtr Getpwent();
+
+        [System.Runtime.InteropServices.LibraryImport("libc", EntryPoint = "endpwent")]
+        private static partial void Endpwent();
     }
 
     /// <summary>Clears the private-group seams.</summary>
@@ -114,7 +149,10 @@ internal static class SdkSupport
     {
         Core.UserHook = null;
         Core.GroupHook = null;
-        Core.PasswdHook = null;
+        Core.GetentHook = null;
+        Core.GetentPaths = new[] { "/usr/bin/getent", "/bin/getent" };
+        Core.GetentArguments = new[] { "passwd" };
+        Core.GetentTimeoutCap = Core.GetentTimeoutMs;
     }
 
     /// <summary>

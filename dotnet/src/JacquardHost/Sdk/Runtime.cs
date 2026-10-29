@@ -515,7 +515,7 @@ public sealed class Runtime
                 // is made, so a refused preparation makes nothing.
                 if (missing.Count > 0 && level is not null && Unix.Supported)
                 {
-                    Core.CheckDirectories(Unix.RealPath(level), configured);
+                    Core.CheckDirectories(Unix.RealPath(level), configured, cancellationToken);
                 }
 
                 while (missing.Count > 0)
@@ -542,7 +542,7 @@ public sealed class Runtime
         // away and put another directory there), and its identity is checked
         // again before each use, a prepared program's worker starts included.
         Unix.Status root = Core.Check(cache, Core.Access.OwnerOnly);
-        Core.CheckAncestors(cache);
+        Core.CheckAncestors(cache, cancellationToken);
         if (Unix.Stat(directory, follow: false).Kind != Unix.Kind.Missing)
         {
             Core.Unchanged(pins, cancellationToken);

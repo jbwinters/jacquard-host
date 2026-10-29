@@ -590,10 +590,10 @@ internal static class Core
     /// time, and every later use of the path, a prepared program's workers
     /// included, would use it.
     /// </summary>
-    /// <exception cref="JacquardException">A preparation failure naming every unsafe directory.</exception>
-    internal static void CheckAncestors(string root)
+    /// <exception cref="JacquardException">A preparation failure naming every unsafe directory, or cancelled.</exception>
+    internal static void CheckAncestors(string root, CancellationToken cancellationToken)
     {
-        if (Path.GetDirectoryName(root) is { } parent && UnsafeDirectories(parent, "cache directory " + root) is { } problem)
+        if (Path.GetDirectoryName(root) is { } parent && UnsafeDirectories(parent, "cache directory " + root, cancellationToken) is { } problem)
         {
             throw JacquardException.Preparation(problem);
         }
@@ -604,10 +604,10 @@ internal static class Core
     /// and the directories above it before any missing level below it is
     /// made, so a refused preparation makes nothing.
     /// </summary>
-    /// <exception cref="JacquardException">A preparation failure naming every unsafe directory.</exception>
-    internal static void CheckDirectories(string directory, string root)
+    /// <exception cref="JacquardException">A preparation failure naming every unsafe directory, or cancelled.</exception>
+    internal static void CheckDirectories(string directory, string root, CancellationToken cancellationToken)
     {
-        if (UnsafeDirectories(directory, "cache directory " + root) is { } problem)
+        if (UnsafeDirectories(directory, "cache directory " + root, cancellationToken) is { } problem)
         {
             throw JacquardException.Preparation(problem);
         }
@@ -626,13 +626,29 @@ internal static class Core
     internal static volatile Func<uint, Unix.GroupEntry?>? GroupHook;
 
     /// <summary>
-    /// Test seam: supplies the password database enumeration of the
-    /// private-group rule in place of <see cref="Unix.Passwd"/>, once per
-    /// pass (a null element is a lookup error). Null outside tests.
+    /// Test seam: runs in place of <c>getent passwd</c> for the private-group
+    /// rule, with the caller's token, returning what the command printed and
+    /// its exit status, or throwing as <see cref="CoreCommand.Run"/> does.
+    /// Null outside tests.
     /// </summary>
-    internal static volatile Func<IEnumerable<Unix.PasswdEntry?>>? PasswdHook;
+    internal static volatile Func<CancellationToken, CoreCommand.Output>? GetentHook;
 
-    /// <summary>The most password database entries one pass of the private-group rule reads; more is refused.</summary>
+    /// <summary>Test seam: where <c>getent</c> is looked for, in order; the first present is used.</summary>
+    internal static volatile string[] GetentPaths = { "/usr/bin/getent", "/bin/getent" };
+
+    /// <summary>Test seam: the arguments <c>getent</c> runs with.</summary>
+    internal static volatile string[] GetentArguments = { "passwd" };
+
+    /// <summary>How long <c>getent passwd</c> may run, in milliseconds.</summary>
+    internal const int GetentTimeoutMs = 5000;
+
+    /// <summary>Test seam: the time limit applied, in milliseconds.</summary>
+    internal static volatile int GetentTimeoutCap = GetentTimeoutMs;
+
+    /// <summary>The most stdout of <c>getent passwd</c> read; more is refused.</summary>
+    internal const int GetentStdoutLimit = 16 << 20;
+
+    /// <summary>The most password database entries the private-group rule reads; more is refused.</summary>
     internal const int PasswdEntries = 100_000;
 
     /// <summary>The most unsafe directories one refusal names; the rest are counted.</summary>
@@ -661,9 +677,10 @@ internal static class Core
     /// </summary>
     /// <param name="first">The nearest directory to check.</param>
     /// <param name="subject">What the directories hold, which starts the message.</param>
+    /// <param name="cancellationToken">Stops the password database enumeration.</param>
     /// <returns>The refusal naming every unsafe directory, or null when all are safe or there are no POSIX permissions.</returns>
-    /// <exception cref="JacquardException">A directory's status cannot be read.</exception>
-    internal static string? UnsafeDirectories(string first, string subject)
+    /// <exception cref="JacquardException">A directory's status cannot be read, or the token was cancelled during the enumeration.</exception>
+    internal static string? UnsafeDirectories(string first, string subject, CancellationToken cancellationToken)
     {
         if (!Unix.Supported)
         {
@@ -708,7 +725,7 @@ internal static class Core
                         }
                     }
 
-                    if (!PrivateGroup(status, account, group) || !(sole ??= OnlyUserHasPrimaryGroup(user, status.Group)))
+                    if (!PrivateGroup(status, account, group) || !(sole ??= OnlyUserHasPrimaryGroup(account!.Value.Name, user, status.Group, cancellationToken)))
                     {
                         reason = "writable by its group, which is not your private group";
                     }
@@ -754,61 +771,157 @@ internal static class Core
         && (group.Members.Count == 0 || (group.Members.Count == 1 && string.Equals(group.Members[0], user.Name, StringComparison.Ordinal)));
 
     /// <summary>
-    /// Whether the password database, enumerated twice under
-    /// <see cref="Unix.PasswdLock"/>, lists <paramref name="uid"/> with
-    /// primary group <paramref name="gid"/> and no other account with that
-    /// primary group (<c>gr_mem</c> omits primary-group members, so this is
-    /// what shows them), as Debian OpenSSH's <c>secure_permissions</c> scans
-    /// with <c>getpwent</c>. False, so the directory is refused, when a pass
-    /// reads more than <see cref="PasswdEntries"/> entries, meets a lookup
-    /// error, lists a name twice (as a pass restarted by another
-    /// <c>setpwent</c> or <c>endpwent</c> in the process would), or does not
-    /// list the user with the group, or when the two passes differ (as they
-    /// would if another enumeration in the process moved the position during
-    /// either). Accounts a source does not enumerate cannot be seen.
+    /// Whether the password database, as <c>getent passwd</c> lists it in a
+    /// separate process, lists the account <paramref name="name"/> with user
+    /// id <paramref name="uid"/> and primary group <paramref name="gid"/>,
+    /// and no account of another user id with that primary group
+    /// (<c>gr_mem</c> omits primary-group members, so this is what shows
+    /// them), as Debian OpenSSH's <c>secure_permissions</c> scans with
+    /// <c>getpwent</c>. Listing it in another process shares no enumeration
+    /// position with code in this one. <c>getent</c> is the first of
+    /// <c>/usr/bin/getent</c> and <c>/bin/getent</c> present; it and every
+    /// directory above its real path must be root's and not writable by
+    /// group or others. It runs through <see cref="CoreCommand.Run"/>
+    /// (bounded by <see cref="GetentTimeoutMs"/>, its stdout by
+    /// <see cref="GetentStdoutLimit"/>, and stopped by the token). False, so
+    /// the directory is refused, when there is no such <c>getent</c> (or not
+    /// on Linux), when it times out, exits nonzero, or prints more than the
+    /// limit, invalid UTF-8, more than <see cref="PasswdEntries"/> entries,
+    /// or a line that is not seven colon-separated fields with a nonempty
+    /// name and decimal user and group ids, or ends without a newline, when
+    /// a name is listed twice, or when the account is missing or listed with
+    /// other ids. Accounts a source does not enumerate cannot be seen.
     /// </summary>
-    internal static bool OnlyUserHasPrimaryGroup(uint uid, uint gid)
+    /// <exception cref="JacquardException">The token was cancelled while <c>getent</c> ran.</exception>
+    internal static bool OnlyUserHasPrimaryGroup(string name, uint uid, uint gid, CancellationToken cancellationToken)
     {
-        Func<IEnumerable<Unix.PasswdEntry?>> source = PasswdHook ?? Unix.Passwd;
-        lock (Unix.PasswdLock)
+        CoreCommand.Output output;
+        try
         {
-            return OnePass(source(), uid, gid) is { } first
-                && OnePass(source(), uid, gid) is { } second
-                && first.AsSpan().SequenceEqual(second);
+            if (GetentHook is { } hook)
+            {
+                output = hook(cancellationToken);
+            }
+            else
+            {
+                if (!OperatingSystem.IsLinux() || TrustedGetent() is not { } getent)
+                {
+                    return false;
+                }
+
+                var command = new List<string> { getent };
+                command.AddRange(GetentArguments);
+                output = CoreCommand.Run(command, null, TimeSpan.FromMilliseconds(GetentTimeoutCap), GetentStdoutLimit, StderrLimit, cancellationToken);
+            }
         }
+        catch (CarrierException error)
+        {
+            if (error.IsAborted)
+            {
+                throw JacquardException.Preparation(Aborted);
+            }
+
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+
+        return output.ExitStatus == 0 && !output.StdoutOverflow && Utf8(output.Stdout) is { } text && SoleAccount(text, name, uid, gid);
     }
 
-    /// <summary>One pass of <see cref="OnlyUserHasPrimaryGroup"/>: a digest of every entry read when it holds, null otherwise.</summary>
-    private static byte[]? OnePass(IEnumerable<Unix.PasswdEntry?> entries, uint uid, uint gid)
+    /// <summary>
+    /// The real path of the first of <see cref="GetentPaths"/> present, when
+    /// it is a regular file and it and every directory above it are root's
+    /// and not writable by group or others; null otherwise.
+    /// </summary>
+    /// <exception cref="IOException">A status cannot be read.</exception>
+    private static string? TrustedGetent()
     {
-        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        int read = 0;
-        bool listed = false;
-        Span<byte> numbers = stackalloc byte[8];
-        foreach (Unix.PasswdEntry? item in entries)
+        foreach (string candidate in GetentPaths)
         {
-            if (item is not { } entry || ++read > PasswdEntries || !names.Add(entry.Name))
+            if (Unix.Stat(candidate, follow: true).Kind == Unix.Kind.Missing)
+            {
+                continue;
+            }
+
+            string real = Unix.RealPath(candidate);
+            if (Unix.Stat(real, follow: false) is not { Kind: Unix.Kind.Regular } file || !RootOnly(file))
             {
                 return null;
             }
 
-            if (entry.Group == gid)
+            for (string? directory = Path.GetDirectoryName(real); directory is not null; directory = Path.GetDirectoryName(directory))
             {
-                if (entry.Uid != uid)
+                if (Unix.Stat(directory, follow: false) is not { Kind: Unix.Kind.Directory } level || !RootOnly(level))
                 {
                     return null;
+                }
+            }
+
+            return real;
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="status"/> is root's and neither its group nor others may write it.</summary>
+    internal static bool RootOnly(Unix.Status status) => status.Owner == 0 && (status.Mode & 0x12) == 0;
+
+    /// <summary>
+    /// Parses <c>getent passwd</c>'s output strictly (see
+    /// <see cref="OnlyUserHasPrimaryGroup"/>); whether it holds.
+    /// </summary>
+    internal static bool SoleAccount(string text, string name, uint uid, uint gid)
+    {
+        if (text.Length == 0 || text[^1] != '\n')
+        {
+            return false;
+        }
+
+        // At most the stdout limit of names is kept.
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        bool listed = false;
+        int read = 0;
+        for (int start = 0; start < text.Length;)
+        {
+            int end = text.IndexOf('\n', start);
+            ReadOnlySpan<char> line = text.AsSpan(start, end - start);
+            start = end + 1;
+            if (++read > PasswdEntries || line.Count(':') != 6)
+            {
+                return false;
+            }
+
+            string[] fields = line.ToString().Split(':');
+            if (fields[0].Length == 0 || Id(fields[2]) is not { } entryUid || Id(fields[3]) is not { } entryGid || !names.Add(fields[0]))
+            {
+                return false;
+            }
+
+            if (string.Equals(fields[0], name, StringComparison.Ordinal))
+            {
+                if (entryUid != uid || entryGid != gid)
+                {
+                    return false;
                 }
 
                 listed = true;
             }
-
-            digest.AppendData(Encoding.UTF8.GetBytes(entry.Name + "\0"));
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(numbers, entry.Uid);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(numbers[4..], entry.Group);
-            digest.AppendData(numbers);
+            else if (entryGid == gid && entryUid != uid)
+            {
+                return false;
+            }
         }
 
-        return listed ? digest.GetHashAndReset() : null;
+        return listed;
     }
+
+    /// <summary>A decimal id with no sign, no leading zero, and no other character; null otherwise.</summary>
+    private static uint? Id(string text) =>
+        text.Length > 0 && (text.Length == 1 || text[0] != '0')
+        && uint.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out uint id)
+            ? id
+            : null;
 }
