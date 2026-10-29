@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
+using System.Threading;
 using JacquardLang.Host.Protocol;
 
 namespace JacquardLang.Host.Sdk;
@@ -20,8 +21,27 @@ public abstract class Dynamic : IEquatable<Dynamic>
 {
     private const int RenderLimit = 4096;
 
+    /// <summary>How many places hold this value as a child; more than one means it is shared.</summary>
+    private int uses;
+
     private protected Dynamic()
     {
+    }
+
+    /// <summary>Test seam: how many pair sets <see cref="Equals(Dynamic?)"/> made on this thread.</summary>
+    [ThreadStatic]
+    internal static int PairSetsMade;
+
+    /// <summary>Whether this value is a child in more than one place, so a walk can reach it twice.</summary>
+    private bool Shared => Volatile.Read(ref uses) > 1;
+
+    /// <summary>Counts each of <paramref name="children"/> as held once more.</summary>
+    private protected static void Adopt(IReadOnlyList<Dynamic> children)
+    {
+        foreach (Dynamic child in children)
+        {
+            Interlocked.Increment(ref child.uses);
+        }
     }
 
     /// <summary>Unit, the empty tuple.</summary>
@@ -156,6 +176,7 @@ public abstract class Dynamic : IEquatable<Dynamic>
             copy.Add(item ?? throw new ArgumentNullException(nameof(items), what + " holds null"));
         }
 
+        Adopt(copy);
         return copy.AsReadOnly();
     }
 
@@ -178,16 +199,33 @@ public abstract class Dynamic : IEquatable<Dynamic>
 
         // Each pair of nodes is compared once: values that share sub-values
         // (as decoded values and caller-built graphs may) are compared in
-        // time proportional to their distinct pairs, not their paths.
+        // time proportional to their distinct pairs, not their paths. Only a
+        // pair with a shared side can be reached twice (an unshared node has
+        // one parent and one place in it), so only those pairs are kept, and
+        // the set is made at the first: unshared values need none.
         var stack = new Stack<(Dynamic Left, Dynamic Right)>();
-        var compared = new HashSet<(Dynamic Left, Dynamic Right)>(PairComparer.Instance);
+        HashSet<(Dynamic Left, Dynamic Right)>? compared = null;
         stack.Push((this, other));
         while (stack.Count > 0)
         {
             (Dynamic left, Dynamic right) = stack.Pop();
-            if (ReferenceEquals(left, right) || !compared.Add((left, right)))
+            if (ReferenceEquals(left, right))
             {
                 continue;
+            }
+
+            if (left.Shared || right.Shared)
+            {
+                if (compared is null)
+                {
+                    compared = new HashSet<(Dynamic Left, Dynamic Right)>(PairComparer.Instance);
+                    PairSetsMade++;
+                }
+
+                if (!compared.Add((left, right)))
+                {
+                    continue;
+                }
             }
 
             if (left.GetType() != right.GetType() || !left.SameNode(right))
@@ -393,6 +431,11 @@ public abstract class Dynamic : IEquatable<Dynamic>
         public Option(Dynamic? value)
         {
             Value = value;
+            if (value is not null)
+            {
+                Adopt(new[] { value });
+            }
+
         }
 
         /// <summary>The value of <c>Some</c>, or null for <c>None</c>.</summary>

@@ -655,6 +655,25 @@ public sealed class DataTests
     }
 
     /// <summary>
+    /// Equality keeps a set of compared pairs only once it meets a shared
+    /// sub-value: two separately built lists of 1,000 tuples compare without
+    /// one (a test seam counts the sets made), and a value holding one leaf
+    /// twice makes one.
+    /// </summary>
+    [Test]
+    public void EqualityOfUnsharedValuesMakesNoPairSet()
+    {
+        static Dynamic Tree(long leaf) => new Dynamic.List(Enumerable.Range(0, 1000).Select(i => Dynamic.TupleOf(Dynamic.Of(i), new Dynamic.Option(Dynamic.Of(leaf)))));
+        Dynamic.PairSetsMade = 0;
+        Assert.That(Tree(1).Equals(Tree(1)), Is.True);
+        Assert.That(Tree(1).Equals(Tree(2)), Is.False);
+        Assert.That(Dynamic.PairSetsMade, Is.EqualTo(0));
+        Dynamic leaf = Dynamic.Of(5);
+        Assert.That(Dynamic.TupleOf(leaf, leaf).Equals(Dynamic.TupleOf(Dynamic.Of(5), Dynamic.Of(5))), Is.True);
+        Assert.That(Dynamic.PairSetsMade, Is.EqualTo(1));
+    }
+
+    /// <summary>
     /// Messages quote caller text as an excerpt, and no message is kept
     /// past 8,192 chars: a result codec naming a huge constructor, codecs,
     /// record readers, and constructors that throw huge messages each give a
