@@ -255,6 +255,39 @@ public sealed class BatchesTests
         Assert.That(Support.Throws<JacquardException>(() => Ints().MapBatches(Codecs.Int, Codecs.Int, Rows(3), 0)).Message, Is.EqualTo("batch size must be positive"));
     }
 
+    /// <summary>Rows whose count drops from 10 to 3 once <see cref="Shrink"/> is called.</summary>
+    private sealed class Shrinking : IReadOnlyList<long>
+    {
+        private bool shrunk;
+
+        public int Count => shrunk ? 3 : 10;
+
+        public long this[int index] => 1L;
+
+        internal void Shrink() => shrunk = true;
+
+        public IEnumerator<long> GetEnumerator() => Enumerable.Repeat(1L, Count).GetEnumerator();
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    /// <summary>
+    /// The number of rows is read once, so batches come from that count; a
+    /// list that shrinks while the batches are validated is refused before a
+    /// worker starts, instead of making a batch of negative size.
+    /// </summary>
+    [Test]
+    public void RowsThatShrinkAreRefused()
+    {
+        var rows = new Shrinking();
+        var codec = new Counting(n => n == 1 ? (Action)rows.Shrink : null);
+        JacquardException error = Support.Throws<JacquardException>(() => Ints().MapBatches(Codecs.Int, codec, rows, 4));
+        Assert.That(error.Kind, Is.EqualTo(JacquardErrorKind.InvalidArgument));
+        Assert.That(error.Message, Is.EqualTo("rows changed from 10 to 3 during MapBatches"));
+        Assert.That(error.BatchIndex, Is.EqualTo(-1));
+        Assert.That(codec.Encodes, Is.EqualTo(4));
+    }
+
     /// <summary>
     /// Save writes a new owner-only file and renames it over the target: an
     /// existing world-writable file becomes owner-only (0600) with the

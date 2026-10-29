@@ -169,7 +169,9 @@ public sealed class Function
     /// unreachable once it is checked, and the batch is encoded and checked
     /// again just before it runs. Before each batch, and once more after the
     /// last, the validation observes the token. Validation has no deadline of
-    /// its own, as in the other SDKs. Nothing is retried.
+    /// its own, as in the other SDKs. Nothing is retried. The number of rows
+    /// is read once; a list whose count differs before a later batch is
+    /// refused.
     /// </summary>
     /// <exception cref="JacquardException">
     /// A refusal before any worker started (<see cref="JacquardException.BatchIndex"/>
@@ -205,11 +207,16 @@ public sealed class Function
         // From the count alone, before any leading argument is copied.
         Arity(leading.Count + 1L);
         List<Value> empty = Batch(leading, row, rows, 0, 0);
-        int count = (int)((rows.Count + (long)batchSize - 1) / batchSize);
+
+        // Read once: every batch's range comes from this count, so a list
+        // that shrinks cannot make a negative batch.
+        int total = rows.Count;
+        int count = (int)((total + (long)batchSize - 1) / batchSize);
         for (int index = 0; index < count; index++)
         {
             RefuseIfStopped(empty, cancellationToken);
-            Validate(leading, row, rows, index, batchSize);
+            Unchanged(rows, total);
+            Validate(leading, row, rows, total, index, batchSize);
         }
 
         // A cancellation during the last batch's validation starts no worker.
@@ -220,7 +227,8 @@ public sealed class Function
         {
             try
             {
-                (int start, int size) = Range(rows.Count, index, batchSize);
+                Unchanged(rows, total);
+                (int start, int size) = Range(total, index, batchSize);
                 completed.AddRange(Run(Batch(leading, row, rows, start, size), cancellationToken).Decode(results));
             }
             catch (JacquardException error)
@@ -253,10 +261,21 @@ public sealed class Function
     }
 
     /// <summary>Encodes and checks one batch, keeping nothing: the encoding is unreachable once this returns.</summary>
-    private void Validate<TRow>(IReadOnlyList<Argument> leading, Codec<TRow> row, IReadOnlyList<TRow> rows, int index, int batchSize)
+    private void Validate<TRow>(IReadOnlyList<Argument> leading, Codec<TRow> row, IReadOnlyList<TRow> rows, int total, int index, int batchSize)
     {
-        (int start, int size) = Range(rows.Count, index, batchSize);
+        (int start, int size) = Range(total, index, batchSize);
         Batch(leading, row, rows, start, size);
+    }
+
+    /// <summary>Refuses rows whose count is no longer <paramref name="total"/>.</summary>
+    private static void Unchanged<TRow>(IReadOnlyList<TRow> rows, int total)
+    {
+        int now = rows.Count;
+        if (now != total)
+        {
+            throw JacquardException.Invalid("rows changed from " + total.ToString(CultureInfo.InvariantCulture) + " to "
+                + now.ToString(CultureInfo.InvariantCulture) + " during MapBatches");
+        }
     }
 
     private static (int Start, int Size) Range(int total, int index, int batchSize)
