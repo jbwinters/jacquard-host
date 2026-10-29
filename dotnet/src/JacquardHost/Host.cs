@@ -187,10 +187,14 @@ public sealed class Host
     {
         var session = new Session();
         var result = new InvocationResult(ResultKind.CarrierLoss);
+        var call = new Call(session, result, registry);
         Worker worker;
         try
         {
-            worker = Worker.Start(Store, carrier, cancellationToken);
+            // The stop notice is in place from the spawn, so every kill of the
+            // worker, including one while Start sets it up, starts the
+            // handlers' token cancellation first.
+            worker = Worker.Start(Store, carrier, call.StopHandlers, cancellationToken);
         }
         catch (ArgumentException error)
         {
@@ -200,7 +204,7 @@ public sealed class Host
 
         // The worker observes the caller's token in its waits on this thread;
         // nothing is registered on it.
-        var call = new Call(worker, session, result, registry);
+        call.Attach(worker);
         try
         {
             call.Drive(opening, Limits);
@@ -276,20 +280,20 @@ public sealed class Host
         private CancellationTokenSource? handlerStop;
         private bool stopRequested;
         private bool handlersStopped;
+        private Worker? worker;
 
-        internal Call(Worker worker, Session session, InvocationResult result, RegistrySnapshot registry)
+        internal Call(Session session, InvocationResult result, RegistrySnapshot registry)
         {
-            Worker = worker;
             Session = session;
             Result = result;
             this.registry = registry;
-
-            // Every kill of the worker, whichever check or thread sees the
-            // stop first, starts the token's cancellation before it.
-            worker.StopNotice = StopHandlers;
         }
 
-        internal Worker Worker { get; }
+        /// <summary>The call's worker, whose stop notice is <see cref="StopHandlers"/>.</summary>
+        internal Worker Worker => worker ?? throw new InvalidOperationException("the call has no worker");
+
+        /// <summary>Gives the call its worker, started with <see cref="StopHandlers"/> as its stop notice.</summary>
+        internal void Attach(Worker started) => worker = started;
 
         internal Session Session { get; }
 
@@ -534,13 +538,14 @@ public sealed class Host
         /// Called when the caller's thread sees the call stopping while a
         /// handler runs, at <see cref="End"/>, and through the worker's
         /// <see cref="Worker.StopNotice"/> before any kill (on the caller's
-        /// thread, or on a thread disposing the worker): starts, at most
+        /// thread, including while the worker is being started, or on a
+        /// thread disposing the worker): starts, at most
         /// once, a dedicated background thread that cancels the handlers'
         /// token and discards whatever its callbacks throw. Nothing waits for
         /// that thread, so a callback that blocks holds only it, and the
         /// shared thread pool is not involved.
         /// </summary>
-        private void StopHandlers()
+        internal void StopHandlers()
         {
             CancellationTokenSource? source;
             lock (stopSync)

@@ -25,6 +25,61 @@ public sealed class DescriptorTests
 {
     private static bool DescriptorsBackTo(int before) => Eventually(() => Descriptors() <= before);
 
+    [TearDown]
+    public void ClearSeams()
+    {
+        Worker.SpawnedHook = null;
+        Worker.ExpireHook = null;
+    }
+
+    [Test]
+    public void AFailureAfterTheSpawnKillsTheWorkerThroughTheKillPathAndReleasesIt()
+    {
+        // A seam fails the worker's setup after Process.Start succeeded, as
+        // redirected streams that are not pipe streams would.
+        Assert.That(InvokeReady(Faulty("ok", TimeSpan.FromSeconds(10))).Ok, Is.True); // warm up
+        int before = Descriptors();
+        var pids = new List<int>();
+        int kills = 0;
+        Worker.SpawnedHook = process =>
+        {
+            pids.Add(process.Id);
+            throw new NotSupportedException("seam: worker pipes are not pipe streams");
+        };
+        Worker.ExpireHook = () => Interlocked.Increment(ref kills);
+        try
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                InvocationResult result = Within(TimeSpan.FromSeconds(20), () => InvokeReady(Faulty("silent", TimeSpan.FromSeconds(30))));
+                Assert.That(pids, Has.Count.EqualTo(i + 1), "the seam did not run");
+                Assert.That(Alive(pids[i]), Is.False, "the spawned worker is still running after Invoke returned");
+                Assert.That(result.Kind, Is.EqualTo(ResultKind.CarrierLoss), result.ToString());
+                Assert.That(Reason(result), Is.EqualTo("worker_spawn_failed"), result.ToString());
+                Assert.That(result.Code, Is.EqualTo("E1611"));
+                Assert.That(result.HostEvidence.Get("detail")?.AsString(), Is.EqualTo("could not poll the worker's pipes (seam: worker pipes are not pipe streams)"));
+                Assert.That(result.Signal, Is.EqualTo("SIGKILL"), "the killed worker's exit was not waited for and recorded");
+                Assert.That(result.CoreFrames, Is.Empty);
+                Assert.That(result.HostFrames, Is.Empty);
+            }
+
+            Assert.That(Volatile.Read(ref kills), Is.EqualTo(3), "the kill did not go through the common kill path once per worker");
+            Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "adapter threads remain");
+            Assert.That(DescriptorsBackTo(before), Is.True, "descriptors grew from " + before + " to " + Descriptors());
+        }
+        finally
+        {
+            Worker.SpawnedHook = null;
+            foreach (int pid in pids)
+            {
+                if (Alive(pid))
+                {
+                    Kill(pid);
+                }
+            }
+        }
+    }
+
     [Test]
     public void InvocationsReleaseTheirPipesAndThreads()
     {

@@ -35,8 +35,10 @@ namespace JacquardLang.Host.Carrier;
 /// calls), so nothing else holds or drains the pipes.
 /// </para>
 /// <para>
-/// At expiry, cancellation, or disposal while the worker runs, the worker's
-/// process tree is killed with <see cref="Process.Kill(bool)"/>: .NET stops
+/// At expiry, cancellation, or disposal while the worker runs, and when the
+/// spawned worker's pipes cannot be set up, the worker's process tree is
+/// killed with <see cref="Process.Kill(bool)"/>, always after the
+/// <see cref="StopNotice"/>: .NET stops
 /// the worker, lists its children from the process table, kills it, and
 /// does the same for each child. A descendant that has already been
 /// reparented (because its parent exited or it daemonized) is not found and
@@ -68,13 +70,15 @@ public sealed class Worker : IDisposable
 
     private readonly object gate = new();
     private readonly Process? process;
-    private readonly StreamWriter? stdinWriter;
-    private readonly Stream? stdin;
-    private readonly Stream? stdout;
-    private readonly Stream? stderr;
-    private readonly int stdinFd = -1;
-    private readonly int stdoutFd = -1;
-    private readonly int stderrFd = -1;
+
+    // Set by Attach, before Start returns the worker, and never changed after.
+    private StreamWriter? stdinWriter;
+    private Stream? stdin;
+    private Stream? stdout;
+    private Stream? stderr;
+    private int stdinFd = -1;
+    private int stdoutFd = -1;
+    private int stderrFd = -1;
     private readonly long expires;
     private readonly CancellationToken cancel;
     private readonly byte[] chunk = new byte[8192];
@@ -97,17 +101,12 @@ public sealed class Worker : IDisposable
         SpawnError = spawnError;
     }
 
-    private Worker(Process process, long expires, CancellationToken cancel)
+    /// <summary>Takes ownership of a spawned worker; <see cref="Attach"/> then takes its pipes.</summary>
+    private Worker(Process process, long expires, Action? stopNotice, CancellationToken cancel)
         : this(expires, null, cancel)
     {
         this.process = process;
-        stdinWriter = process.StandardInput;
-        stdin = stdinWriter.BaseStream;
-        stdout = process.StandardOutput.BaseStream;
-        stderr = process.StandardError.BaseStream;
-        stdinFd = Descriptor(stdin);
-        stdoutFd = Descriptor(stdout);
-        stderrFd = Descriptor(stderr);
+        this.stopNotice = stopNotice;
     }
 
     /// <summary>
@@ -135,14 +134,25 @@ public sealed class Worker : IDisposable
     /// </summary>
     internal static volatile Action? ExpireHook;
 
+    /// <summary>
+    /// Test seam: runs once the worker has been spawned and is owned by its
+    /// <see cref="Worker"/>, before the carrier takes its pipes. A test
+    /// throws <see cref="NotSupportedException"/> from it to stand for
+    /// redirected streams that are not pipe streams. Process-global; null
+    /// outside tests.
+    /// </summary>
+    internal static volatile Action<Process>? SpawnedHook;
+
     private volatile Action? stopNotice;
 
     /// <summary>
-    /// Runs whenever the worker's lifetime ends by expiry, cancellation, or
-    /// disposal, before its process tree is killed, on the thread that ends
-    /// it (the caller's thread, or the disposing thread). The host uses it to
-    /// start the cancellation of its handlers' token before any kill. It must
-    /// not throw or block, and may run more than once.
+    /// Runs before every kill of the worker's process tree, on the thread
+    /// that kills it: at expiry, cancellation, or disposal (the caller's
+    /// thread, or the disposing thread), and when setting up the spawned
+    /// worker fails inside <see cref="Start(string, WorkerOptions, Action?, CancellationToken)"/>.
+    /// The host passes it to <c>Start</c>, so it is in place before the spawn,
+    /// and uses it to start the cancellation of its handlers' token before
+    /// any kill. It must not throw or block, and may run more than once.
     /// </summary>
     internal Action? StopNotice
     {
@@ -153,8 +163,8 @@ public sealed class Worker : IDisposable
     /// <summary>The lifetime clock: <see cref="Stopwatch.GetTimestamp"/> outside tests.</summary>
     private static long Now() => ClockHook is { } clock ? clock() : Stopwatch.GetTimestamp();
 
-    /// <summary>The spawn error, when the worker never started.</summary>
-    public string? SpawnError { get; }
+    /// <summary>The spawn error, when the worker never started or its pipes could not be set up.</summary>
+    public string? SpawnError { get; private set; }
 
     /// <summary>The exit status once the worker has exited, unless the host's SIGKILL ended it.</summary>
     public int? ExitStatus { get; private set; }
@@ -193,7 +203,16 @@ public sealed class Worker : IDisposable
     /// reported by the first operation.
     /// </summary>
     /// <exception cref="ArgumentException">The options are invalid.</exception>
-    public static Worker Start(string store, WorkerOptions options, CancellationToken cancellationToken)
+    public static Worker Start(string store, WorkerOptions options, CancellationToken cancellationToken) =>
+        Start(store, options, null, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="Start(string, WorkerOptions, CancellationToken)"/>, with
+    /// <paramref name="stopNotice"/> as the <see cref="StopNotice"/> from the
+    /// moment the worker is spawned.
+    /// </summary>
+    /// <exception cref="ArgumentException">The options are invalid.</exception>
+    internal static Worker Start(string store, WorkerOptions options, Action? stopNotice, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(options);
@@ -253,16 +272,66 @@ public sealed class Worker : IDisposable
                 cancellationToken);
         }
 
+        // From here the worker owns the process: a failure to set up its
+        // pipes kills it through the common kill path and keeps the handle,
+        // which disposal releases.
+        var worker = new Worker(process, expires, stopNotice, cancellationToken);
         try
         {
-            return new Worker(process, expires, cancellationToken);
+            worker.Attach();
         }
         catch (Exception error) when (error is InvalidOperationException or NotSupportedException)
         {
             // The streams are not the pipes this carrier polls.
-            KillQuietly(process);
-            process.Dispose();
-            return Failed(expires, error.Message, "could not poll the worker's pipes (" + error.Message + ")", cancellationToken);
+            worker.FailAfterSpawn(error);
+        }
+
+        return worker;
+    }
+
+    /// <summary>Takes the spawned worker's pipes, all or none.</summary>
+    /// <exception cref="NotSupportedException">A redirected stream is not a pipe stream.</exception>
+    private void Attach()
+    {
+        SpawnedHook?.Invoke(process!);
+        StreamWriter writer = process!.StandardInput;
+        Stream input = writer.BaseStream;
+        Stream output = process.StandardOutput.BaseStream;
+        Stream error = process.StandardError.BaseStream;
+        int inputFd = Descriptor(input);
+        int outputFd = Descriptor(output);
+        int errorFd = Descriptor(error);
+        stdinWriter = writer;
+        stdin = input;
+        stdout = output;
+        stderr = error;
+        stdinFd = inputFd;
+        stdoutFd = outputFd;
+        stderrFd = errorFd;
+    }
+
+    /// <summary>
+    /// Ends a worker whose pipes could not be set up: kills its process tree
+    /// through <see cref="KillTree"/> (after the stop notice), waits up to one
+    /// second for the exit, and records it. The first operation reports the
+    /// failure as a spawn failure, saying so if the worker had still not
+    /// exited. <see cref="Dispose"/> releases the process handle.
+    /// </summary>
+    private void FailAfterSpawn(Exception error)
+    {
+        lock (gate)
+        {
+            KillTree();
+            WaitForExit(ExitGraceMs);
+            RecordExit();
+            string message = "could not poll the worker's pipes (" + error.Message + ")";
+            if (!HasExited())
+            {
+                message += "; the worker had not exited one second after the kill and may still be running";
+            }
+
+            SpawnError = error.Message;
+            fault = CarrierException.Loss(message);
         }
     }
 
@@ -360,7 +429,9 @@ public sealed class Worker : IDisposable
 
     /// <summary>
     /// Kills the worker and the descendants .NET finds, while the worker is
-    /// alive. Every kill comes through here, after the stop notice.
+    /// alive. Every kill comes through here, after the stop notice: at expiry,
+    /// cancellation, disposal, and a failure to set up the spawned worker's
+    /// pipes.
     /// </summary>
     private void KillTree()
     {
