@@ -34,6 +34,7 @@ public sealed class BatchesTests
     public void CleanUp()
     {
         Function.ConformHook = null;
+        Invocation.BeforeRenameHook = null;
         SdkSupport.RemoveScratch(root);
     }
 
@@ -320,5 +321,64 @@ public sealed class BatchesTests
         Assert.That(File.ReadAllText(victim), Is.EqualTo("keep"));
         Assert.That(File.GetUnixFileMode(victim), Is.EqualTo(Open));
         Assert.That(Directory.EnumerateFiles(root).Select(Path.GetFileName), Is.EquivalentTo(new[] { "existing.json", "victim.txt", "link.json" }));
+    }
+
+    /// <summary>
+    /// Save refuses a target directory another user could write (0777, not
+    /// sticky), as for the cache's directories, before it writes anything
+    /// there; a sticky one (0777 with the sticky bit, as /tmp is) is used.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void SaveRefusesATargetDirectoryOthersMayWrite()
+    {
+        Invocation invocation = Ints().Invoke(Argument.Of(Codecs.List(Codecs.Int), new long[] { 1 }));
+        string shared = Directory.CreateDirectory(Path.Combine(root, "shared")).FullName;
+        File.SetUnixFileMode(shared, (UnixFileMode)0x1FF);
+        string target = Path.Combine(shared, "record.json");
+        IOException error = Support.Throws<IOException>(() => invocation.Save(target))!;
+        Assert.That(error.Message, Is.EqualTo(
+            "save target " + target + " could be replaced by another user through the directories above it."
+            + " Make each of these writable only by you (for example chmod go-w DIR), or use a location under directories only you or root may write: "
+            + shared + " (writable by others)"));
+        Assert.That(Directory.EnumerateFileSystemEntries(shared), Is.Empty);
+
+        File.SetUnixFileMode(shared, (UnixFileMode)0x3FF);
+        invocation.Save(target);
+        Assert.That(Directory.EnumerateFileSystemEntries(shared).Select(Path.GetFileName), Is.EqualTo(new[] { "record.json" }));
+    }
+
+    /// <summary>
+    /// The temporary file is written through the one handle that created it,
+    /// and the file at its path is checked to be that file (the same device
+    /// and inode) just before the rename. A seam replaces the temporary path
+    /// with another file before the rename, as someone who may write the
+    /// directory could: the replacement is detected, it is neither renamed
+    /// over the target nor removed, and nothing is saved.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void SaveDetectsATemporaryFileReplacedBeforeItsRename()
+    {
+        Invocation invocation = Ints().Invoke(Argument.Of(Codecs.List(Codecs.Int), new long[] { 1 }));
+        string target = Path.Combine(root, "record.json");
+        string? temporary = null;
+        Invocation.BeforeRenameHook = path =>
+        {
+            temporary = path;
+            File.Delete(path);
+            File.WriteAllText(path, "planted");
+        };
+        IOException error = Support.Throws<IOException>(() => invocation.Save(target))!;
+        Assert.That(error.Message, Is.EqualTo("the temporary file for " + target + " was replaced before it was renamed; nothing was saved"));
+        Assert.That(File.Exists(target), Is.False, "the replacement was installed");
+        Assert.That(File.ReadAllText(temporary!), Is.EqualTo("planted"), "the replacement was removed");
+
+        // Without the replacement, the record is saved and nothing else is left.
+        File.Delete(temporary!);
+        Invocation.BeforeRenameHook = null;
+        invocation.Save(target);
+        Assert.That(File.ReadAllText(target), Does.StartWith("{").And.EndWith("}\n"));
+        Assert.That(Directory.EnumerateFiles(root).Select(Path.GetFileName), Is.EquivalentTo(new[] { "record.json" }));
     }
 }

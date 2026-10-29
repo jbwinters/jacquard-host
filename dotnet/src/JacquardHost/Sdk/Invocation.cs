@@ -80,19 +80,32 @@ public sealed class Invocation
     }
 
     /// <summary>
-    /// Writes the invocation's frames and host evidence. The record contains
-    /// argument and result values; it is written only when called. The
-    /// record is written to a new file, created exclusively in the target's
-    /// directory, owned by this process's user and owner-only (read and write
-    /// for its owner) where the file system has POSIX permissions; that file
-    /// is then renamed over <paramref name="path"/>. Whatever was at the path
-    /// is replaced, never written through: an existing file's permissions and
-    /// owner are not kept, and a symbolic link there is replaced, not
-    /// followed. The target's directory must be writable; where it is
-    /// sticky (such as <c>/tmp</c>), a file another user owns cannot be
-    /// replaced and the save fails.
+    /// Test seam: runs with the temporary file's path after it is written
+    /// and flushed, before it is checked and renamed over the target. Null
+    /// outside tests.
     /// </summary>
-    /// <exception cref="IOException">The file cannot be written, or the path is longer than any path.</exception>
+    internal static volatile Action<string>? BeforeRenameHook;
+
+    /// <summary>
+    /// Writes the invocation's frames and host evidence. The record contains
+    /// argument and result values; it is written only when called. Where the
+    /// file system has POSIX permissions, the target's directory and every
+    /// directory above it must be owned by this user or root and not writable
+    /// by its group or others, unless it is sticky (such as <c>/tmp</c>) or
+    /// the group is this user's private group, as for the cache's
+    /// directories; otherwise the save is refused, since another user could
+    /// replace the file before or after it is renamed. The record is written
+    /// through one handle to a new file, created exclusively (never through
+    /// a link) in the target's directory, owned by this process's user and
+    /// owner-only (read and write for its owner), and flushed to disk; the
+    /// file at its path is checked to be the one written (the same device
+    /// and inode), and only then renamed over <paramref name="path"/>.
+    /// Whatever was at the path is replaced, never written through: an
+    /// existing file's permissions and owner are not kept, and a symbolic
+    /// link there is replaced, not followed. Where the directory is sticky,
+    /// a file another user owns cannot be replaced and the save fails.
+    /// </summary>
+    /// <exception cref="IOException">The file cannot be written, the target's directory is not safe from other users, the temporary file was replaced before its rename, or the path is longer than any path.</exception>
     /// <exception cref="UnauthorizedAccessException">The file may not be written.</exception>
     public void Save(string path)
     {
@@ -126,16 +139,55 @@ public sealed class Invocation
         byte[] bytes = Encoding.UTF8.GetBytes(text + "\n");
         string full = Path.GetFullPath(path);
         string directory = Path.GetDirectoryName(full) ?? throw new IOException(Identities.Excerpt(path) + " names no file");
+        string name = Path.GetFileName(full);
+        if (name.Length == 0)
+        {
+            throw new IOException(Identities.Excerpt(path) + " names no file");
+        }
+
+        if (Unix.Supported)
+        {
+            // The directory is resolved once and used by its real path, so
+            // the directories checked are the ones written.
+            directory = Unix.RealPath(directory);
+            full = Path.Combine(directory, name);
+            string? problem;
+            try
+            {
+                problem = Core.UnsafeDirectories(directory, "save target " + full);
+            }
+            catch (JacquardException error)
+            {
+                throw new IOException(error.Message, error);
+            }
+
+            if (problem is not null)
+            {
+                throw new IOException(JacquardException.Bounded(problem));
+            }
+        }
+
         string temporary = Path.Combine(directory, string.Format(
             CultureInfo.InvariantCulture,
             ".jacquard-save-{0}-{1}",
             Environment.ProcessId,
             Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8)).ToLowerInvariant()));
         bool renamed = false;
+        Unix.Status written = default;
         try
         {
-            using (var stream = new FileStream(temporary, Core.OwnerOnly(FileMode.CreateNew)))
+            // FileMode.CreateNew is O_CREAT|O_EXCL, which never follows a
+            // link at the path. The one handle is written, flushed, and,
+            // where there are POSIX permissions, held open until the rename
+            // (elsewhere an open file cannot be renamed).
+            var stream = new FileStream(temporary, Core.OwnerOnly(FileMode.CreateNew));
+            try
             {
+                if (Unix.Supported)
+                {
+                    written = Unix.Stat(stream.SafeFileHandle);
+                }
+
                 if (!OperatingSystem.IsWindows())
                 {
                     // Exactly owner-only, whatever the umask left.
@@ -143,25 +195,54 @@ public sealed class Invocation
                 }
 
                 stream.Write(bytes);
-            }
+                stream.Flush(flushToDisk: true);
+                BeforeRenameHook?.Invoke(temporary);
+                if (Unix.Supported && !Unix.Stat(temporary, follow: false).SameInode(written))
+                {
+                    // Not this call's file: it is neither renamed nor removed.
+                    written = default;
+                    throw new IOException("the temporary file for " + Identities.Excerpt(full) + " was replaced before it was renamed; nothing was saved");
+                }
 
-            File.Move(temporary, full, overwrite: true);
-            renamed = true;
+                if (!Unix.Supported)
+                {
+                    stream.Dispose();
+                }
+
+                File.Move(temporary, full, overwrite: true);
+                renamed = true;
+            }
+            finally
+            {
+                stream.Dispose();
+            }
         }
         finally
         {
             if (!renamed)
             {
-                // Only the file this call created exclusively.
-                try
-                {
-                    File.Delete(temporary);
-                }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-                {
-                    // Left behind under its distinctive name.
-                }
+                RemoveTemporary(temporary, written);
             }
+        }
+    }
+
+    /// <summary>
+    /// Removes the temporary file this call created exclusively, and only
+    /// that: where it was replaced, or its identity is unknown, whatever is
+    /// at the path is left behind under its distinctive name.
+    /// </summary>
+    private static void RemoveTemporary(string temporary, Unix.Status written)
+    {
+        try
+        {
+            if (!Unix.Supported || (written.Kind == Unix.Kind.Regular && Unix.Stat(temporary, follow: false).SameInode(written)))
+            {
+                File.Delete(temporary);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // Left behind under its distinctive name.
         }
     }
 
