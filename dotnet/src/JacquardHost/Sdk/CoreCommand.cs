@@ -151,12 +151,12 @@ internal static class CoreCommand
         return null;
     }
 
+    /// <summary>Whether <paramref name="path"/> is a regular file this process may execute (<c>access(X_OK)</c>).</summary>
     private static bool IsExecutable(string path)
     {
         try
         {
-            Unix.Status status = Unix.Stat(path, follow: true);
-            return status.Kind == Unix.Kind.Regular && (status.Mode & 0x49) != 0;
+            return Unix.Stat(path, follow: true).Kind == Unix.Kind.Regular && Unix.MayExecute(path);
         }
         catch (IOException)
         {

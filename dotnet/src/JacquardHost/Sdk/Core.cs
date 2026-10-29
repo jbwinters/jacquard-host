@@ -484,8 +484,19 @@ internal static class Core
             }
         }
 
-        if (candidate is null || !IsExecutable(candidate))
+        if (candidate is null)
         {
+            throw Missing();
+        }
+
+        if (!IsExecutable(candidate))
+        {
+            if (IsRegular(candidate))
+            {
+                throw JacquardException.Preparation("Core executable " + Identities.Excerpt(binary)
+                    + " may not be executed by the current user; give it execute permission or configure JACQUARD_BIN");
+            }
+
             throw Missing();
         }
 
@@ -500,7 +511,10 @@ internal static class Core
         }
     }
 
-    private static bool IsExecutable(string path)
+    /// <summary>Whether <paramref name="path"/> is a regular file this process may execute (<c>access(X_OK)</c>), not merely one with some execute bit.</summary>
+    private static bool IsExecutable(string path) => IsRegular(path) && Unix.MayExecute(path);
+
+    private static bool IsRegular(string path)
     {
         if (path.Length > PathLimit)
         {
@@ -509,8 +523,7 @@ internal static class Core
 
         try
         {
-            Unix.Status status = Unix.Stat(path, follow: true);
-            return status.Kind == Unix.Kind.Regular && (status.Mode & 0x49) != 0;
+            return Unix.Stat(path, follow: true).Kind == Unix.Kind.Regular;
         }
         catch (IOException)
         {

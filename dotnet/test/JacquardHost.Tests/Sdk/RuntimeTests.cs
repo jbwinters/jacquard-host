@@ -898,6 +898,23 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// The executable must be one this user may run (<c>access(X_OK)</c>),
+    /// not merely one with some execute bit: a file only its group and
+    /// others may execute is refused with a clear message before it runs.
+    /// </summary>
+    [Test]
+    public void AnExecutableTheUserMayNotRunIsRefused()
+    {
+        Assume.That(Unix.EffectiveUser(), Is.Not.EqualTo(0u), "running as root");
+        using FakeCore fake = FakeCore.Programs(At("noexec"));
+        File.SetUnixFileMode(fake.Binary, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+        Assert.That(
+            fake.PrepareFails().Message,
+            Is.EqualTo("Core executable " + fake.Binary + " may not be executed by the current user; give it execute permission or configure JACQUARD_BIN"));
+        Assert.That(fake.Calls("--version"), Is.EqualTo(0));
+    }
+
+    /// <summary>
     /// A function, effect, or operation name over 4,096 chars is refused
     /// before it is looked up, quoting an excerpt; one of exactly 4,096
     /// chars is looked up (and names nothing).
