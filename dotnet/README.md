@@ -20,7 +20,7 @@ The assembly has two layers:
 Linux is exercised. macOS should work but has no CI: the carrier and the SDK
 call the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`,
 `mkdir(2)`, `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, and on Linux
-`lgetxattr(2)`; see [process carrier](#process-carrier) and
+`getpwent_r(3)` and `lgetxattr(2)`; see [process carrier](#process-carrier) and
 [Core's commands](#cores-commands)), and the macOS status calls are compiled
 but not run by any test. Windows is not supported: the worker reports a spawn
 failure and `Prepare` refuses. **Experimental:** the protocol is Core's pinned
@@ -54,8 +54,10 @@ Order total 75: shipping 0
 The command keeps its program cache under `.scratch/dotnet-examples/` in the
 working directory, and the SDK refuses a cache when another user could write
 any directory above it, up to `/`. A clone made with a `umask` of 002 passes
-when its directories belong to your private group (a group named after you,
-with no other members, as Debian, Ubuntu, and Fedora create for each user).
+when its directories belong to your private group (a group named after you
+that lists no other member and that no other account in the password
+database has as its primary group, as Debian, Ubuntu, and Fedora create for
+each user).
 If preparation is refused, the message names every such directory: run
 `chmod go-w` on each, or pass `--workdir` under directories only you or root
 may write (see [call a checked function](#call-a-checked-function)).
@@ -162,12 +164,19 @@ root, up to `/`, must be owned by you or root and must not be writable by
 others, nor by its group, unless it has the sticky bit (as `/tmp` has), as
 OpenSSH checks the directories above its configuration. A directory writable
 by its group is accepted when that group is your private group, by Debian
-OpenSSH's rule: the directory's group is your primary group, the group's name
-is your user name, the group lists no members or only you (read with
-`getpwuid_r(3)` and `getgrgid_r(3)`), and, on Linux, the directory has no
-access ACL, whose mask is what its group bits show. So a clone made with a `umask` of 002
-under user-private groups is accepted, and no other user can rename the root
-away and put another directory at its path. Otherwise preparation is refused
+OpenSSH's rule (no account but you has the group as its primary group, and
+the group lists no member but you) with stricter conditions. All of these
+must hold: the directory's group is your primary group; the group's name is
+your user name; the group lists no members or only you (read with
+`getpwuid_r(3)` and `getgrgid_r(3)`); on Linux, the password database,
+enumerated with `getpwent_r(3)`, lists you with that primary group and no
+other account with it; and, on Linux, the directory has no access ACL, whose
+mask is what its group bits show. Elsewhere a group-writable directory is
+refused. So a clone made with a `umask` of 002 under user-private groups is
+accepted, and no other account the password database lists can rename the
+root away and put another directory at its path. An account that a name
+service does not enumerate (LDAP or sssd with enumeration off) cannot be seen;
+see [limits](../docs/LIMITS.md). Otherwise preparation is refused
 with a message naming every such directory, nearest first, with its reason
 (at most 16 named, the rest counted): run `chmod go-w` on each, or choose a
 cache under directories only you or root may write. The existing directories

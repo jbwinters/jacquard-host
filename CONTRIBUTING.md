@@ -151,7 +151,7 @@ The independent .NET adapter and SDK live in `dotnet/` as package
 directory). It targets .NET 8, has no runtime dependencies beyond the .NET base
 class library, and does not call Python, Node.js, Go, Rust, or Java; it calls
 the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`, `mkdir(2)`,
-`statx(2)` or `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, and `lgetxattr(2)`) and runs on Linux and macOS only. On Linux the
+`statx(2)` or `stat(2)`, `getpwuid_r(3)`, `getgrgid_r(3)`, `getpwent_r(3)`, and `lgetxattr(2)`) and runs on Linux and macOS only. On Linux the
 SDK runs Core's commands through util-linux `setsid` when one is installed.
 NUnit, its adapter, and the test SDK are its only (test) dependencies. The
 .NET 8 or 10 SDK is required.
@@ -169,10 +169,17 @@ dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll quickstar
 The example command's program cache is under `dotnet/.scratch/`, and the SDK
 refuses it when another user could write a directory above it: one writable
 by others, or by its group unless that group is your private group (named
-after you, with no other members; a clone made with a `umask` of 002 under
-user-private groups passes). The refusal names every such directory; run
-`chmod go-w` on each, or pass `--workdir` under directories only you or root
-may write.
+after you, listing no other member, and no other account in the password
+database having it as its primary group; a clone made with a `umask` of 002
+under user-private groups passes). The refusal names every such directory;
+run `chmod go-w` on each, or pass `--workdir` under directories only you or
+root may write.
+
+The SDK tests make their scratch directories under `TMPDIR` when neither a
+group nor another user may write it or any directory above it (unless
+sticky), and otherwise under `/tmp` when that holds, so the refusals they
+expect name only the levels they make; when neither does, they fail asking
+for such a `TMPDIR`.
 
 CI runs the offline tests on .NET 8 and 10, and the live tests on both and the
 four example projects in the shared pinned-Core job. The build treats warnings as errors, with nullable

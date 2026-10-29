@@ -110,8 +110,10 @@
   and each file must be owned by the current user and not group- or
   world-writable, every directory above the root must be owned by the user
   or root and not group- or world-writable unless it is sticky or the group
-  is the user's private group (Debian OpenSSH's rule, so a clone made with a
-  `umask` of 002 under user-private groups is accepted), a refusal names
+  is the user's private group (Debian OpenSSH's rule, which enumerates the
+  password database for another account with that primary group, with
+  stricter conditions, so a clone made with a `umask` of 002 under
+  user-private groups is accepted), a refusal names
   every such directory and creates nothing, and the root's device and inode
   are checked again before each use, each worker a prepared program starts
   included. Replacement by the same user is not covered.
