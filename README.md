@@ -15,8 +15,8 @@ TypeScript SDK supports async service methods, the Go SDK maps native Go types
 and context cancellation, the Rust SDK maps native Rust types through `record!`
 and `variants!` declarations, the Java SDK maps records, enums, and sealed
 interfaces through explicit codecs, and the .NET SDK maps records, enumerations,
-and type hierarchies through explicit codecs without reflection, with
-`CancellationToken` cancellation.
+and type hierarchies through explicit codecs without reflection over members,
+with `CancellationToken` cancellation.
 
 **Experimental:** the SDK targets Core's pinned `jacquard-host-v0` protocol.
 Core is installed separately. Each invocation runs one fresh, serial worker;

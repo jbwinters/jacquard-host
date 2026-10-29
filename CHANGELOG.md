@@ -91,15 +91,27 @@
   with Core's public commands, maps .NET values through explicit `Codec<T>`
   objects (records through field readers and a constructor function,
   enumerations, type hierarchies, `Option<T>`, `Unit`, lazy codecs for
-  recursive types, and `Dynamic` for untyped code) without reflection, binds
+  recursive types, and `Dynamic` for untyped code) without reflection over
+  members (enumeration codecs read `Enum` names and values, and hierarchy
+  codecs check case types with `Type`), binds
   handlers to exact operation identities with the `HandlerContext` and its
   `CancellationToken`, checks arguments against the checked signature before a
   worker starts, and keeps each invocation's raw evidence. `MapBatches` runs
   explicit batches. There is no `decimal` mapping: money crosses as integer
-  minor units. Core's commands run on the caller's thread through `poll(2)`,
-  bounded in time and output, and on Linux through `setsid`, whose process
-  group is killed when a command exits or is stopped. The cache is owner-only
-  and verified, every binding derived again from Core's cached output on load.
+  minor units, and `decimal`, `ulong`, `nuint`, `char`, `float`, and the
+  other numeric types with no Jacquard type do not compile as arguments.
+  Caller names over 4,096 chars are refused before they are looked up.
+  Core's commands run on the caller's thread through `poll(2)`, bounded in
+  time and output, and on Linux through `setsid`, whose process group is
+  killed when a command exits or is stopped; without `setsid`, descendants
+  are recorded from `/proc` within entry and byte caps. Only the cache's
+  owner may write it: the root, each entry, and each file must be owned by
+  the current user and not group- or world-writable, and the root's identity
+  is checked again before each use (its parent directories are not checked).
+  Every binding is derived again from Core's cached output on load, and a
+  preparation during which the Core executable or prelude changed is
+  refused. `Invocation.Save` writes a new owner-only file and renames it over
+  the target.
   The four example projects run through a `JacquardExamples` command in
   `dotnet/examples/`, and CI runs them and the SDK's live tests against the
   pinned Core.

@@ -147,16 +147,34 @@ entry, or any file or directory in one that the current user does not own or
 that its group or others may write, both when it creates an entry and when it
 loads one, and it makes each new entry's directories and files owner-only
 (Core's store included). The owner and mode come from `statx(2)` on Linux and
-`stat(2)` on macOS, without following links. The cache root's parent
-directories are not checked. The `--version` check and prelude discovery run
-once per Core executable and prelude in the process, shared by every
-`Runtime` and thread. Each call runs one fresh worker. Prepare only
+`stat(2)` on macOS, without following links. The cache root is then used by
+its path, so its device and inode, read at that check, are compared again
+before the staging directory is made, before an entry is published, and
+before and after each load; a root renamed away and replaced is refused. Its
+parent directories are not checked, so a root replaced between one of those
+checks and the step that follows it is not detected: keep the cache under
+directories only you can write.
+
+The executable and every prelude file and directory are fingerprinted by
+path, and Core opens them by path afterwards. Each one's identity (device,
+inode, size, mode, owner, and modification and status-change times) is read
+as it is fingerprinted and must be unchanged once Core's commands have
+finished: inside the version check and prelude discovery, before a new entry
+is published, and before an existing one is loaded. A change refuses the
+preparation, and a version check or prelude discovery it affected is not
+kept. The `--version` check runs once per executable fingerprint (its digest
+and its identity) and prelude discovery once per that fingerprint and the
+prelude's digest, in the process, shared by every `Runtime` and thread. What
+this does not cover is in [LIMITS](../docs/LIMITS.md). Each call runs one
+fresh worker. Prepare only
 first-party declaration sources: preparation runs Core's `run` command,
 without service bindings, to populate the store.
 
 `new Runtime()` uses `$JACQUARD_BIN` and `$JACQUARD_PRELUDE`; an empty option
-means unset. The runtime refuses a Core whose `--version` differs from the
-pinned release. Each Core command must finish within 30 seconds, and keeps at
+means unset. The Core executable must be a regular file this user may execute
+(`access(2)` with `X_OK`, not merely any execute bit); one this user may not
+run is refused with a message saying so. The runtime refuses a Core whose
+`--version` differs from the pinned release. Each Core command must finish within 30 seconds, and keeps at
 most 8 MiB of stdout and 4 KiB of stderr; see [Core's commands](#cores-commands).
 Cancelling the token `Prepare` takes kills the running command and its
 process group, and fails the preparation; a preparation waiting for another
@@ -164,17 +182,27 @@ thread's version check or prelude discovery stops waiting too. The SDK
 observes only the token: `Thread.Interrupt` is not a stop signal, and the
 SDK's own waits (`poll(2)` sleeps) do not consume it.
 
-Arguments are `Argument`s. A `long` or `int` converts implicitly to an `Int`,
-a `double` to a `Real`, a `string` to a `Text`, and a `bool`, a protocol
-`Hash`, a protocol `Value`, or a `Dynamic` to itself; anything else, lists and
-records included, is `codec.Arg(value)`. There is deliberately no conversion
-from `decimal` (see [data](#data)). `Call` decodes the result with the codec
-you pass; `Invoke` keeps the whole `Invocation`. Overloads that take an
-argument list and a `CancellationToken` kill the worker when it is cancelled.
+Arguments are `Argument`s. A `long`, `int`, `uint`, `short`, `ushort`,
+`sbyte`, or `byte` converts implicitly to an `Int`, a `double` to a `Real`, a
+`string` to a `Text`, and a `bool`, a protocol `Hash`, a protocol `Value`, or
+a `Dynamic` to itself; anything else, lists and records included, is
+`codec.Arg(value)`. A `ulong`, `nuint`, `char`, `float`, `Half`, `decimal`,
+`Int128`, `UInt128`, or `BigInteger` does not compile as an argument or in
+`Dynamic.Of`: those conversions are marked obsolete as errors, with the
+reason, because C# would otherwise convert a `ulong` through `double` (2^53 + 1
+would arrive as 2^53) and a `char` to an `Int` (see [data](#data)). `Call`
+decodes the result with the codec you pass; `Invoke` keeps the whole
+`Invocation`. Overloads that take an argument list and a `CancellationToken`
+kill the worker when it is cancelled. `MapBatches` reads the number of rows
+once and refuses a list whose count differs before a later batch.
 `Invocation.Save` writes the frames and evidence, including argument and
-result values; a new file is created owner-only, and an existing file keeps
-its permissions. The API is synchronous; there are no `Task`-returning
-variants.
+result values, to a new file created exclusively in the target's directory,
+made owner-only (0600) and owned by you, and then renames it over the path:
+whatever was there is replaced, never written through, so an existing file's
+permissions and owner are not kept and a symbolic link there is replaced
+rather than followed. The directory must be writable; in a sticky directory
+such as `/tmp`, a file another user owns cannot be replaced and the save
+fails. The API is synchronous; there are no `Task`-returning variants.
 
 ## Data
 
@@ -183,7 +211,8 @@ Values map through explicit `Codec<T>` objects, built with the factories on
 field in the constructor's positional order, a codec and a function that
 reads it, then a function that builds the record from the decoded fields.
 Records are mapped without reflection (enumerations use `Enum.GetValues` and
-`Enum.GetName`), and there is no attribute or source generator: a codec is an
+`Enum.GetName`, and a type hierarchy checks its cases' types with `Type`), and
+there is no attribute or source generator: a codec is an
 ordinary immutable, thread-safe object, so the library builds clean under the
 trimming and ahead-of-time analyzers (`IsAotCompatible`; a trimmed or
 native-AOT publish is not tested), and a binding that does not follow a
@@ -203,7 +232,7 @@ actual wire types too.
 | a record (`Codecs.Record`, `Codecs.Field`) | one constructor, named by public name, its fields in the order given |
 | an enumeration (`Codecs.Enum`) | nullary constructors by convention: member `PageNow` is the constructor `PageNow` (store spelling `page-now`), or an explicit map |
 | a type hierarchy (`Codecs.Union`) | the constructors of one data type: each case is a record, enumeration, or union codec of a subtype |
-| a recursive type (`Codecs.Lazy`) | a codec made once, thread-safely, on first use, so a field can refer to its own type's codec |
+| a recursive type (`Codecs.Lazy`) | a codec made once, thread-safely, on first use, so a field can refer to its own type's codec; a factory that throws keeps nothing and runs again on the next use |
 | `Dynamic` (`Codecs.Dynamic`) | any of the above by public name, for code with no application type |
 | protocol `Value` (`Codecs.Value`) | passed through unchanged |
 
@@ -270,9 +299,9 @@ when a value is encoded, and a result built by a different constructor fails
 to decode. `null` is never a Jacquard value (except through a nullable
 codec). **Money crosses as integer minor units** (cents, say) in an `Int`:
 Jacquard's `Int` is 63-bit and its `Real` is a binary64 `double`, and there is
-no decimal type. The SDK has no `decimal` codec and no conversion from
-`decimal`, so a `decimal` is never converted silently; a test checks that none
-exists.
+no decimal type. The SDK has no `decimal` codec, and a `decimal` argument or
+`Dynamic.Of(decimal)` does not compile (the conversion is obsolete as an error
+saying why), so a `decimal` is never converted silently; a test checks both.
 
 Every encoding is bounded by the selected limits as it goes: the JSON depth
 the wire form needs, `max_collection_items` for each list, tuple, and
@@ -295,7 +324,9 @@ host measures a handler's result the same way. A value returned by
 `ProgramData.Encode` is not measured again. Raw values, decoded values,
 nested unions (flattened on first use to their distinct cases), chains of
 lazy codecs, and a `Dynamic`'s equality and text are walked iteratively, so
-none can exhaust the call stack. `PreparedProgram.Data` gives each public
+none can exhaust the call stack; equality compares each pair of shared
+sub-values once, so values that share sub-values compare in time
+proportional to their distinct nodes. `PreparedProgram.Data` gives each public
 name's exact identity. `ProgramData.Make` builds a `Dynamic.Variant` after
 checking that its constructor exists, and `Invocation.ToDynamic` decodes any
 result into `Dynamic`. A `Dynamic` list, tuple, or variant with more items
@@ -371,7 +402,8 @@ naming the value, and while a value is decoded, by `ProgramData.Decode`,
 either way your exception is its `InnerException`. Names and exception
 messages the SDK quotes (a constructor, type, field, effect, operation, or
 executable name, or your exception's message) appear as an excerpt of at most
-64 chars and its length. A message you pass to `Encoder.Invalid` or
+64 chars and its length. A function, effect, operation, public, or constructor
+name longer than 4,096 chars is refused before it is looked up or hashed. A message you pass to `Encoder.Invalid` or
 `Decoder.Mapping` is kept as written, and no message is longer than
 `JacquardException.MessageLimit` (8,192 chars), the start kept and the whole
 length noted, once, however many prefixes are joined to it. Some failures
@@ -722,10 +754,17 @@ Without `setsid` (Linux without one at those paths), the command's
 descendants are recorded from `/proc` about every 10 ms, by pid and start
 time, and every recorded descendant still alive with that start time is
 killed when the command returns (the start time is read just before the
-kill, as the JDK's process handles do); a stop also calls
-`Process.Kill(true)`. A descendant started and reparented between two records
-keeps running. macOS has no `/proc`, so nothing is recorded there: only the
-tree kill on a stop applies.
+kill, as the JDK's process handles do). Each record reads at most 16,384
+`/proc` entries, 4 MiB of `stat` files, and 1 KiB of each, at most 16,384
+descendants are kept, and a record ends at the deadline or a cancellation,
+checked before each entry; the kills at the exit check them before each
+descendant, so a stop there leaves the rest running. On a timeout or
+cancellation, a last record bounded by the same caps (but not ended by the
+stop) is made, then the command is killed, then every recorded descendant;
+.NET's `Process.Kill(true)`, which reads every process on the machine, is not
+used. A descendant past the caps, or one started and reparented between two
+records, keeps running. macOS has no `/proc`, so nothing is recorded there:
+only .NET's tree kill on a stop applies.
 
 ## Conformance kit
 
