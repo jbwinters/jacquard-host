@@ -631,6 +631,30 @@ public sealed class DataTests
     }
 
     /// <summary>
+    /// Equality compares each pair of shared sub-values once: two separately
+    /// built values of 64 levels, each level a tuple holding the level below
+    /// twice (2^64 paths), compare in time proportional to their nodes.
+    /// </summary>
+    [Test]
+    public void EqualityComparesSharedSubValuesOnce()
+    {
+        static Dynamic Layered(int depth, long leaf)
+        {
+            Dynamic node = Dynamic.Of(leaf);
+            for (int i = 0; i < depth; i++)
+            {
+                node = Dynamic.TupleOf(node, node);
+            }
+
+            return node;
+        }
+
+        Task<(bool Same, bool Different)> comparison = Task.Run(() => (Layered(64, 1).Equals(Layered(64, 1)), Layered(64, 1).Equals(Layered(64, 2))));
+        Assert.That(comparison.Wait(TimeSpan.FromMinutes(1)), Is.True, "the comparison walks every path");
+        Assert.That(comparison.Result, Is.EqualTo((true, false)));
+    }
+
+    /// <summary>
     /// Messages quote caller text as an excerpt, and no message is kept
     /// past 8,192 chars: a result codec naming a huge constructor, codecs,
     /// record readers, and constructors that throw huge messages each give a

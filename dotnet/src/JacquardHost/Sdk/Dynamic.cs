@@ -13,7 +13,8 @@ namespace JacquardLang.Host.Sdk;
 /// <see cref="Invocation.ToDynamic"/>. Equality is structural (a
 /// <see cref="Real"/> compares its exact bits), and both it and
 /// <see cref="ToString"/> walk a value with an explicit stack, so a deep
-/// value cannot exhaust the call stack.
+/// value cannot exhaust the call stack; equality compares each pair of
+/// shared sub-values once.
 /// </summary>
 public abstract class Dynamic : IEquatable<Dynamic>
 {
@@ -175,12 +176,16 @@ public abstract class Dynamic : IEquatable<Dynamic>
             return false;
         }
 
+        // Each pair of nodes is compared once: values that share sub-values
+        // (as decoded values and caller-built graphs may) are compared in
+        // time proportional to their distinct pairs, not their paths.
         var stack = new Stack<(Dynamic Left, Dynamic Right)>();
+        var compared = new HashSet<(Dynamic Left, Dynamic Right)>(PairComparer.Instance);
         stack.Push((this, other));
         while (stack.Count > 0)
         {
             (Dynamic left, Dynamic right) = stack.Pop();
-            if (ReferenceEquals(left, right))
+            if (ReferenceEquals(left, right) || !compared.Add((left, right)))
             {
                 continue;
             }
@@ -208,6 +213,18 @@ public abstract class Dynamic : IEquatable<Dynamic>
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is Dynamic other && Equals(other);
+
+    /// <summary>Pairs of nodes by reference.</summary>
+    private sealed class PairComparer : IEqualityComparer<(Dynamic Left, Dynamic Right)>
+    {
+        internal static readonly PairComparer Instance = new();
+
+        public bool Equals((Dynamic Left, Dynamic Right) x, (Dynamic Left, Dynamic Right) y) =>
+            ReferenceEquals(x.Left, y.Left) && ReferenceEquals(x.Right, y.Right);
+
+        public int GetHashCode((Dynamic Left, Dynamic Right) obj) =>
+            HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj.Left), System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj.Right));
+    }
 
     /// <summary>A hash of this node and its children's count; equal values hash alike.</summary>
     public override int GetHashCode() => HashCode.Combine(GetType(), NodeHash(), Children.Count);
