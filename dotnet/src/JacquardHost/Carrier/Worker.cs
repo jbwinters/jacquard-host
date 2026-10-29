@@ -143,6 +143,15 @@ public sealed class Worker : IDisposable
     /// </summary>
     internal static volatile Action<Process>? SpawnedHook;
 
+    /// <summary>
+    /// Test seam: runs for each redirected stream (stdin, stdout, then
+    /// stderr) as the carrier checks that it is a pipe stream, after all
+    /// three were obtained from the <see cref="Process"/>. A test throws
+    /// <see cref="NotSupportedException"/> from it to stand for a stream
+    /// that is not a pipe stream. Process-global; null outside tests.
+    /// </summary>
+    internal static volatile Action<Stream>? DescriptorHook;
+
     private volatile Action? stopNotice;
 
     /// <summary>
@@ -289,18 +298,43 @@ public sealed class Worker : IDisposable
         return worker;
     }
 
-    /// <summary>Takes the spawned worker's pipes, all or none.</summary>
+    /// <summary>
+    /// Takes the spawned worker's pipes, all or none. On a failure it closes
+    /// every stream it already obtained: once the caller has read them,
+    /// <c>Process.Dispose</c> leaves them open, and nothing else
+    /// would close them before finalization.
+    /// </summary>
     /// <exception cref="NotSupportedException">A redirected stream is not a pipe stream.</exception>
     private void Attach()
     {
         SpawnedHook?.Invoke(process!);
-        StreamWriter writer = process!.StandardInput;
-        Stream input = writer.BaseStream;
-        Stream output = process.StandardOutput.BaseStream;
-        Stream error = process.StandardError.BaseStream;
-        int inputFd = Descriptor(input);
-        int outputFd = Descriptor(output);
-        int errorFd = Descriptor(error);
+        Stream? input = null;
+        Stream? output = null;
+        Stream? error = null;
+        StreamWriter writer;
+        int inputFd;
+        int outputFd;
+        int errorFd;
+        try
+        {
+            writer = process!.StandardInput;
+            input = writer.BaseStream;
+            output = process.StandardOutput.BaseStream;
+            error = process.StandardError.BaseStream;
+            inputFd = Descriptor(input);
+            outputFd = Descriptor(output);
+            errorFd = Descriptor(error);
+        }
+        catch
+        {
+            // Close the base streams rather than the writer, whose disposal
+            // would flush into a worker about to be killed.
+            input?.Dispose();
+            output?.Dispose();
+            error?.Dispose();
+            throw;
+        }
+
         stdinWriter = writer;
         stdin = input;
         stdout = output;
@@ -346,10 +380,13 @@ public sealed class Worker : IDisposable
         return ticks >= long.MaxValue - now ? long.MaxValue : now + (long)ticks;
     }
 
-    private static int Descriptor(Stream stream) =>
-        stream is PipeStream pipe
+    private static int Descriptor(Stream stream)
+    {
+        DescriptorHook?.Invoke(stream);
+        return stream is PipeStream pipe
             ? (int)pipe.SafePipeHandle.DangerousGetHandle()
             : throw new NotSupportedException("worker pipes are " + stream.GetType().Name + ", not pipe streams");
+    }
 
     private static bool Stopped(long expires, CancellationToken cancel) => cancel.IsCancellationRequested || Now() >= expires;
 
