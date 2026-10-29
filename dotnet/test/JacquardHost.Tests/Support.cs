@@ -11,6 +11,9 @@ using JacquardLang.Host.Conformance;
 using JacquardLang.Host.Protocol;
 using NUnit.Framework;
 
+// Host's test seams (RequestDecodedHook and the others) are process-global
+// statics, so no two tests may run at once. No fixture is Parallelizable, and
+// this keeps the worker count at one if one becomes so.
 [assembly: LevelOfParallelism(1)]
 
 namespace JacquardLang.Host.Tests;

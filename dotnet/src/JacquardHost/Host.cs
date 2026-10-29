@@ -66,10 +66,17 @@ public sealed class Host
     /// <summary>The limits each session selects.</summary>
     public Limits Limits { get; }
 
+    // Test seams. They are internal (reachable only from the test assembly
+    // through InternalsVisibleTo) and null outside tests, so production pays
+    // one volatile read of null at each. They are process-global: every
+    // invocation in the process sees them, so the tests run serially
+    // (LevelOfParallelism(1)) and each test fixture that sets one clears it
+    // in its TearDown.
+
     /// <summary>
     /// Test seam: runs on the caller's thread once an effect request is
     /// decoded, before its handler is looked up and before the caller's
-    /// check.
+    /// check. Null outside tests.
     /// </summary>
     internal static volatile Action? RequestDecodedHook;
 
