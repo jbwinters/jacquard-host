@@ -861,6 +861,24 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// The directories a preparation makes for a missing cache root are each
+    /// owner-only (0700), whatever the umask, so a cache under new
+    /// directories is not refused for parents the SDK itself made writable.
+    /// </summary>
+    [Test]
+    public void TheDirectoriesMadeForACacheRootAreOwnerOnly()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string top = At("made");
+        string cache = Path.Combine(top, "a", "b", "cache");
+        fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = cache });
+        foreach (string level in new[] { top, Path.Combine(top, "a"), Path.Combine(top, "a", "b"), cache })
+        {
+            Assert.That(File.GetUnixFileMode(level), Is.EqualTo(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute), level);
+        }
+    }
+
+    /// <summary>
     /// A prepared program's workers run on its store by path, so the cache
     /// root's device and inode are checked again before each worker starts.
     /// After preparation the root is renamed away and back (the same

@@ -502,7 +502,18 @@ public sealed class Runtime
             }
             else
             {
-                Directory.CreateDirectory(configured, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                // Each missing level is made owner-only, whatever the umask,
+                // since no directory above the root may be writable by others.
+                var missing = new Stack<string>();
+                for (string? level = configured; level is not null && !Directory.Exists(level); level = Path.GetDirectoryName(level))
+                {
+                    missing.Push(level);
+                }
+
+                while (missing.Count > 0)
+                {
+                    Directory.CreateDirectory(missing.Pop(), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
             }
 
             // Every symbolic link in the cache root's path is resolved once,
