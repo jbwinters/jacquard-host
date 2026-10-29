@@ -1096,6 +1096,37 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// An account, group, or member name that is not valid UTF-8 is a lookup
+    /// error (null), as distinct malformed names would otherwise decode to
+    /// the same replacement text and compare equal.
+    /// </summary>
+    [Test]
+    public unsafe void AccountNamesThatAreNotUtf8AreLookupErrors()
+    {
+        byte[] buffer = new byte[64];
+        byte[] entry = new byte[256];
+        fixed (byte* data = buffer)
+        fixed (byte* record = entry)
+        {
+            // "\xFFm\0" at 0, "me\0" at 4, "\xC3\0" (a cut sequence) at 8, the member array { 8, null } at 16.
+            buffer[0] = 0xFF;
+            buffer[1] = (byte)'m';
+            Encoding.ASCII.GetBytes("me\0").CopyTo(buffer, 4);
+            buffer[8] = 0xC3;
+            *(IntPtr*)(record + 0) = (IntPtr)data;
+            *(IntPtr*)(record + 24) = IntPtr.Zero;
+            Assert.That(Unix.ReadAccount(record, data, buffer.Length), Is.Null, "an account name that is not UTF-8");
+            Assert.That(Unix.ReadGroup(record, data, buffer.Length), Is.Null, "a group name that is not UTF-8");
+            *(IntPtr*)(record + 0) = (IntPtr)(data + 4);
+            Assert.That(Unix.ReadAccount(record, data, buffer.Length)?.Name, Is.EqualTo("me"), "a valid name");
+            *(IntPtr*)(record + 24) = (IntPtr)(data + 16);
+            *(IntPtr*)(data + 16) = (IntPtr)(data + 8);
+            *(IntPtr*)(data + 24) = IntPtr.Zero;
+            Assert.That(Unix.ReadGroup(record, data, buffer.Length), Is.Null, "a member name that is not UTF-8");
+        }
+    }
+
+    /// <summary>
     /// The scratch directories the SDK tests use are made where no group or
     /// other user may write any directory above them, so a group-writable
     /// TMPDIR (here 0775) does not add levels to the exact refusals the

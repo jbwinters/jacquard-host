@@ -471,7 +471,8 @@ internal static partial class Unix
     /// Linux and macOS: <c>pw_name</c> at 0, <c>pw_uid</c> at 16,
     /// <c>pw_gid</c> at 20) whose strings libc put in the
     /// <paramref name="length"/> bytes at <paramref name="data"/>; null when
-    /// the name's pointer or its terminating NUL is outside them.
+    /// the name's pointer or its terminating NUL is outside them, or the
+    /// name is not valid UTF-8.
     /// </summary>
     internal static unsafe PasswdEntry? ReadAccount(byte* entry, byte* data, int length) =>
         Text(*(IntPtr*)entry, data, length) is { } name ? new PasswdEntry(name, *(uint*)(entry + 16), *(uint*)(entry + 20)) : null;
@@ -482,7 +483,8 @@ internal static partial class Unix
     /// <c>gr_mem</c> at 24) whose strings and member array libc put in the
     /// <paramref name="length"/> bytes at <paramref name="data"/>; null when
     /// the name, the member array, any slot of it up to its terminating null,
-    /// or any member's name lies even partly outside them.
+    /// or any member's name lies even partly outside them, or a name is not
+    /// valid UTF-8.
     /// </summary>
     internal static unsafe GroupEntry? ReadGroup(byte* entry, byte* data, int length)
     {
@@ -522,10 +524,13 @@ internal static partial class Unix
         }
     }
 
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     /// <summary>
     /// The NUL-terminated UTF-8 string at <paramref name="pointer"/>, which
     /// must lie with its NUL inside the <paramref name="length"/> bytes at
-    /// <paramref name="data"/>; null otherwise.
+    /// <paramref name="data"/> and be valid UTF-8 (distinct malformed names
+    /// would otherwise decode to the same replacement text); null otherwise.
     /// </summary>
     private static unsafe string? Text(IntPtr pointer, byte* data, int length)
     {
@@ -537,7 +542,19 @@ internal static partial class Unix
 
         var bytes = new ReadOnlySpan<byte>(start, (int)(data + length - start));
         int nul = bytes.IndexOf((byte)0);
-        return nul < 0 ? null : Encoding.UTF8.GetString(bytes[..nul]);
+        if (nul < 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return StrictUtf8.GetString(bytes[..nul]);
+        }
+        catch (DecoderFallbackException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
