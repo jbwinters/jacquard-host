@@ -200,7 +200,10 @@ with a message naming every such directory, nearest first, with its reason
 cache under directories only you or root may write. The existing directories
 are checked before any missing level is made, so a refused preparation
 creates nothing, and the levels it makes are each owner-only, whatever the
-`umask`. The root is used by its path, also by every
+`umask`. Since the listing runs only for a group-writable private-group
+level, a caller that prepares per request avoids starting `setsid` and
+`getent` on every `Prepare` (cache hits included) by making the cache's
+parent directories writable only by their owner (`chmod go-w DIR`). The root is used by its path, also by every
 worker a prepared program starts, so its device and inode, read at the owner
 check, are compared again before the staging directory is made, before an
 entry is published, before and after each load, and before each worker
