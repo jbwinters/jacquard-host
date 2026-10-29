@@ -136,15 +136,23 @@ as soon as the call is cancelled or its lifetime passes (it reads the
 deadline exactly), and stays true once the invocation ends.
 `HandlerContext.CancellationToken` is cancelled when the call stops or ends,
 and never earlier: however long the lifetime, the deadline alone does not
-cancel it before it passes. While a handler runs, the caller's thread checks
-the deadline and the caller's token at least every 5 ms; when it sees
-either, it starts the token's cancellation before it kills the worker.
-Otherwise the token is cancelled shortly after the invocation ends. The host
-cancels it on a short-lived thread of its own, one per invocation, so a busy
-thread pool does not delay it. Callbacks registered on the token run on that
-thread, never on the caller's thread or the thread that cancelled the
-caller's token; the host does not wait for them, and anything they throw is
-discarded. A callback that blocks holds only that thread. A callback
+cancel it before it passes. While a handler runs, the caller's thread
+rechecks the deadline and the caller's token between poll waits of at most
+5 ms. That is the requested poll timeout, not a bound on the interval:
+reading pending stderr (up to 1 MiB per pass) and thread scheduling can
+lengthen it. Whichever check sees the stop, the token's cancellation starts
+before the worker is killed. Otherwise the token is cancelled shortly after
+the invocation ends. The host cancels it on a short-lived thread of its own,
+one per invocation, so a busy thread pool does not delay it. If no thread can
+be created, it queues the cancellation as a thread-pool work item instead,
+which runs when a pool thread is free; if that cannot be queued either, the
+host gives up: the token is never cancelled, `IsCancelled` still turns true,
+and the result's `HandlerTokenNotCancelled` is set. `Invoke` still returns
+its result and disposes the worker. Callbacks registered on the token run on
+that thread (or that pool thread), never on the caller's thread or the thread
+that cancelled the caller's token; the host does not wait for them, and
+anything they throw is discarded. A callback that blocks holds only that
+thread. A callback
 registered after the token is already cancelled runs at once on the
 registering (handler) thread, as with any `CancellationToken`, and its
 exception is thrown there. A handler that ignores both keeps running on its
@@ -165,7 +173,8 @@ thread. The carrier is built around both:
 
 - **No read or write ever blocks.** The caller's thread asks the C library's
   `poll(2)` (the one native call the adapter makes) whether a pipe is ready,
-  in waits of at most 5 ms that never end after the deadline, and only then reads the bytes already in the pipe,
+  with a poll timeout of at most 5 ms that never ends after the deadline, and
+  only then reads the bytes already in the pipe,
   or writes at most `PIPE_BUF` bytes (4096 on Linux, 512 on macOS), which a
   pipe that poll reports writable accepts at once. Every wait, whether for a
   frame, a write, a handler, or the exit, rechecks the one lifetime deadline,

@@ -39,15 +39,21 @@ public sealed class HandlerContext
     /// A token cancelled when the invocation stops or ends, and never
     /// earlier: the lifetime alone does not cancel it before its deadline,
     /// however long it is. While the handler runs, the caller's thread
-    /// checks the deadline and the caller's token at least every 5 ms; when
-    /// it sees either, it starts the cancellation before it kills the worker.
-    /// Otherwise the token is cancelled shortly after the invocation ends.
-    /// <see cref="IsCancelled"/> is exact; the token follows it.
-    /// The host cancels the token on a dedicated thread of its own, not a
-    /// thread-pool thread, so callbacks registered on it run there, never on
-    /// the caller's thread or the thread that cancelled the caller's token;
-    /// the host does not wait for them, and any exception they throw is
-    /// discarded. A callback registered after the token is cancelled runs at
+    /// rechecks the deadline and the caller's token between poll waits of at
+    /// most 5 ms (the requested poll timeout: reading pending stderr and
+    /// thread scheduling can lengthen the interval between checks). Whichever
+    /// check sees the stop, the token's cancellation starts before the
+    /// worker is killed. Otherwise the token is cancelled shortly after the
+    /// invocation ends. <see cref="IsCancelled"/> is exact; the token
+    /// follows it. The host cancels the token on a dedicated thread of its
+    /// own, not a thread-pool thread, so callbacks registered on it run
+    /// there, never on the caller's thread or the thread that cancelled the
+    /// caller's token; the host does not wait for them, and any exception
+    /// they throw is discarded. If no thread can be created, the host queues
+    /// the cancellation as a thread-pool work item instead, which runs when a
+    /// pool thread is free; if that fails too, the token is never cancelled
+    /// and <see cref="InvocationResult.HandlerTokenNotCancelled"/> is set,
+    /// while <see cref="IsCancelled"/> still turns true. A callback registered after the token is cancelled runs at
     /// once on the registering (handler) thread, as for any
     /// <see cref="System.Threading.CancellationToken"/>, and its exception is
     /// thrown there.

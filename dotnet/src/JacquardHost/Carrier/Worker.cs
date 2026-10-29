@@ -20,7 +20,9 @@ namespace JacquardLang.Host.Carrier;
 /// interrupt (on Unix an anonymous pipe's asynchronous read is a blocking
 /// read on a pool thread). So the carrier never calls a read or write that
 /// can block. It asks the C library's <c>poll(2)</c> whether a pipe is ready,
-/// on the caller's thread, in waits of at most 5 ms, and only then reads the
+/// on the caller's thread, with a poll timeout of at most 5 ms (a requested
+/// timeout: reading pending stderr, up to 1 MiB per pass, and scheduling can
+/// lengthen the interval between checks), and only then reads the
 /// bytes already in the pipe or writes at most <c>PIPE_BUF</c> bytes, which
 /// a writable pipe always accepts at once. Every wait, whether for a frame, a
 /// write, a handler, or the exit, rechecks the single lifetime deadline, the
@@ -837,7 +839,7 @@ public sealed class Worker : IDisposable
     /// Kills a live worker's process tree, waits up to one second for its
     /// exit, reads the stderr left in the pipe, and closes the pipes. Safe
     /// from any thread: an operation in progress on another thread sees the
-    /// disposal within one poll slice and ends first.
+    /// disposal at its next check and ends first.
     /// </summary>
     public void Dispose()
     {
