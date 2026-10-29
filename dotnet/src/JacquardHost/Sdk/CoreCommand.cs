@@ -590,6 +590,7 @@ internal static class CoreCommand
     /// <param name="stdoutLimit">How much stdout is kept; the rest is read and counted as overflow.</param>
     /// <param name="stderrLimit">How much stderr is kept.</param>
     /// <param name="cancellationToken">Stops the command; it is then killed.</param>
+    /// <param name="setsid">The <c>setsid</c> to run the command through where groups are used, in place of <see cref="Setsid"/>.</param>
     /// <exception cref="CarrierException">
     /// A loss when the command cannot start; a timeout when it does not exit
     /// in time; aborted when the token is cancelled. The command is killed in
@@ -601,7 +602,8 @@ internal static class CoreCommand
         TimeSpan timeout,
         int stdoutLimit,
         int stderrLimit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? setsid = null)
     {
         if (command.Count == 0 || command[0].Length == 0)
         {
@@ -620,7 +622,7 @@ internal static class CoreCommand
         }
 
         bool grouped = Grouped;
-        var info = new ProcessStartInfo(grouped ? Setsid! : command[0])
+        var info = new ProcessStartInfo(grouped ? setsid ?? Setsid! : command[0])
         {
             UseShellExecute = false,
             RedirectStandardInput = true,

@@ -666,7 +666,7 @@ internal static class Core
 
     /// <summary>
     /// Test seam: reads the status (not following a final link) of the
-    /// <c>getent</c> file and the directories above it in place of
+    /// <c>getent</c> and <c>setsid</c> files and the directories above them in place of
     /// <see cref="Unix.Stat(string, bool)"/>. Null outside tests.
     /// </summary>
     internal static volatile Func<string, Unix.Status>? GetentStatHook;
@@ -817,11 +817,13 @@ internal static class Core
     /// position with code in this one. <c>getent</c> is the first of
     /// <c>/usr/bin/getent</c> and <c>/bin/getent</c> present; it and every
     /// directory above its real path must be root's and not writable by
-    /// group or others. It runs through <see cref="CoreCommand.Run"/>
+    /// group or others, and so must <c>setsid</c> where the command runs
+    /// through it (<see cref="CoreCommand.Grouped"/>); each runs by its
+    /// checked real path. It runs through <see cref="CoreCommand.Run"/>
     /// (bounded by <see cref="GetentTimeoutMs"/>, its stdout by
     /// <see cref="GetentStdoutLimit"/>, and stopped by the token). False, so
-    /// the directory is refused, when there is no such <c>getent</c> (or not
-    /// on Linux), when it times out, exits nonzero, or prints more than the
+    /// the directory is refused, when there is no such <c>getent</c> or
+    /// <c>setsid</c> (or not on Linux), when it times out, exits nonzero, or prints more than the
     /// limit, invalid UTF-8, more than <see cref="PasswdEntries"/> entries,
     /// or a line that is not seven colon-separated fields with a nonempty
     /// name and decimal user and group ids, or ends without a newline, when
@@ -840,14 +842,21 @@ internal static class Core
             }
             else
             {
-                if (!OperatingSystem.IsLinux() || TrustedGetent() is not { } getent)
+                if (!OperatingSystem.IsLinux() || RootOnlyFile(GetentPaths) is not { } getent)
+                {
+                    return false;
+                }
+
+                // getent runs as setsid -- getent where groups are used, so setsid must be root's alone too.
+                string? setsid = null;
+                if (CoreCommand.Grouped && (setsid = RootOnlyFile(new[] { CoreCommand.Setsid! })) is null)
                 {
                     return false;
                 }
 
                 var command = new List<string> { getent };
                 command.AddRange(GetentArguments);
-                output = CoreCommand.Run(command, null, TimeSpan.FromMilliseconds(GetentTimeoutCap), GetentStdoutLimit, StderrLimit, cancellationToken);
+                output = CoreCommand.Run(command, null, TimeSpan.FromMilliseconds(GetentTimeoutCap), GetentStdoutLimit, StderrLimit, cancellationToken, setsid);
             }
         }
         catch (CarrierException error)
@@ -868,14 +877,15 @@ internal static class Core
     }
 
     /// <summary>
-    /// The real path of the first of <see cref="GetentPaths"/> present, when
-    /// it is a regular file and it and every directory above it are root's
-    /// and not writable by group or others; null otherwise.
+    /// The real path of the first of <paramref name="candidates"/> present,
+    /// when it is a regular file and it and every directory above it are
+    /// root's and not writable by group or others; null otherwise, without
+    /// trying a later candidate.
     /// </summary>
     /// <exception cref="IOException">A status cannot be read.</exception>
-    private static string? TrustedGetent()
+    private static string? RootOnlyFile(string[] candidates)
     {
-        foreach (string candidate in GetentPaths)
+        foreach (string candidate in candidates)
         {
             if (Unix.Stat(candidate, follow: true).Kind == Unix.Kind.Missing)
             {

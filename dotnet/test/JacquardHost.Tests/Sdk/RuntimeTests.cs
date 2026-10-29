@@ -1204,6 +1204,57 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// Where commands run through <c>setsid</c>, <c>getent</c> runs as
+    /// <c>setsid -- getent passwd</c>, so <c>setsid</c> must be root's and
+    /// not writable by group or others as well, as must every directory
+    /// above its real path: with a stand-in <c>getent</c> (<c>/bin/sh</c>,
+    /// root's) printing a valid listing, the listing is accepted, and refused
+    /// when <c>setsid</c>'s file is another user's, writable by its group or
+    /// others, or not a regular file, or a directory above it is not root's
+    /// alone (statuses altered through a seam). Without groups
+    /// <c>setsid</c> is not run, so its status does not matter.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void TheSetsidGetentRunsThroughMustBeRootsAndNotWritable()
+    {
+        Assume.That(CoreCommand.Setsid, Is.Not.Null, "setsid is installed");
+        uint me = Unix.EffectiveUser();
+        const uint Group = 4242;
+        Core.GetentPaths = new[] { "/bin/sh" };
+        Core.GetentArguments = new[] { "-c", "echo me:x:" + me.ToString(CultureInfo.InvariantCulture) + ":4242::/:/bin/sh" };
+        string setsid = Unix.RealPath(CoreCommand.Setsid!);
+        bool Altered(string path, Func<Unix.Status, Unix.Status> change)
+        {
+            Core.GetentStatHook = p => p == path ? change(Unix.Stat(p, follow: false)) : Unix.Stat(p, follow: false);
+            try
+            {
+                return Core.OnlyUserHasPrimaryGroup("me", me, Group, CancellationToken.None);
+            }
+            finally
+            {
+                Core.GetentStatHook = null;
+            }
+        }
+
+        Assert.That(Altered(setsid, s => s), Is.True, "unaltered");
+        Assert.That(Altered(setsid, s => s with { Owner = me == 0 ? 1u : me }), Is.False, "setsid owned by another user");
+        Assert.That(Altered(setsid, s => s with { Mode = s.Mode | 0x10 }), Is.False, "setsid writable by its group");
+        Assert.That(Altered(setsid, s => s with { Mode = s.Mode | 0x2 }), Is.False, "setsid writable by others");
+        Assert.That(Altered(setsid, s => s with { Kind = Unix.Kind.Other }), Is.False, "setsid not a regular file");
+        Assert.That(Altered(Path.GetDirectoryName(setsid)!, s => s with { Mode = s.Mode | 0x10 }), Is.False, "its directory writable by its group");
+        CoreCommand.WithoutGroups = true;
+        try
+        {
+            Assert.That(Altered(setsid, s => s with { Mode = s.Mode | 0x10 }), Is.True, "setsid not used");
+        }
+        finally
+        {
+            CoreCommand.WithoutGroups = false;
+        }
+    }
+
+    /// <summary>
     /// Whether <c>/etc/passwd</c> lists <paramref name="name"/> with the ids
     /// and no account of another user id with that primary group: what the
     /// listing should conclude on a machine whose other password database
