@@ -75,14 +75,43 @@ public static class Option
 }
 
 /// <summary>
+/// Why each .NET numeric type without a Jacquard type is refused. Without
+/// these refusals C# would convert a <see cref="ulong"/> or
+/// <see cref="nuint"/> silently through <see cref="double"/>, a
+/// <see cref="char"/> to an <c>Int</c>, and a <see cref="float"/> to a
+/// <see cref="double"/> with a different decimal text. The conversions to
+/// <see cref="Argument"/> and the <see cref="Dynamic.Of(long)"/> overloads
+/// for these types are marked obsolete as errors, so using one does not
+/// compile; reached anyway (by reflection), the argument is refused when it
+/// is encoded and the <c>Of</c> overload throws.
+/// </summary>
+internal static class NoConversion
+{
+    internal const string Unsigned64 = "ulong has no Jacquard type and is not converted: Int is a signed 63-bit integer; pass a range-checked long";
+    internal const string UnsignedNative = "nuint has no Jacquard type and is not converted: Int is a signed 63-bit integer; pass a range-checked long";
+    internal const string Character = "char has no Jacquard type and is not converted: pass a string for Text, or a long for its code";
+    internal const string Single = "float is not converted: Real is a double; pass (double)value";
+    internal const string HalfFloat = "Half is not converted: Real is a double; pass (double)value";
+    internal const string Decimal = "decimal has no Jacquard type and is never converted: pass money as an integer count of minor units (long); Real is a double";
+    internal const string Signed128 = "Int128 has no Jacquard type and is not converted: Int is a signed 63-bit integer; pass a range-checked long";
+    internal const string Unsigned128 = "UInt128 has no Jacquard type and is not converted: Int is a signed 63-bit integer; pass a range-checked long";
+    internal const string Big = "BigInteger has no Jacquard type and is not converted: Int is a signed 63-bit integer; pass a range-checked long";
+}
+
+/// <summary>
 /// A function argument with the codec that encodes it. Plain values convert
-/// implicitly: <see cref="long"/> and <see cref="int"/> as <c>Int</c>,
+/// implicitly: <see cref="long"/> and <see cref="int"/> (and the smaller
+/// integer types and <see cref="uint"/>, which widen exactly) as <c>Int</c>,
 /// <see cref="double"/> as <c>Real</c>, <see cref="string"/> as <c>Text</c>,
 /// <see cref="bool"/>, <see cref="Protocol.Hash"/>, a protocol
 /// <see cref="Protocol.Value"/>, and <see cref="Sdk.Dynamic"/>. Anything else
-/// is passed as <c>codec.Arg(value)</c>, as are lists and records. There is
-/// deliberately no conversion from <see cref="decimal"/>: money crosses as an
-/// integer count of minor units.
+/// is passed as <c>codec.Arg(value)</c>, as are lists and records.
+/// <see cref="ulong"/>, <see cref="nuint"/>, <see cref="char"/>,
+/// <see cref="float"/>, <see cref="Half"/>, <see cref="decimal"/>,
+/// <see cref="Int128"/>, <see cref="UInt128"/>, and
+/// <see cref="System.Numerics.BigInteger"/> are refused at compile time
+/// instead of converting silently: money crosses as an integer count of
+/// minor units.
 /// </summary>
 public abstract class Argument
 {
@@ -95,6 +124,21 @@ public abstract class Argument
 
     /// <summary>An <c>Int</c>.</summary>
     public static implicit operator Argument(int value) => Codecs.Int.Arg(value);
+
+    /// <summary>An <c>Int</c>; a <see cref="uint"/> widens exactly.</summary>
+    public static implicit operator Argument(uint value) => Codecs.Int.Arg(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static implicit operator Argument(short value) => Codecs.Int.Arg(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static implicit operator Argument(ushort value) => Codecs.Int.Arg(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static implicit operator Argument(sbyte value) => Codecs.Int.Arg(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static implicit operator Argument(byte value) => Codecs.Int.Arg(value);
 
     /// <summary>A <c>Real</c>, the exact binary64 bits of the double.</summary>
     public static implicit operator Argument(double value) => Codecs.Real.Arg(value);
@@ -113,6 +157,42 @@ public abstract class Argument
 
     /// <summary>A value by public name.</summary>
     public static implicit operator Argument(Dynamic value) => Codecs.Dynamic.Arg(value);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.Unsigned64, error: true)]
+    public static implicit operator Argument(ulong value) => new Refused(NoConversion.Unsigned64);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.UnsignedNative, error: true)]
+    public static implicit operator Argument(nuint value) => new Refused(NoConversion.UnsignedNative);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.Character, error: true)]
+    public static implicit operator Argument(char value) => new Refused(NoConversion.Character);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.Single, error: true)]
+    public static implicit operator Argument(float value) => new Refused(NoConversion.Single);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.HalfFloat, error: true)]
+    public static implicit operator Argument(Half value) => new Refused(NoConversion.HalfFloat);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.Decimal, error: true)]
+    public static implicit operator Argument(decimal value) => new Refused(NoConversion.Decimal);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.Signed128, error: true)]
+    public static implicit operator Argument(Int128 value) => new Refused(NoConversion.Signed128);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.Unsigned128, error: true)]
+    public static implicit operator Argument(UInt128 value) => new Refused(NoConversion.Unsigned128);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    [Obsolete(NoConversion.Big, error: true)]
+    public static implicit operator Argument(System.Numerics.BigInteger value) => new Refused(NoConversion.Big);
 
     /// <summary><paramref name="value"/> encoded with <paramref name="codec"/>; the same as <c>codec.Arg(value)</c>.</summary>
     public static Argument Of<T>(Codec<T> codec, T value)
@@ -160,6 +240,19 @@ public abstract class Argument
         }
 
         internal override Value Encode(Encoder encoder) => encoder.Encode(codec, value);
+    }
+
+    /// <summary>A value of a type with no Jacquard type, refused when it is encoded, before any worker starts.</summary>
+    private sealed class Refused : Argument
+    {
+        private readonly string reason;
+
+        internal Refused(string reason)
+        {
+            this.reason = reason;
+        }
+
+        internal override Value Encode(Encoder encoder) => throw encoder.Invalid(reason);
     }
 }
 

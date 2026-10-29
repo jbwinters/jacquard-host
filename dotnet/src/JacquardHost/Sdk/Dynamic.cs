@@ -32,6 +32,24 @@ public abstract class Dynamic : IEquatable<Dynamic>
     /// <summary>An <c>Int</c>.</summary>
     public static Dynamic Of(long value) => new Int(value);
 
+    /// <summary>An <c>Int</c>.</summary>
+    public static Dynamic Of(int value) => new Int(value);
+
+    /// <summary>An <c>Int</c>; a <see cref="uint"/> widens exactly.</summary>
+    public static Dynamic Of(uint value) => new Int(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static Dynamic Of(short value) => new Int(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static Dynamic Of(ushort value) => new Int(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static Dynamic Of(sbyte value) => new Int(value);
+
+    /// <summary>An <c>Int</c>.</summary>
+    public static Dynamic Of(byte value) => new Int(value);
+
     /// <summary>A <c>Real</c>.</summary>
     public static Dynamic Of(double value) => new Real(value);
 
@@ -40,6 +58,51 @@ public abstract class Dynamic : IEquatable<Dynamic>
 
     /// <summary>A <c>Bool</c>.</summary>
     public static Dynamic Of(bool value) => new Bool(value);
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.Unsigned64, error: true)]
+    public static Dynamic Of(ulong value) => throw new ArgumentException(NoConversion.Unsigned64, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.UnsignedNative, error: true)]
+    public static Dynamic Of(nuint value) => throw new ArgumentException(NoConversion.UnsignedNative, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.Character, error: true)]
+    public static Dynamic Of(char value) => throw new ArgumentException(NoConversion.Character, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.Single, error: true)]
+    public static Dynamic Of(float value) => throw new ArgumentException(NoConversion.Single, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.HalfFloat, error: true)]
+    public static Dynamic Of(Half value) => throw new ArgumentException(NoConversion.HalfFloat, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.Decimal, error: true)]
+    public static Dynamic Of(decimal value) => throw new ArgumentException(NoConversion.Decimal, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.Signed128, error: true)]
+    public static Dynamic Of(Int128 value) => throw new ArgumentException(NoConversion.Signed128, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.Unsigned128, error: true)]
+    public static Dynamic Of(UInt128 value) => throw new ArgumentException(NoConversion.Unsigned128, nameof(value));
+
+    /// <summary>Refused: the type has no Jacquard type, and using this does not compile (see the obsolete message).</summary>
+    /// <exception cref="ArgumentException">Always.</exception>
+    [Obsolete(NoConversion.Big, error: true)]
+    public static Dynamic Of(System.Numerics.BigInteger value) => throw new ArgumentException(NoConversion.Big, nameof(value));
 
     /// <summary>A <c>List</c>.</summary>
     /// <exception cref="ArgumentException">More items than the v0 hard limit.</exception>

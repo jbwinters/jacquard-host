@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -236,18 +237,60 @@ public sealed class DataTests
     }
 
     /// <summary>
-    /// There is no implicit conversion from <see cref="decimal"/> (or from
-    /// <see cref="float"/> to <c>Int</c>): money crosses as integer minor units.
+    /// Numeric types with no Jacquard type are refused instead of converting
+    /// silently (C# would take a <see cref="ulong"/> through
+    /// <see cref="double"/>, so 2^53 + 1 arrives as 2^53, and a
+    /// <see cref="char"/> to an <c>Int</c>): their conversions to
+    /// <see cref="Argument"/> and their <see cref="Dynamic.Of(long)"/>
+    /// overloads are obsolete as errors, so a use does not compile; reached by
+    /// reflection, the argument is refused when it is encoded and the
+    /// overload throws. There is no decimal codec: money crosses as integer
+    /// minor units. The integer types that widen exactly still convert to
+    /// <c>Int</c>.
     /// </summary>
     [Test]
-    public void DecimalHasNoConversion()
+    public void NumericTypesWithoutAJacquardTypeAreRefused()
     {
-        IEnumerable<Type> sources = typeof(Argument).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Where(method => method.Name is "op_Implicit" or "op_Explicit")
-            .Select(method => method.GetParameters()[0].ParameterType);
-        Assert.That(sources, Does.Not.Contain(typeof(decimal)));
-        Assert.That(typeof(Dynamic).GetMethods().Where(method => method.Name == "Of").Select(method => method.GetParameters()[0].ParameterType), Does.Not.Contain(typeof(decimal)));
+        ProgramData data = Fixture(Limits.Hard);
+        const ulong Past = (1UL << 53) + 1;
+        var refused = new (object Value, string Reason)[]
+        {
+            (Past, NoConversion.Unsigned64),
+            (unchecked((nuint)Past), NoConversion.UnsignedNative),
+            ('x', NoConversion.Character),
+            (0.1f, NoConversion.Single),
+            ((Half)1, NoConversion.HalfFloat),
+            (1.10m, NoConversion.Decimal),
+            ((Int128)Past, NoConversion.Signed128),
+            ((UInt128)Past, NoConversion.Unsigned128),
+            (new BigInteger(Past), NoConversion.Big),
+        };
+        foreach ((object value, string reason) in refused)
+        {
+            Type type = value.GetType();
+            MethodInfo conversion = typeof(Argument).GetMethod("op_Implicit", new[] { type })
+                ?? throw new AssertionException(type.Name + " has no refusing conversion");
+            Assert.That(conversion.GetCustomAttribute<ObsoleteAttribute>() is { IsError: true } obsolete && obsolete.Message == reason, Is.True, type.Name + " conversion compiles");
+            var argument = (Argument)conversion.Invoke(null, new[] { value })!;
+            JacquardException error = Support.Throws<JacquardException>(() => argument.Encode(Encoder.Root(data, "value")));
+            Assert.That(error.Kind, Is.EqualTo(JacquardErrorKind.InvalidArgument));
+            Assert.That(error.Message, Is.EqualTo("value: " + reason));
+            MethodInfo of = typeof(Dynamic).GetMethod("Of", new[] { type }) ?? throw new AssertionException(type.Name + " has no refusing Dynamic.Of");
+            Assert.That(of.GetCustomAttribute<ObsoleteAttribute>() is { IsError: true }, Is.True, type.Name + " Dynamic.Of compiles");
+            TargetInvocationException thrown = Support.Throws<TargetInvocationException>(() => of.Invoke(null, new[] { value }));
+            Assert.That(thrown.InnerException, Is.InstanceOf<ArgumentException>().With.Message.StartWith(reason));
+        }
+
         Assert.That(typeof(Codecs).GetProperties().Select(property => property.PropertyType), Does.Not.Contain(typeof(Codec<decimal>)));
+        foreach (Argument exact in new Argument[] { (byte)7, (sbyte)7, (short)7, (ushort)7, 7U, 7, 7L, (nint)7 })
+        {
+            Assert.That(exact.Encode(Encoder.Root(data, "value")), Is.EqualTo(new IntValue(7)));
+        }
+
+        foreach (Dynamic exact in new[] { Dynamic.Of((byte)7), Dynamic.Of((sbyte)7), Dynamic.Of((short)7), Dynamic.Of((ushort)7), Dynamic.Of(7U), Dynamic.Of(7), Dynamic.Of((nint)7) })
+        {
+            Assert.That(exact, Is.EqualTo(Dynamic.Of(7L)));
+        }
     }
 
     /// <summary>A recursive type maps through a lazy codec, which is made once even when many threads ask at once.</summary>
