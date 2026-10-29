@@ -62,7 +62,7 @@ public sealed class ProgramData
     public Hash Identity(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
-        return names.TryGetValue(Identities.DisplayToStore(name), out Hash? identity)
+        return names.TryGetValue(Identities.DisplayToStore(Identities.Bounded(name, "public")), out Hash? identity)
             ? identity
             : throw JacquardException.Binding("unknown name " + Identities.Excerpt(name));
     }
@@ -76,7 +76,8 @@ public sealed class ProgramData
 
     internal Hash? Name(string name) => names.TryGetValue(name, out Hash? identity) ? identity : null;
 
-    internal Hash? ConstructorId(string name) => constructors.TryGetValue(Identities.DisplayToStore(name), out Hash? identity) ? identity : null;
+    /// <exception cref="JacquardException">A binding failure for a name over the limit.</exception>
+    internal Hash? ConstructorId(string name) => constructors.TryGetValue(Identities.DisplayToStore(Identities.Bounded(name, "constructor")), out Hash? identity) ? identity : null;
 
     /// <summary>A <see cref="Dynamic.Variant"/> after checking that the constructor exists.</summary>
     /// <exception cref="JacquardException">

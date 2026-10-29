@@ -897,4 +897,27 @@ public sealed class RuntimeTests
         Assert.That(fake.Calls("--version"), Is.EqualTo(2));
     }
 
+    /// <summary>
+    /// A function, effect, or operation name over 4,096 chars is refused
+    /// before it is looked up, quoting an excerpt; one of exactly 4,096
+    /// chars is looked up (and names nothing).
+    /// </summary>
+    [Test]
+    public void OverlongProgramNamesAreRefusedBeforeTheyAreLookedUp()
+    {
+        using FakeCore fake = FakeCore.Effects(At("names"));
+        PreparedProgram program = fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, fake.Options);
+        string huge = new('X', 1_000_000);
+        Operations service = new Operations().On("lookup", Codecs.Int, () => 1L);
+        Assert.That(Support.Throws<JacquardException>(() => program.Function(huge)).Message, Is.EqualTo("function name " + Excerpt('X', 1_000_000) + " exceeds 4096 chars"));
+        Assert.That(Support.Throws<JacquardException>(() => program.Provide(huge, service)).Message, Is.EqualTo("effect name " + Excerpt('X', 1_000_000) + " exceeds 4096 chars"));
+        Assert.That(
+            Support.Throws<JacquardException>(() => program.Function("first", new Dictionary<string, Operations> { [huge] = service })).Message,
+            Is.EqualTo("effect name " + Excerpt('X', 1_000_000) + " exceeds 4096 chars"));
+        Assert.That(Support.Throws<JacquardException>(() => new Operations().On(huge, Codecs.Int, () => 1L)).Message, Is.EqualTo("operation name " + Excerpt('X', 1_000_000) + " exceeds 4096 chars"));
+        string longest = new('x', 4096);
+        Assert.That(Support.Throws<JacquardException>(() => program.Function(longest)).Message, Does.EndWith(": absent or unsupported closed v0 signature"));
+        Assert.That(Support.Throws<JacquardException>(() => program.Provide(longest, service)).Message, Does.StartWith("unknown effect "));
+        Assert.That(program.Function("first", new Dictionary<string, Operations> { ["Inventory"] = service }).Name, Is.EqualTo("first"));
+    }
 }

@@ -9,7 +9,7 @@ namespace JacquardLang.Host.Sdk;
 /// <summary>Public names and identities printed by Core's <c>hash</c> and <c>check --print-sigs</c> commands, and the SDK's text bounds.</summary>
 internal static class Identities
 {
-    /// <summary>The longest name, in chars, that is converted between spellings.</summary>
+    /// <summary>The longest name, in chars, the SDK looks up; a longer caller name is refused before it is looked up, hashed, or converted.</summary>
     internal const int NameLimit = 4096;
 
     /// <summary>The longest excerpt of caller text quoted in a message, in chars.</summary>
@@ -70,12 +70,25 @@ internal static class Identities
         return message is null ? type : type + ": " + Excerpt(message);
     }
 
-    /// <summary>Converts a display name such as <c>WorkToday</c> to its store spelling, <c>work-today</c>; lowercase names are unchanged.</summary>
+    /// <summary>The refusal of a caller's <paramref name="what"/> name longer than <see cref="NameLimit"/>, quoting an excerpt.</summary>
+    internal static string TooLong(string what, string name) =>
+        what + " name " + Excerpt(name) + " exceeds " + NameLimit.ToString(CultureInfo.InvariantCulture) + " chars";
+
+    /// <summary><paramref name="name"/>, refused when it is longer than <see cref="NameLimit"/>, before it is looked up or hashed.</summary>
+    /// <exception cref="JacquardException">A binding failure quoting an excerpt.</exception>
+    internal static string Bounded(string name, string what) =>
+        name.Length > NameLimit ? throw JacquardException.Binding(TooLong(what, name)) : name;
+
+    /// <summary>
+    /// Converts a display name such as <c>WorkToday</c> to its store
+    /// spelling, <c>work-today</c>; lowercase names are unchanged. A name
+    /// longer than <see cref="NameLimit"/> is refused, never expanded.
+    /// </summary>
+    /// <exception cref="JacquardException">A binding failure for a name over the limit.</exception>
     internal static string DisplayToStore(string name)
     {
-        // A name longer than any the SDK maps is returned as given, so a huge
-        // one is never expanded; it then names nothing.
-        if (name.Length == 0 || name.Length > NameLimit)
+        Bounded(name, "a");
+        if (name.Length == 0)
         {
             return name;
         }
@@ -104,7 +117,8 @@ internal static class Identities
     }
 
     /// <summary>The form used to look up effects and operations: store spelling, with <c>_</c> accepted for <c>-</c>.</summary>
-    internal static string Normal(string name) => name.Length > NameLimit ? name : DisplayToStore(name).Replace('_', '-');
+    /// <exception cref="JacquardException">A binding failure for a name over the limit.</exception>
+    internal static string Normal(string name, string what) => DisplayToStore(Bounded(name, what)).Replace('_', '-');
 
     /// <summary>Parses one <c>N:name hash</c> line, or returns null.</summary>
     private static (string Index, Entry Entry)? HashLine(string line)

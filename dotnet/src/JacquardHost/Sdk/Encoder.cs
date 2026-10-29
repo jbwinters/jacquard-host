@@ -132,6 +132,11 @@ public sealed class Encoder
         ArgumentNullException.ThrowIfNull(name);
         ArgumentNullException.ThrowIfNull(fields);
 
+        if (name.Length > Identities.NameLimit)
+        {
+            throw Invalid(Identities.TooLong("constructor", name));
+        }
+
         // Counted before the fields are copied into the value.
         CheckCount(fields.Count, "constructor");
         if (ProgramData.Builtins.Contains(Identities.DisplayToStore(name)))

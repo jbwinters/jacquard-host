@@ -134,7 +134,7 @@ public sealed class Operations
                 throw HandlerException.OutsideFailed("handler result cannot be represented");
             }
         };
-        string key = Identities.Normal(operation);
+        string key = Identities.Normal(operation, "operation");
         lock (sync)
         {
             handlers[key] = handler;

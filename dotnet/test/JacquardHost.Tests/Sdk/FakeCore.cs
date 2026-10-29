@@ -73,6 +73,16 @@ internal sealed class FakeCore : IDisposable
         + Second + "' ;; esac ;;\n"
         + "run) mkdir -p \"$4\" && echo objects > \"$4/objects\" ;;");
 
+    /// <summary>
+    /// A fake whose one function, <c>first</c>, uses the effect
+    /// <c>Inventory</c>, whose one operation is <c>lookup</c>.
+    /// </summary>
+    internal static FakeCore Effects(string root) => Create(root, Compat.CoreVersion, null,
+        "check) echo 'first : () ->{Inventory} Int' ;;\n"
+        + "hash) case \"$2\" in */prelude/*) echo '0:int " + new string('1', 64) + "' ;; *) echo '0:first " + First + "'; echo '1:inventory "
+        + new string('c', 64) + "'; echo '1:lookup " + new string('d', 64) + "' ;; esac ;;\n"
+        + "run) mkdir -p \"$4\" && echo objects > \"$4/objects\" ;;");
+
     internal string Source(string name)
     {
         string source = Path.Combine(Root, name);

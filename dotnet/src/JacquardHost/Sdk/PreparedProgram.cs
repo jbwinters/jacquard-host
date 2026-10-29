@@ -148,7 +148,7 @@ public sealed class PreparedProgram
         ArgumentNullException.ThrowIfNull(operations);
         lock (sync)
         {
-            string key = Identities.Normal(effect);
+            string key = Identities.Normal(effect, "effect");
             if (!effects.ContainsKey(key))
             {
                 throw JacquardException.Binding("unknown effect " + Identities.Excerpt(effect) + (unsupported.Count == 0 ? string.Empty
@@ -173,6 +173,7 @@ public sealed class PreparedProgram
     public Function Function(string name, IReadOnlyDictionary<string, Operations>? bindings = null)
     {
         ArgumentNullException.ThrowIfNull(name);
+        Identities.Bounded(name, "function");
         bindings ??= new Dictionary<string, Operations>();
         lock (sync)
         {
@@ -217,7 +218,7 @@ public sealed class PreparedProgram
                 }
 
                 ArgumentNullException.ThrowIfNull(binding.Key, nameof(bindings));
-                string key = Identities.Normal(binding.Key);
+                string key = Identities.Normal(binding.Key, "effect");
                 if (!selected.ContainsKey(key))
                 {
                     throw JacquardException.Binding(name + " does not use " + Identities.Excerpt(binding.Key));

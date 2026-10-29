@@ -122,7 +122,7 @@ public sealed class DataTests
             Assert.That(Identities.DisplayToStore(display), Is.EqualTo(store));
         }
 
-        Assert.That(Identities.Normal("lookup_stock"), Is.EqualTo("lookup-stock"));
+        Assert.That(Identities.Normal("lookup_stock", "operation"), Is.EqualTo("lookup-stock"));
         Assert.That(Identities.DisplayToStore("\ud800X"), Is.EqualTo("\ud800X"), "a lone surrogate is not upper case");
     }
 
@@ -539,16 +539,29 @@ public sealed class DataTests
     }
 
     /// <summary>
-    /// A constructor name longer than any the SDK maps is neither expanded
-    /// nor copied whole into a message: it names nothing, and the refusal
-    /// quotes its first 64 chars and its length.
+    /// A caller's name over 4,096 chars is refused before it is looked up,
+    /// hashed, or converted, quoting its first 64 chars and its length: a
+    /// public name, a constructor by name (dynamic, made, or a record's),
+    /// and an operation. A name of exactly 4,096 chars is looked up, and
+    /// names nothing.
     /// </summary>
     [Test]
-    public void AHugeConstructorNameIsRefusedWithoutBeingExpanded()
+    public void AnOverlongNameIsRefusedBeforeItIsLookedUp()
     {
         string huge = new('X', 1_000_000);
-        Assert.That(ReferenceEquals(huge, Identities.DisplayToStore(huge)), Is.True, "the name was converted");
-        Assert.That(Refusal(() => Fixture(Limits.Hard).Encode(Codecs.Dynamic, Dynamic.VariantOf(huge))), Is.EqualTo("value: unknown constructor " + new string('X', 64) + "... (1000000 chars)"));
+        string excerpt = new string('X', 64) + "... (1000000 chars)";
+        ProgramData data = Fixture(Limits.Hard);
+        Assert.That(Refusal(() => Identities.DisplayToStore(huge)), Is.EqualTo("a name " + excerpt + " exceeds 4096 chars"));
+        Assert.That(Refusal(() => data.Identity(huge)), Is.EqualTo("public name " + excerpt + " exceeds 4096 chars"));
+        Assert.That(Refusal(() => data.Make(huge)), Is.EqualTo("constructor name " + excerpt + " exceeds 4096 chars"));
+        JacquardException dynamic = Support.Throws<JacquardException>(() => data.Encode(Codecs.Dynamic, Dynamic.VariantOf(huge)));
+        Assert.That(dynamic.Kind, Is.EqualTo(JacquardErrorKind.InvalidArgument));
+        Assert.That(dynamic.Message, Is.EqualTo("value: constructor name " + excerpt + " exceeds 4096 chars"));
+        Assert.That(Refusal(() => data.Encode(Codecs.Record(huge, () => 1L), 1L)), Is.EqualTo("value: constructor name " + excerpt + " exceeds 4096 chars"));
+        Assert.That(Refusal(() => data.Decode(Codecs.Record(huge, () => 1L), data.Encode(Codecs.Unit, Unit.Value))), Does.Contain("constructor name " + excerpt + " exceeds 4096 chars"));
+        Assert.That(Refusal(() => new Operations().On(huge, Codecs.Int, () => 1L)), Is.EqualTo("operation name " + excerpt + " exceeds 4096 chars"));
+        string longest = new('X', 4096);
+        Assert.That(Refusal(() => data.Encode(Codecs.Dynamic, Dynamic.VariantOf(longest))), Does.StartWith("value: unknown constructor "));
         Assert.That(Identities.DisplayToStore("JobTicket"), Is.EqualTo("job-ticket"));
     }
 
