@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading;
+using JacquardLang.Host.Carrier;
 using JacquardLang.Host.Protocol;
 using NUnit.Framework;
 using static JacquardLang.Host.Tests.Support;
@@ -9,14 +10,18 @@ namespace JacquardLang.Host.Tests;
 
 /// <summary>
 /// Callbacks a handler registers on <see cref="HandlerContext.CancellationToken"/>
-/// are handler code. They must never run on, or hold, the caller's thread,
-/// the thread that cancels the caller's token, or the deadline timer, and
-/// whatever they throw must neither escape <see cref="Host.Invoke"/> nor
-/// crash the process.
+/// are handler code. They must never run on, or hold, the caller's thread or
+/// the thread that cancels the caller's token, and whatever they throw must
+/// neither escape <see cref="Host.Invoke"/> nor crash the process. The token
+/// is cancelled at the deadline and not before, however long the lifetime,
+/// and its cancellation does not depend on the shared thread pool.
 /// </summary>
 [TestFixture]
 public sealed class HandlerTokenTests
 {
+    [TearDown]
+    public void ClearSeams() => Worker.ClockHook = null;
+
     private static InvocationResult InvokeEcho(Host host, Handler handler, CancellationToken cancellationToken = default) =>
         host.Invoke(
             Pinned.Identity("kit-echo"),
@@ -223,5 +228,169 @@ public sealed class HandlerTokenTests
         Assert.That(Reason(result), Is.EqualTo("aborted"), result.ToString());
         Assert.That(watch.Elapsed, Is.LessThan(TimeSpan.FromSeconds(5)));
         Assert.That(Eventually(() => Volatile.Read(ref sawCancelled), TimeSpan.FromSeconds(5)), Is.True, "the handler's token was not cancelled");
+    }
+
+    [TestCase(36)]
+    [TestCase(48)]
+    public void ATokenUnderALifetimeOverADayIsCancelledAtTheDeadlineAndNotBefore(int hours)
+    {
+        // The seam moves the lifetime clock: first a day and a minute in
+        // (where a one-day timer would have fired with hours left), then to a
+        // second before the deadline, then to the deadline itself.
+        long offset = 0;
+        Worker.ClockHook = () => Stopwatch.GetTimestamp() + Interlocked.Read(ref offset);
+        TimeSpan lifetime = TimeSpan.FromHours(hours);
+        bool cancelledAfterADay = true;
+        bool cancelledJustBefore = true;
+        bool flaggedJustBefore = true;
+        bool cancelledAtTheDeadline = false;
+        InvocationResult result = Within(TimeSpan.FromSeconds(20), () => InvokeEcho(Replaying("one-once-effect-success", lifetime), (context, args) =>
+        {
+            Interlocked.Exchange(ref offset, Ticks(TimeSpan.FromDays(1) + TimeSpan.FromMinutes(1)));
+            cancelledAfterADay = context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(300));
+            Interlocked.Exchange(ref offset, Ticks(lifetime - TimeSpan.FromSeconds(1)));
+            cancelledJustBefore = context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(300));
+            flaggedJustBefore = context.IsCancelled;
+            Interlocked.Exchange(ref offset, Ticks(lifetime));
+            cancelledAtTheDeadline = context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));
+            return new TextValue("late");
+        }));
+        Assert.That(Volatile.Read(ref cancelledAfterADay), Is.False, "the token was cancelled a day into the lifetime");
+        Assert.That(Volatile.Read(ref cancelledJustBefore), Is.False, "the token was cancelled before the deadline");
+        Assert.That(Volatile.Read(ref flaggedJustBefore), Is.False, "IsCancelled was true before the deadline");
+        Assert.That(Volatile.Read(ref cancelledAtTheDeadline), Is.True, "the token was not cancelled at the deadline");
+        Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
+        Assert.That(result.HostFrames, Has.Count.EqualTo(2), "a late response was sent");
+    }
+
+    private static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * Stopwatch.Frequency);
+
+    /// <summary>
+    /// Fills every thread-pool thread, and 40 more that the pool would have
+    /// to inject, with work items blocked on a gate, then queues a probe
+    /// behind them. While the probe has not run, any work item queued later
+    /// has not run either. Disposal opens the gate and waits for every item.
+    /// </summary>
+    private sealed class Starvation : IDisposable
+    {
+        private readonly ManualResetEventSlim gate = new();
+        private readonly ManualResetEventSlim probe = new();
+        private readonly CountdownEvent done;
+
+        internal Starvation()
+        {
+            ThreadPool.GetMinThreads(out int workers, out _);
+            int blockers = Math.Max(workers, ThreadPool.ThreadCount) + 40;
+            done = new CountdownEvent(blockers + 1);
+            for (int i = 0; i < blockers; i++)
+            {
+                ThreadPool.UnsafeQueueUserWorkItem(
+                    static s =>
+                    {
+                        s.gate.Wait(TimeSpan.FromSeconds(60));
+                        s.done.Signal();
+                    },
+                    this,
+                    preferLocal: false);
+            }
+
+            ThreadPool.UnsafeQueueUserWorkItem(
+                static s =>
+                {
+                    s.probe.Set();
+                    s.done.Signal();
+                },
+                this,
+                preferLocal: false);
+            Thread.Sleep(200);
+            Assert.That(probe.IsSet, Is.False, "the thread pool was not saturated");
+        }
+
+        /// <summary>Whether the probe, and so any work item queued after it, has run.</summary>
+        internal bool PoolRan => probe.IsSet;
+
+        public void Dispose()
+        {
+            gate.Set();
+            Assert.That(done.Wait(TimeSpan.FromSeconds(30)), Is.True, "the blocked work items did not finish");
+            gate.Dispose();
+            probe.Dispose();
+            done.Dispose();
+        }
+    }
+
+    /// <summary>Records, from the token's callback, whether the starved pool had run by then.</summary>
+    private sealed class CancelWitness
+    {
+        private readonly ManualResetEventSlim cancelled = new();
+        private bool poolRanFirst;
+
+        internal void Watch(CancellationToken token, Starvation starvation) =>
+            token.Register(() =>
+            {
+                Volatile.Write(ref poolRanFirst, starvation.PoolRan);
+                cancelled.Set();
+            });
+
+        internal bool Cancelled(TimeSpan limit) => cancelled.Wait(limit);
+
+        internal bool PoolRanFirst => Volatile.Read(ref poolRanFirst);
+    }
+
+    [Test]
+    public void UnderAStarvedThreadPoolTheTokenIsCancelledAtTheDeadline()
+    {
+        var witness = new CancelWitness();
+        using (var starvation = new Starvation())
+        {
+            InvocationResult result = Within(TimeSpan.FromSeconds(15), () => InvokeEcho(Replaying("one-once-effect-success", TimeSpan.FromSeconds(1)), (context, args) =>
+            {
+                witness.Watch(context.CancellationToken, starvation);
+                context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));
+                return new TextValue("late");
+            }));
+            Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
+            Assert.That(result.HostFrames, Has.Count.EqualTo(2), "a late response was sent");
+            Assert.That(witness.Cancelled(TimeSpan.FromSeconds(10)), Is.True, "the token was not cancelled");
+            Assert.That(witness.PoolRanFirst, Is.False, "the token was cancelled only after the starved pool ran");
+        }
+    }
+
+    [Test]
+    public void UnderAStarvedThreadPoolTheTokenIsCancelledWhenTheCallerCancels()
+    {
+        var witness = new CancelWitness();
+        using var cancel = new CancellationTokenSource();
+        using (var starvation = new Starvation())
+        {
+            InvocationResult result = Within(TimeSpan.FromSeconds(15), () => InvokeEcho(Replaying("one-once-effect-success", TimeSpan.FromSeconds(30)), (context, args) =>
+            {
+                witness.Watch(context.CancellationToken, starvation);
+                _ = new Canceller(cancel, TimeSpan.FromMilliseconds(300));
+                context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));
+                return new TextValue("late");
+            }, cancel.Token));
+            Assert.That(Reason(result), Is.EqualTo("aborted"), result.ToString());
+            Assert.That(result.HostFrames, Has.Count.EqualTo(2), "a late response was sent");
+            Assert.That(witness.Cancelled(TimeSpan.FromSeconds(10)), Is.True, "the token was not cancelled");
+            Assert.That(witness.PoolRanFirst, Is.False, "the token was cancelled only after the starved pool ran");
+        }
+    }
+
+    [Test]
+    public void UnderAStarvedThreadPoolTheTokenIsCancelledWhenTheInvocationEnds()
+    {
+        var witness = new CancelWitness();
+        using (var starvation = new Starvation())
+        {
+            InvocationResult result = Within(TimeSpan.FromSeconds(15), () => InvokeEcho(Replaying("one-once-effect-success"), (context, args) =>
+            {
+                witness.Watch(context.CancellationToken, starvation);
+                return new TextValue("pong");
+            }));
+            Assert.That(result.Ok, Is.True, result.ToString());
+            Assert.That(witness.Cancelled(TimeSpan.FromSeconds(10)), Is.True, "the token was not cancelled");
+            Assert.That(witness.PoolRanFirst, Is.False, "the token was cancelled only after the starved pool ran");
+        }
     }
 }

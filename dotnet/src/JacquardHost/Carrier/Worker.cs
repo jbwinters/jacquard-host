@@ -117,6 +117,17 @@ public sealed class Worker : IDisposable
     /// <summary>The worker lifetime when <see cref="WorkerOptions.Deadline"/> is null.</summary>
     public static TimeSpan DefaultDeadline { get; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Test seam: the lifetime clock, in <see cref="Stopwatch"/> timestamp
+    /// ticks, so a test can move a long lifetime to its deadline without
+    /// waiting. It sets the deadline and decides expiry; the one-second exit
+    /// graces keep the real clock. Process-global; null outside tests.
+    /// </summary>
+    internal static volatile Func<long>? ClockHook;
+
+    /// <summary>The lifetime clock: <see cref="Stopwatch.GetTimestamp"/> outside tests.</summary>
+    private static long Now() => ClockHook is { } clock ? clock() : Stopwatch.GetTimestamp();
+
     /// <summary>The spawn error, when the worker never started.</summary>
     public string? SpawnError { get; }
 
@@ -138,7 +149,7 @@ public sealed class Worker : IDisposable
     /// or its lifetime passed. Safe from any thread, and exact: it does not
     /// wait for the caller's next poll to notice the deadline.
     /// </summary>
-    public bool Stopping => expired || disposeRequested || cancel.IsCancellationRequested || Stopwatch.GetTimestamp() >= expires;
+    public bool Stopping => expired || disposeRequested || cancel.IsCancellationRequested || Now() >= expires;
 
     /// <summary>The retained stderr prefix.</summary>
     public byte[] Stderr
@@ -164,7 +175,7 @@ public sealed class Worker : IDisposable
         options.Validate();
         TimeSpan deadline = options.Deadline ?? DefaultDeadline;
 
-        long expires = Expires(Stopwatch.GetTimestamp(), deadline);
+        long expires = Expires(Now(), deadline);
         if (!Posix.Supported)
         {
             return Failed(expires, "unsupported platform", "the .NET host runs workers on Linux and macOS only", cancellationToken);
@@ -246,7 +257,7 @@ public sealed class Worker : IDisposable
             ? (int)pipe.SafePipeHandle.DangerousGetHandle()
             : throw new NotSupportedException("worker pipes are " + stream.GetType().Name + ", not pipe streams");
 
-    private static bool Stopped(long expires, CancellationToken cancel) => cancel.IsCancellationRequested || Stopwatch.GetTimestamp() >= expires;
+    private static bool Stopped(long expires, CancellationToken cancel) => cancel.IsCancellationRequested || Now() >= expires;
 
     private static Worker Failed(long expires, string spawnError, string message, CancellationToken cancel) =>
         new(expires, spawnError, cancel) { fault = CarrierException.Loss(message), exitRecorded = true };
@@ -281,7 +292,7 @@ public sealed class Worker : IDisposable
                 Expire();
                 fault = CarrierException.Aborted("invocation aborted; outside completion is unknown");
             }
-            else if (Stopwatch.GetTimestamp() >= expires)
+            else if (Now() >= expires)
             {
                 Expire();
                 fault = CarrierException.Timeout("worker lifetime deadline exceeded");
@@ -388,7 +399,7 @@ public sealed class Worker : IDisposable
             fds[count++] = new Posix.PollFd { Fd = stderrFd, Events = Posix.PollIn };
         }
 
-        int timeout = RemainingMs(expires, Stopwatch.GetTimestamp());
+        int timeout = RemainingMs(expires, Now());
         if (count == 0)
         {
             Thread.Sleep(timeout);
@@ -672,10 +683,6 @@ public sealed class Worker : IDisposable
             }
         }
     }
-
-    /// <summary>The time left in the lifetime, or zero.</summary>
-    internal TimeSpan Remaining =>
-        TimeSpan.FromSeconds(Math.Min(Math.Max(0, expires - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency, MaxDeadline.TotalSeconds));
 
     /// <summary>Closes the worker's stdin. Nothing is writing, so this never blocks.</summary>
     public void CloseInput()

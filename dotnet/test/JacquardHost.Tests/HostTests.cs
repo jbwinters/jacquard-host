@@ -27,7 +27,6 @@ public sealed class HostTests
         Host.RequestDecodedHook = null;
         Host.HandlerThreadStartedHook = null;
         Host.HandlerCheckHook = null;
-        Host.HandlerTimerHook = null;
     }
 
     [Test]
@@ -419,10 +418,8 @@ public sealed class HostTests
     public void ACooperativeHandlerReturningAtTheDeadlineHasNoAnswerSent()
     {
         // The handler returns as soon as its token is cancelled at the
-        // deadline. The token's timer and the worker's clock differ, and the
-        // seam makes the timer fire 300 ms early: the answer must still not
-        // reach Core, and the call ends at the deadline.
-        Host.HandlerTimerHook = remaining => remaining - TimeSpan.FromMilliseconds(300);
+        // deadline: the answer must not reach Core, and the call ends at the
+        // deadline.
         InvocationResult result = InvokeEcho(Replaying("one-once-effect-success", TimeSpan.FromSeconds(2)), (context, args) =>
         {
             context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));

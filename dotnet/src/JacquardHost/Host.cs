@@ -93,12 +93,6 @@ public sealed class Host
     internal static volatile Action? HandlerCheckHook;
 
     /// <summary>
-    /// Test seam: maps the lifetime left to the delay of the handlers' token
-    /// timer, so a test can make the timer fire early. Null outside tests.
-    /// </summary>
-    internal static volatile Func<TimeSpan, TimeSpan>? HandlerTimerHook;
-
-    /// <summary>
     /// Runs <paramref name="target"/> with <paramref name="args"/>. The invoke
     /// frame is validated before a worker starts. Cancelling
     /// <paramref name="cancellationToken"/> kills the worker; nothing is
@@ -195,7 +189,9 @@ public sealed class Host
             return result;
         }
 
-        var call = new Call(worker, session, result, registry, cancellationToken);
+        // The worker observes the caller's token in its waits on this thread;
+        // nothing is registered on it.
+        var call = new Call(worker, session, result, registry);
         try
         {
             call.Drive(opening, Limits);
@@ -206,8 +202,10 @@ public sealed class Host
         }
         finally
         {
-            worker.Dispose();
+            // The handlers' token is cancelled before the worker is disposed,
+            // which may wait up to a second for a killed worker to exit.
             call.End();
+            worker.Dispose();
         }
 
         result.Requests = session.Requests.ToArray();
@@ -256,26 +254,16 @@ public sealed class Host
     [SuppressMessage("Design", "CA1001", Justification = "The handlers' token source is cancelled, never disposed: an abandoned handler may still hold its token.")]
     private sealed class Call
     {
-        /// <summary>
-        /// The longest single timer wait. A longer lifetime is covered by
-        /// re-arming, so no conversion to milliseconds can overflow.
-        /// </summary>
-        private static readonly TimeSpan MaxTimerDelay = TimeSpan.FromDays(1);
-
         private readonly RegistrySnapshot registry;
-        private readonly CancellationToken cancellationToken;
         private volatile bool ended;
         private CancellationTokenSource? handlerStop;
-        private Timer? handlerTimer;
-        private CancellationTokenRegistration callerRegistration;
 
-        internal Call(Worker worker, Session session, InvocationResult result, RegistrySnapshot registry, CancellationToken cancellationToken)
+        internal Call(Worker worker, Session session, InvocationResult result, RegistrySnapshot registry)
         {
             Worker = worker;
             Session = session;
             Result = result;
             this.registry = registry;
-            this.cancellationToken = cancellationToken;
         }
 
         internal Worker Worker { get; }
@@ -288,17 +276,16 @@ public sealed class Host
         internal bool Sending { get; private set; }
 
         /// <summary>
-        /// Marks the invocation ended and cancels the handlers' token on a
-        /// pool thread. Nothing here runs or waits for a handler's callback:
-        /// the registration is removed without waiting, and the timer is
-        /// disposed without waiting.
+        /// Marks the invocation ended and starts the cancellation of the
+        /// handlers' token, if any handler was given one. Called once, on the
+        /// caller's thread, as soon as the invocation stops for any reason:
+        /// a deadline, cancellation, or disposal seen by the worker's waits
+        /// ends the invocation at once. It does not wait.
         /// </summary>
         internal void End()
         {
             ended = true;
-            callerRegistration.Unregister();
-            handlerTimer?.Dispose();
-            CancelHandlers(handlerStop);
+            StopHandlers();
         }
 
         private void Send(JsonObject frame, Limits limits)
@@ -424,16 +411,6 @@ public sealed class Host
                 }
 
                 answer = RunHandler(handler, request.Arguments);
-
-                // A cancelled handler token means the call is stopping. Its
-                // deadline timer may fire a moment before the worker's clock
-                // reaches the deadline, and a handler that returned on it must
-                // not have its answer sent: wait for the worker to report the
-                // stop (at most that moment), which throws.
-                if (handlerStop is { IsCancellationRequested: true })
-                {
-                    Worker.Await(static () => false);
-                }
             }
 
             CarrierException? fault = Worker.Fault();
@@ -494,74 +471,45 @@ public sealed class Host
         }
 
         /// <summary>
-        /// The handlers' token: cancelled when the caller's token is
-        /// cancelled, shortly after the lifetime deadline, and when the
-        /// invocation ends. Callbacks a handler registers on it run on a pool
-        /// thread, never on the caller's thread, the canceller's thread, or the
-        /// deadline timer, and nothing waits for them; their exceptions are
-        /// discarded. The source is never disposed, because an abandoned
-        /// handler may still hold its token.
+        /// The handlers' token, created on the caller's thread for the first
+        /// handler. Only <see cref="StopHandlers"/> cancels it, once the
+        /// invocation has ended: there is no timer, no registration on the
+        /// caller's token, and no pool work item. The source is never
+        /// disposed, because an abandoned handler may still hold its token.
         /// </summary>
         private CancellationToken HandlerToken()
         {
-            if (handlerStop is null)
-            {
-                handlerStop = new CancellationTokenSource();
-                TimeSpan remaining = HandlerTimerHook is { } hook ? hook(Worker.Remaining) : Worker.Remaining;
-                handlerTimer = new Timer(static state => ((Call)state!).TimerFired(), this, TimerDelay(remaining), Timeout.InfiniteTimeSpan);
-                callerRegistration = cancellationToken.UnsafeRegister(static state => CancelHandlers((CancellationTokenSource)state!), handlerStop);
-            }
-
+            handlerStop ??= new CancellationTokenSource();
             return handlerStop.Token;
         }
 
-        /// <summary>The timer delay for <paramref name="remaining"/>: rounded up to whole milliseconds, at least zero, at most <see cref="MaxTimerDelay"/>.</summary>
-        private static TimeSpan TimerDelay(TimeSpan remaining)
-        {
-            if (remaining <= TimeSpan.Zero)
-            {
-                return TimeSpan.Zero;
-            }
-
-            if (remaining >= MaxTimerDelay)
-            {
-                return MaxTimerDelay;
-            }
-
-            return TimeSpan.FromMilliseconds(Math.Ceiling(remaining.TotalMilliseconds));
-        }
-
         /// <summary>
-        /// Runs on the timer's pool thread: re-arms while a long lifetime has
-        /// more than one timer wait left, otherwise queues the cancellation.
+        /// Called only from <see cref="End"/>: starts a dedicated background
+        /// thread that cancels the handlers' token and discards whatever its
+        /// callbacks throw. Nothing waits for that thread, so a callback that
+        /// blocks holds only it, and the shared thread pool is not involved.
         /// </summary>
-        private void TimerFired()
+        private void StopHandlers()
         {
-            TimeSpan remaining = Worker.Remaining;
-            if (remaining > MaxTimerDelay && !ended)
+            CancellationTokenSource? source = handlerStop;
+            if (source is null)
             {
-                try
-                {
-                    handlerTimer?.Change(TimerDelay(remaining), Timeout.InfiniteTimeSpan);
-                    return;
-                }
-                catch (ObjectDisposedException)
-                {
-                    // The invocation ended; End cancels the token.
-                }
+                return;
             }
 
-            CancelHandlers(handlerStop);
-        }
-
-        /// <summary>
-        /// Cancels <paramref name="source"/> on a pool work item, so handler
-        /// callbacks never run on, or hold, the thread that asks.
-        /// </summary>
-        private static void CancelHandlers(CancellationTokenSource? source)
-        {
-            if (source is not null && !source.IsCancellationRequested)
+            var thread = new Thread(static state => CancelQuietly((CancellationTokenSource)state!))
             {
+                IsBackground = true,
+                Name = "jacquard-handler-cancel",
+            };
+            try
+            {
+                thread.Start(source);
+            }
+            catch (OutOfMemoryException)
+            {
+                // No thread could be created. Fall back to the pool rather
+                // than run handler callbacks on the caller's thread.
                 ThreadPool.UnsafeQueueUserWorkItem(static s => CancelQuietly(s), source, preferLocal: false);
             }
         }
