@@ -373,12 +373,12 @@ public sealed class HostTests
         // its one-second deadline, and no late response follows.
         using var finished = new ManualResetEventSlim();
         var watch = Stopwatch.StartNew();
-        InvocationResult result = InvokeEcho(Replaying("one-once-effect-success", TimeSpan.FromSeconds(1)), (context, args) =>
+        InvocationResult result = Within(TimeSpan.FromSeconds(10), () => InvokeEcho(Replaying("one-once-effect-success", TimeSpan.FromSeconds(1)), (context, args) =>
         {
             Thread.Sleep(3000);
             finished.Set();
             return new TextValue("late");
-        });
+        }));
         TimeSpan elapsed = watch.Elapsed;
         Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
         Assert.That(elapsed, Is.LessThan(TimeSpan.FromSeconds(2.5)), "the caller waited for the handler");
