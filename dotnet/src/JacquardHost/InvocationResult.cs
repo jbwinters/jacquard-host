@@ -89,6 +89,16 @@ public sealed class InvocationResult
     /// <summary>The host's evidence (<c>jacquard-host-dotnet-evidence-v0</c>); empty on success.</summary>
     public JsonObject HostEvidence { get; internal set; } = JsonObject.Empty;
 
+    /// <summary>
+    /// True when the host could start neither a thread nor a thread-pool work
+    /// item to cancel <see cref="HandlerContext.CancellationToken"/>, for
+    /// example when the process is out of memory. That token is then never
+    /// cancelled: a handler waiting only on it keeps waiting (until its own
+    /// timeout, if it has one), while <see cref="HandlerContext.IsCancelled"/>
+    /// still turns true. False otherwise.
+    /// </summary>
+    public bool HandlerTokenNotCancelled { get; internal set; }
+
     /// <summary>Whether Core returned a successful outcome.</summary>
     public bool Ok => Kind == ResultKind.Ok;
 

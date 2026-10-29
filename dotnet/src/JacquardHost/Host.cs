@@ -93,6 +93,15 @@ public sealed class Host
     internal static volatile Action? HandlerCheckHook;
 
     /// <summary>
+    /// Test seam: runs before the host starts the cancellation of the
+    /// handlers' token, with <c>"thread"</c> before it creates its dedicated
+    /// thread and with <c>"pool"</c> before it falls back to a thread-pool
+    /// work item. A test throws from it to stand for a failure to start
+    /// either. Null outside tests.
+    /// </summary>
+    internal static volatile Action<string>? CancelStartHook;
+
+    /// <summary>
     /// Runs <paramref name="target"/> with <paramref name="args"/>. The invoke
     /// frame is validated before a worker starts. Cancelling
     /// <paramref name="cancellationToken"/> kills the worker; nothing is
@@ -203,9 +212,16 @@ public sealed class Host
         finally
         {
             // The handlers' token is cancelled before the worker is disposed,
-            // which may wait up to a second for a killed worker to exit.
-            call.End();
-            worker.Dispose();
+            // which may wait up to a second for a killed worker to exit. The
+            // worker is disposed even if ending the call fails.
+            try
+            {
+                call.End();
+            }
+            finally
+            {
+                worker.Dispose();
+            }
         }
 
         result.Requests = session.Requests.ToArray();
@@ -539,21 +555,53 @@ public sealed class Host
                 handlersStopped = true;
             }
 
-            var thread = new Thread(static state => CancelQuietly((CancellationTokenSource)state!))
+            if (!StartCancellation(source))
             {
-                IsBackground = true,
-                Name = "jacquard-handler-cancel",
-            };
+                Result.HandlerTokenNotCancelled = true;
+            }
+        }
+
+        /// <summary>
+        /// Starts the cancellation of <paramref name="source"/> on a new
+        /// background thread or, if no thread can be created or started, on
+        /// a thread-pool work item; callbacks never run on the calling
+        /// thread. Returns false, and leaves the token uncancelled, when
+        /// neither could be started. Never throws: it runs inside the
+        /// worker's fault checks and at the end of <see cref="Invoke"/>.
+        /// </summary>
+        [SuppressMessage("Design", "CA1031", Justification = "Starting the cancellation must not throw into a fault check or out of Invoke; a failure falls back, then is recorded.")]
+        private static bool StartCancellation(CancellationTokenSource source)
+        {
             try
             {
+                CancelStartHook?.Invoke("thread");
+                var thread = new Thread(static state => CancelQuietly((CancellationTokenSource)state!))
+                {
+                    IsBackground = true,
+                    Name = "jacquard-handler-cancel",
+                };
                 thread.Start(source);
+                return true;
             }
-            catch (OutOfMemoryException)
+            catch (Exception)
             {
-                // No thread could be created. Fall back to the pool rather
-                // than run handler callbacks on the caller's thread.
-                ThreadPool.UnsafeQueueUserWorkItem(static s => CancelQuietly(s), source, preferLocal: false);
+                // No thread could be created or started (for example
+                // OutOfMemoryException). Fall back to the pool rather than
+                // run handler callbacks on this thread.
             }
+
+            try
+            {
+                CancelStartHook?.Invoke("pool");
+                return ThreadPool.UnsafeQueueUserWorkItem(static s => CancelQuietly(s), source, preferLocal: false);
+            }
+            catch (Exception)
+            {
+                // The pool refused the work item as well (for example
+                // NotSupportedException or OutOfMemoryException): give up.
+            }
+
+            return false;
         }
 
         /// <summary>Cancels a source, discarding whatever its callbacks throw.</summary>
