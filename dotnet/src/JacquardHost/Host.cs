@@ -251,10 +251,17 @@ public sealed class Host
     [SuppressMessage("Design", "CA1001", Justification = "The handlers' token source is cancelled, never disposed: an abandoned handler may still hold its token.")]
     private sealed class Call
     {
+        /// <summary>
+        /// The longest single timer wait. A longer lifetime is covered by
+        /// re-arming, so no conversion to milliseconds can overflow.
+        /// </summary>
+        private static readonly TimeSpan MaxTimerDelay = TimeSpan.FromDays(1);
+
         private readonly OperationRegistry registry;
         private readonly CancellationToken cancellationToken;
         private volatile bool ended;
         private CancellationTokenSource? handlerStop;
+        private Timer? handlerTimer;
         private CancellationTokenRegistration callerRegistration;
 
         internal Call(Worker worker, Session session, InvocationResult result, OperationRegistry registry, CancellationToken cancellationToken)
@@ -275,12 +282,18 @@ public sealed class Host
         /// <summary>Whether a host frame was being encoded or sent when a failure occurred.</summary>
         internal bool Sending { get; private set; }
 
-        /// <summary>Marks the invocation ended and cancels the handlers' token.</summary>
+        /// <summary>
+        /// Marks the invocation ended and cancels the handlers' token on a
+        /// pool thread. Nothing here runs or waits for a handler's callback:
+        /// the registration is removed without waiting, and the timer is
+        /// disposed without waiting.
+        /// </summary>
         internal void End()
         {
             ended = true;
-            callerRegistration.Dispose();
-            handlerStop?.Cancel();
+            callerRegistration.Unregister();
+            handlerTimer?.Dispose();
+            CancelHandlers(handlerStop);
         }
 
         private void Send(JsonObject frame, Limits limits)
@@ -476,27 +489,90 @@ public sealed class Host
         }
 
         /// <summary>
-        /// The handlers' token: cancelled by the caller's token, at the
-        /// lifetime deadline, and when the invocation ends. It is never
-        /// disposed, because an abandoned handler may still hold it; once
-        /// cancelled it holds no timer.
+        /// The handlers' token: cancelled when the caller's token is
+        /// cancelled, shortly after the lifetime deadline, and when the
+        /// invocation ends. Callbacks a handler registers on it run on a pool
+        /// thread, never on the caller's thread, the canceller's thread, or the
+        /// deadline timer, and nothing waits for them; their exceptions are
+        /// discarded. The source is never disposed, because an abandoned
+        /// handler may still hold its token.
         /// </summary>
         private CancellationToken HandlerToken()
         {
             if (handlerStop is null)
             {
                 handlerStop = new CancellationTokenSource();
-                // A timer cannot wait longer than about 24 days; IsCancelled
-                // sees a later deadline exactly in any case.
                 TimeSpan remaining = HandlerTimerHook is { } hook ? hook(Worker.Remaining) : Worker.Remaining;
-                if (remaining <= TimeSpan.FromMilliseconds(int.MaxValue - 1))
-                {
-                    handlerStop.CancelAfter(TimeSpan.FromMilliseconds(Math.Ceiling(remaining.TotalMilliseconds)));
-                }
-                callerRegistration = cancellationToken.UnsafeRegister(static state => ((CancellationTokenSource)state!).Cancel(), handlerStop);
+                handlerTimer = new Timer(static state => ((Call)state!).TimerFired(), this, TimerDelay(remaining), Timeout.InfiniteTimeSpan);
+                callerRegistration = cancellationToken.UnsafeRegister(static state => CancelHandlers((CancellationTokenSource)state!), handlerStop);
             }
 
             return handlerStop.Token;
+        }
+
+        /// <summary>The timer delay for <paramref name="remaining"/>: rounded up to whole milliseconds, at least zero, at most <see cref="MaxTimerDelay"/>.</summary>
+        private static TimeSpan TimerDelay(TimeSpan remaining)
+        {
+            if (remaining <= TimeSpan.Zero)
+            {
+                return TimeSpan.Zero;
+            }
+
+            if (remaining >= MaxTimerDelay)
+            {
+                return MaxTimerDelay;
+            }
+
+            return TimeSpan.FromMilliseconds(Math.Ceiling(remaining.TotalMilliseconds));
+        }
+
+        /// <summary>
+        /// Runs on the timer's pool thread: re-arms while a long lifetime has
+        /// more than one timer wait left, otherwise queues the cancellation.
+        /// </summary>
+        private void TimerFired()
+        {
+            TimeSpan remaining = Worker.Remaining;
+            if (remaining > MaxTimerDelay && !ended)
+            {
+                try
+                {
+                    handlerTimer?.Change(TimerDelay(remaining), Timeout.InfiniteTimeSpan);
+                    return;
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The invocation ended; End cancels the token.
+                }
+            }
+
+            CancelHandlers(handlerStop);
+        }
+
+        /// <summary>
+        /// Cancels <paramref name="source"/> on a pool work item, so handler
+        /// callbacks never run on, or hold, the thread that asks.
+        /// </summary>
+        private static void CancelHandlers(CancellationTokenSource? source)
+        {
+            if (source is not null && !source.IsCancellationRequested)
+            {
+                ThreadPool.UnsafeQueueUserWorkItem(static s => CancelQuietly(s), source, preferLocal: false);
+            }
+        }
+
+        /// <summary>Cancels a source, discarding whatever its callbacks throw.</summary>
+        [SuppressMessage("Design", "CA1031", Justification = "A handler's token callback may throw anything; it must not crash the process.")]
+        private static void CancelQuietly(CancellationTokenSource source)
+        {
+            try
+            {
+                source.Cancel();
+            }
+            catch (Exception)
+            {
+                // Handler code; the host has no use for its failure.
+            }
         }
 
         /// <summary>Calls a handler, turning every exception into a failure answer.</summary>
