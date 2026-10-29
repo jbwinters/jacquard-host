@@ -229,13 +229,24 @@ jobs:
           # so a runner set up otherwise fails clearly rather than inside the
           # SDK. A group-writable level passes only when its group is the
           # user's private group: the user's primary group, named as the user,
-          # no other passwd entry with it as primary group, no other listed
-          # member, and no access ACL.
+          # no other listed member, and no access ACL; and getent passwd
+          # succeeds, lists at most 100,000 well-formed entries with no name
+          # twice, lists the user with that primary group, and lists no
+          # account of another uid with it.
           me=$(id -un); uid=$(id -u); gid=$(id -g)
           private=no
-          if [ "$(getent group "$gid" | cut -d: -f1)" = "$me" ] \
-            && [ -z "$(getent passwd | awk -F: -v g="$gid" -v u="$uid" '$4 == g && $3 != u')" ] \
-            && [ -z "$(getent group "$gid" | cut -d: -f4 | tr , '\n' | grep -vx "$me")" ]; then
+          passwd_status=0
+          passwd=$(getent passwd) || passwd_status=$?
+          group_status=0
+          group_entry=$(getent group "$gid") || group_status=$?
+          if [ "$passwd_status" = 0 ] && [ "$group_status" = 0 ] \
+            && printf '%s\n' "$passwd" | awk -F: -v n="$me" -v u="$uid" -v g="$gid" '
+                NF != 7 || $1 == "" || $3 !~ /^(0|[1-9][0-9]*)$/ || $4 !~ /^(0|[1-9][0-9]*)$/ || seen[$1]++ { bad = 1; exit }
+                $1 == n { if ($3 != u || $4 != g) { bad = 1; exit }; listed = 1; next }
+                $4 == g && $3 != u { bad = 1; exit }
+                END { exit (bad || !listed || NR > 100000) }' \
+            && [ "$(printf '%s\n' "$group_entry" | cut -d: -f1)" = "$me" ] \
+            && [ -z "$(printf '%s\n' "$group_entry" | cut -d: -f4 | tr , '\n' | grep -vx "$me")" ]; then
             private=yes
           fi
           d=$(realpath "$RUNNER_TEMP")
