@@ -31,6 +31,7 @@
   <ItemGroup>
     <ProjectReference Include="../../src/JacquardHost/JacquardHost.csproj" />
     <ProjectReference Include="../JacquardHost.StandIn/JacquardHost.StandIn.csproj" />
+    <ProjectReference Include="../../examples/JacquardExamples/JacquardExamples.csproj" />
   </ItemGroup>
 
 </Project>
