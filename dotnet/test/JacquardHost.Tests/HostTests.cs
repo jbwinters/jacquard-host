@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using JacquardLang.Host.Carrier;
@@ -259,6 +261,33 @@ public sealed class HostTests
             Response((context, args) => throw HandlerException.OutsideFailed("\ud800" + string.Concat(Enumerable.Repeat("é", 3000)))),
             FailureCategory.OutsideFailure,
             "�" + string.Concat(Enumerable.Repeat("é", 2046)));
+    }
+
+    [Test]
+    public void AnUndefinedFailureCategoryIsRefusedAtConstruction()
+    {
+        foreach (FailureCategory category in new[] { (FailureCategory)999, (FailureCategory)(-1), (FailureCategory)4 })
+        {
+            ArgumentOutOfRangeException error = Throws<ArgumentOutOfRangeException>(() => _ = new HandlerException(category, "bad category"))!;
+            Assert.That(error.ParamName, Is.EqualTo("category"));
+        }
+
+        foreach (FailureCategory category in Enum.GetValues<FailureCategory>())
+        {
+            Assert.That(new HandlerException(category, "fine").Category, Is.EqualTo(category));
+        }
+    }
+
+    [Test]
+    public void AnUndefinedFailureCategoryReachingDispatchIsCompletionUnknown()
+    {
+        // The constructor refuses it; this forges one past the constructor,
+        // as reflection or a future constructor could, and checks dispatch
+        // still returns a frozen failure instead of throwing out of Invoke.
+        var forged = (HandlerException)RuntimeHelpers.GetUninitializedObject(typeof(HandlerException));
+        typeof(HandlerException).GetField("<Category>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(forged, (FailureCategory)999);
+        Assert.That((int)forged.Category, Is.EqualTo(999));
+        AssertFailure(Response((context, args) => throw forged), FailureCategory.CompletionUnknown, "handler threw an exception");
     }
 
     [Test]

@@ -53,9 +53,15 @@ public sealed class HandlerContext
 public sealed class HandlerException : Exception
 {
     /// <summary>A failure in one of the four permitted categories, with a message for Core.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="category"/> is not a defined category.</exception>
     public HandlerException(FailureCategory category, string message)
         : base(message ?? throw new ArgumentNullException(nameof(message)))
     {
+        if (!Enum.IsDefined(category))
+        {
+            throw new ArgumentOutOfRangeException(nameof(category), category, "not a failure category");
+        }
+
         Category = category;
     }
 

@@ -584,7 +584,7 @@ public sealed class Host
                 Value value = handler(context, arguments);
                 return new Answer(value, FailureCategory.OutsideFailure, null);
             }
-            catch (HandlerException failure)
+            catch (HandlerException failure) when (Enum.IsDefined(failure.Category))
             {
                 return new Answer(null, failure.Category, failure.Message);
             }
