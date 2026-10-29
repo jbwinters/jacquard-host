@@ -7,12 +7,14 @@ release, recorded once in [`core-pin.json`](../core-pin.json). The Python
 constants (`src/jacquard_host/compat.py`), the TypeScript constants
 (`typescript/src/compat.ts`), the Go constants (`go/protocol/compat.go`), the
 Rust constants (`rust/src/compat.rs`), the Java constants
-(`java/src/main/java/org/jacquardlang/host/Compat.java`), and the block below
-are generated from that file by `scripts/core_pin.py sync`.
+(`java/src/main/java/org/jacquardlang/host/Compat.java`), the .NET constants
+(`dotnet/src/JacquardHost/Compat.cs`), and the block below are generated from
+that file by `scripts/core_pin.py sync`.
 `scripts/core_pin.py check` fails CI when any of them drifts from the pin. It
 also fails when any vendored kit copy drifts: the Python package data, Go's
-embedded `go/kit/data/`, the Rust crate's embedded `rust/kit/`, or the Java
-class-path copy under `java/src/main/resources/`. Adapters verify the kit's four
+embedded `go/kit/data/`, the Rust crate's embedded `rust/kit/`, the Java
+class-path copy under `java/src/main/resources/`, or the .NET embedded copy
+under `dotnet/src/JacquardHost/kit/`. Adapters verify the kit's four
 digests independently at load time, and the SDKs refuse a Core whose
 `--version` differs from the pinned version.
 
@@ -43,7 +45,7 @@ Release assets verified by `scripts/core_pin.py install`:
 | macos-x86_64 | `jacquard-macos-x86_64.tar.gz` | `8efc54bcf7573cb7cfd35fa3e77a584680ce68de872bdb212ed8369a974ff967` |
 <!-- core-pin:end -->
 
-Python, TypeScript, Go, Rust, and Java replay the same 21 recordings against the pinned
+Python, TypeScript, Go, Rust, Java, and .NET replay the same 21 recordings against the pinned
 worker, including Core's recorded `noncanonical-target-hash` divergence: the
 HB.1 vector expects E1603 while the shipped preflight classifies an uppercase
 target hash as a malformed scalar (E1601). The transcript is recorded as
@@ -54,8 +56,8 @@ independent v0 evidence; it does not change the protocol version or declare v1.
 The adapters decode boundary descriptors in Core's order: the kind, then the
 exact fields, then one node of `max_value_nodes`, then any identity, then the
 list count. Malformed input therefore gets the same error code from every
-adapter and from Core. For recording comparisons, Python, Go, Rust, and Java sort object
-keys by code point, while TypeScript sorts them by UTF-16 code unit. The two orders
+adapter and from Core. For recording comparisons, Python, Go, Rust, Java, and .NET sort
+object keys by code point, while TypeScript sorts them by UTF-16 code unit. The two orders
 differ only for keys outside the Basic Multilingual Plane. Every protocol key is
 ASCII, so the comparisons agree.
 
@@ -117,6 +119,7 @@ python3 -m pip install . && python3 scripts/check_examples.py
 (cd go && go test -race ./... && go test -count=1 ./...)
 (cd rust && cargo test)
 (cd java && JACQUARD_REQUIRE_LIVE=1 mvn -B verify)
+(cd dotnet && JACQUARD_REQUIRE_LIVE=1 dotnet test test/JacquardHost.Tests -f net8.0)
 ```
 
 `update` resolves the tag to its commit, copies the kit files from

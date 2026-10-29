@@ -36,7 +36,7 @@ def main() -> None:
             # Only our freshly built archive is extracted, never an external input.
             archive.extractall(root / "source", filter="data")
         source = next((root / "source").iterdir())
-        for relative in ("LICENSE", "NOTICE", "go/NOTICE", "rust/NOTICE", "java/NOTICE", "java/pom.xml", "CONTRIBUTING.md", "CHANGELOG.md", "docs/SETUP.md", "scripts/check_examples.py",
+        for relative in ("LICENSE", "NOTICE", "go/NOTICE", "rust/NOTICE", "java/NOTICE", "java/pom.xml", "dotnet/NOTICE", "dotnet/src/JacquardHost/JacquardHost.csproj", "dotnet/src/JacquardHost/Compat.cs", "dotnet/src/JacquardHost/kit/host-protocol-v0/kit/transcripts.json", "CONTRIBUTING.md", "CHANGELOG.md", "docs/SETUP.md", "scripts/check_examples.py",
                          "examples/python_sdk/app.py", "examples/python_sdk/exercise.py"):
             assert (source / relative).is_file(), f"sdist missing {relative}"
         for project in ("quickstart", "triage", "planner", "fulfillment"):

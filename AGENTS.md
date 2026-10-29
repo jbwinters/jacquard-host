@@ -47,8 +47,8 @@ invent messages that Core has not specified.
 - Keep the first carrier serial, bounded, versioned, and fail-closed.
 - Preserve transport independence: process framing is one carrier, not the
   semantic definition of the boundary.
-- The Python, TypeScript, Go, Rust, and Java adapters each implement the
-  pinned fixtures independently. Keep pin constants and kit copies generated
+- The Python, TypeScript, Go, Rust, Java, and .NET adapters each implement
+  the pinned fixtures independently. Keep pin constants and kit copies generated
   by `scripts/core_pin.py`.
 - Add tests with behavior. Use the standard library until a reviewed need
   justifies a dependency.

@@ -95,6 +95,25 @@ structurally.
   `max_text_bytes` or the frame, which is refused with E1602 before it is
   scanned.
 
+## Bounded work
+
+Work on the caller's thread is bounded by the selected limits, not by the
+size of what a handler or caller hands over:
+
+- Frame encoding counts UTF-8 bytes as it writes them and stops as soon as
+  the count passes `max_frame_bytes`. A handler result of 256 references to
+  one 256 KiB text (within every value limit, over 384 MiB once escaped) is
+  refused as an outside failure after about one frame of work.
+- Text validation refuses a text whose length in chars already exceeds
+  `max_text_bytes` before scanning it, and charges every text in a frame
+  against `max_frame_bytes`, so validating a value scans at most about one
+  frame of text however often a long text is referenced.
+- A frame given as a caller's own dictionary (rather than a `JsonObject`) is
+  refused by its field count and key lengths before it is copied or sorted.
+  A registry with more than `max_operations` bindings is refused before a
+  worker starts.
+- Reads are bounded by `max_frame_bytes`, and stderr by `max_stderr_bytes`.
+
 ## Handlers and cancellation
 
 A handler returns a value or throws a `HandlerException`. The four structured
@@ -162,7 +181,9 @@ thread. The carrier is built around both:
 What this guarantees: an invocation returns at its deadline plus bounded
 cleanup. Each cleanup wait is capped at one second: for a killed worker's exit
 to be recorded, and for a still-running worker to exit at disposal. So in the
-worst case `Invoke` returns about two seconds after the deadline. This holds
+worst case `Invoke` returns about two seconds after the deadline, plus the
+time .NET takes to list the process table for the kill (the tests allow three
+seconds). This holds
 while a descendant that escaped the kill floods stdout or stderr, or holds
 stdin without reading, and the flood does not reach the heap. The carrier
 leaves no thread or pipe descriptor behind; a handler that ignores
