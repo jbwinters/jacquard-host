@@ -130,9 +130,9 @@ parses none; an operation's arguments are checked by the protocol's limits
 when they arrive.
 
 The cache defaults to `.scratch/jacquard-host-dotnet` under the working
-directory; `PrepareOptions.CacheDir` changes it. A symbolic link at the cache
-root is followed once, and the directory it names is checked and used;
-nothing inside it is followed. A cache entry keeps Core's raw
+directory; `PrepareOptions.CacheDir` changes it. Every symbolic link in the
+cache root's path is resolved once (`realpath(3)`), and the real directory is
+checked and used; nothing inside it is followed. A cache entry keeps Core's raw
 `check --print-sigs` output and the `hash` output for the source and each
 prelude file beside the store, and `program.json` records every file's digest.
 Every binding (names, constructors, signatures, and declaration groups) is
@@ -147,13 +147,22 @@ entry, or any file or directory in one that the current user does not own or
 that its group or others may write, both when it creates an entry and when it
 loads one, and it makes each new entry's directories and files owner-only
 (Core's store included). The owner and mode come from `statx(2)` on Linux and
-`stat(2)` on macOS, without following links. The cache root is then used by
-its path, so its device and inode, read at that check, are compared again
-before the staging directory is made, before an entry is published, and
-before and after each load; a root renamed away and replaced is refused. Its
-parent directories are not checked, so a root replaced between one of those
-checks and the step that follows it is not detected: keep the cache under
-directories only you can write.
+`stat(2)` on macOS, without following links. Every directory above the
+root, up to `/`, must be owned by you or root and must not be writable by its
+group or others unless it has the sticky bit (as `/tmp` has), as OpenSSH
+checks the directories above its configuration; otherwise preparation is
+refused, naming the directory. So no other user can rename the root away and
+put another directory at its path. The directories a preparation makes for a
+missing root are each made owner-only, whatever the `umask`; an existing one
+left group-writable by a `umask` of 002 is refused: run `chmod go-w` on it, or
+choose a cache under owner-only directories. The root is used by its path, also by every
+worker a prepared program starts, so its device and inode, read at the owner
+check, are compared again before the staging directory is made, before an
+entry is published, before and after each load, and before each worker
+starts; a changed root is refused (a call fails with a `Preparation`
+exception and starts no worker). The owner check trusts you and root: a
+replacement by the same user is not detected, nor is a root renamed away and
+back between two comparisons (it keeps its inode).
 
 The executable and every prelude file and directory are fingerprinted by
 path, and Core opens them by path afterwards. Each one's identity (device,
@@ -190,7 +199,12 @@ a `Dynamic` to itself; anything else, lists and records included, is
 `Int128`, `UInt128`, or `BigInteger` does not compile as an argument or in
 `Dynamic.Of`: those conversions are marked obsolete as errors, with the
 reason, because C# would otherwise convert a `ulong` through `double` (2^53 + 1
-would arrive as 2^53) and a `char` to an `Int` (see [data](#data)). `Call`
+would arrive as 2^53) and a `char` to an `Int` (see [data](#data)).
+`Codecs.Real` is a codec of `double`, so a `long` given to it
+(`Codecs.Real.Arg(total)`, or a record field reader returning a `long` for a
+`Codecs.Real` field) is converted by C#'s implicit numeric conversion before
+the SDK sees it: that is your explicit choice of a Real, as in Java, and it is
+exact only up to 2^53. `Call`
 decodes the result with the codec you pass; `Invoke` keeps the whole
 `Invocation`. Overloads that take an argument list and a `CancellationToken`
 kill the worker when it is cancelled. `MapBatches` reads the number of rows
@@ -411,10 +425,12 @@ keep their usual .NET types: passing `null` where an object is required
 throws `ArgumentNullException`; building a codec that cannot work (an
 enumeration map missing a member, a union case that is not a subtype) or a
 `Dynamic` over the hard limit throws `ArgumentException` at construction;
-`Invocation.Save` throws `IOException` or `UnauthorizedAccessException`; and
-an exception from a collection you pass (its `Count`, indexer, or
-enumerator) propagates unchanged, except for `MapBatches` rows, which are read
-while a batch is encoded and so are reported as a codec failure. A
+`Invocation.Save` throws `IOException` or `UnauthorizedAccessException`; an
+exception from the source list `Prepare` takes or the bindings dictionary
+`Function` takes (its `Count`, indexer, or enumerator) is wrapped, with the
+cause, in a `Preparation` or `Binding` exception; and one from any other
+collection you pass propagates unchanged, except for `MapBatches` rows, which
+are read while a batch is encoded and so are reported as a codec failure. A
 `JacquardException`'s `Kind` is:
 - `InvalidArgument`: a local refusal, such as a value of the wrong type or
   one too large or too deep for a frame. No worker starts. `Invoke` throws
@@ -468,7 +484,10 @@ The command reads the rules and synthetic inputs from the repository's
 [`examples/`](../examples/README.md), from the repository root or `dotnet/`
 (or `JACQUARD_EXAMPLES=DIR`), so it runs from a clone. Custom input JSON may
 follow the project name. `--inspect PATH` saves frames; triage adds a
-numbered suffix per batch. State defaults to `.scratch/dotnet-examples/`. The
+numbered suffix per batch. State defaults to `.scratch/dotnet-examples/`;
+its program cache is refused while any directory above it is writable by its
+group or others (as a clone made with a `umask` of 002 is), so run
+`chmod go-w` on those or pass a `--workdir` under owner-only directories. The
 exit status is 1 for a Jacquard or SDK failure and 2 for usage or other
 errors.
 
@@ -736,8 +755,8 @@ forking: Core keeps its pid and leads a new process group whose id is that pid
 (a test checks both). Every descendant that does not leave the group shares
 it. The host kills that group with `kill(-pgid, SIGKILL)` when the command
 exits, and on a timeout or cancellation (then also killing Core itself,
-waiting up to one second for its exit, and killing the group again for
-members forked meanwhile). So `sh -c 'sleep 300 & echo $!'` succeeds, as in
+waiting for its exit until 750 ms after the stop, and killing the group again
+for members forked meanwhile). So `sh -c 'sleep 300 & echo $!'` succeeds, as in
 the Rust SDK, and its child has been sent SIGKILL by the time it returns. Once .NET has reaped
 Core, a live process holding Core's pid means the id was reused, so the old
 group is empty and nothing is killed; a process that took Core's pid after a
@@ -755,15 +774,24 @@ descendants are recorded from `/proc` about every 10 ms, by pid and start
 time, and every recorded descendant still alive with that start time is
 killed when the command returns (the start time is read just before the
 kill, as the JDK's process handles do). Each record reads at most 16,384
-`/proc` entries, 4 MiB of `stat` files, and 1 KiB of each, at most 16,384
-descendants are kept, and a record ends at the deadline or a cancellation,
-checked before each entry; the kills at the exit check them before each
-descendant, so a stop there leaves the rest running. On a timeout or
-cancellation, a last record bounded by the same caps (but not ended by the
-stop) is made, then the command is killed, then every recorded descendant;
-.NET's `Process.Kill(true)`, which reads every process on the machine, is not
-used. A descendant past the caps, or one started and reparented between two
-records, keeps running. macOS has no `/proc`, so nothing is recorded there:
+`/proc` entries and 4 MiB of `stat` files in all, each read limited to 1 KiB
+and to the bytes left, at most 16,384 descendants are kept, and a record ends
+at the deadline or a cancellation, checked before each entry. The kills when
+Core exits by itself run to the end; a stop that lands during them lets them
+go on for at most 250 ms more. On a timeout or cancellation, Core is first
+sent `SIGSTOP` (only while its start time matches the one read when it
+started), so it starts no more children and its children stay its children;
+then a last record is made, within the same caps, until 250 ms after the
+stop; then Core is killed, and every recorded descendant until 500 ms after
+the stop; then the host waits for Core's exit until 750 ms after the stop.
+Each budget is checked before each entry or descendant, so the cleanup
+returns within 750 ms of the stop plus one `stat` read and one signal (tests
+check the order and the budgets on a test clock, and the whole bound on the
+real clock). .NET's `Process.Kill(true)`, which reads every process on the
+machine, is not used. Only Core is frozen, so a descendant whose parent exits
+before the last record reaches it is reparented and keeps running, as do
+one past the caps or the budgets and one started and reparented between two
+records. macOS has no `/proc`, so nothing is recorded there:
 only .NET's tree kill on a stop applies.
 
 ## Conformance kit

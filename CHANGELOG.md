@@ -104,10 +104,15 @@
   Core's commands run on the caller's thread through `poll(2)`, bounded in
   time and output, and on Linux through `setsid`, whose process group is
   killed when a command exits or is stopped; without `setsid`, descendants
-  are recorded from `/proc` within entry and byte caps. Only the cache's
-  owner may write it: the root, each entry, and each file must be owned by
-  the current user and not group- or world-writable, and the root's identity
-  is checked again before each use (its parent directories are not checked).
+  are recorded from `/proc` within entry and byte caps, and on a stop Core
+  is frozen with `SIGSTOP` before the last record and the cleanup ends
+  within 750 ms. Only the cache's owner may write it: the root, each entry,
+  and each file must be owned by the current user and not group- or
+  world-writable, every directory above the root must be owned by the user
+  or root and not group- or world-writable unless it is sticky, and the
+  root's device and inode are checked again before each use, each worker a
+  prepared program starts included. Replacement by the same user is not
+  covered.
   Every binding is derived again from Core's cached output on load, and a
   preparation during which the Core executable or prelude changed is
   refused. `Invocation.Save` writes a new owner-only file and renames it over
