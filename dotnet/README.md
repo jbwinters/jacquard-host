@@ -180,8 +180,11 @@ the `setsid` it runs through where `setsid` is installed. It runs like Core's
 commands, limited to 5 seconds (then stopped within 750 ms), with at most
 16 MiB of output, and the preparation's token stops it (`Invocation.Save`
 takes no token, so there only those limits bound it). It runs at most once
-per `Prepare` call and once per `Save` call, so each spends at most about
-5.75 seconds in it, and every such call lists the database again. A timeout, a nonzero exit status, more output, output
+per `Prepare` call and once per `Save` call, for the account, user id, and
+group of the first check that needs it (a later check in the same call that
+finds another refuses the directory without listing again), so each spends
+at most about 5.75 seconds in it, and every such call lists the database
+again. A timeout, a nonzero exit status, more output, output
 that is not UTF-8 or not complete lines, more than 100,000 entries, a line
 that is not seven colon-separated fields with decimal ids, a name listed twice
 (also when two name services list one account), or your account missing or

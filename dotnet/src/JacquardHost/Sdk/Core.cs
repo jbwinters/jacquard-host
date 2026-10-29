@@ -616,9 +616,11 @@ internal static class Core
     /// <summary>
     /// The password database verdict of the private-group rule
     /// (<see cref="OnlyUserHasPrimaryGroup"/>) within one preparation or one
-    /// save: the listing runs at most once for one account, user id, and
-    /// group, and the verdict is not kept after that call. Not thread-safe;
-    /// one call uses it.
+    /// save: the listing runs at most once, for the account, user id, and
+    /// group of the first request; a later request for another account,
+    /// user id, or group is refused (not private) without listing again.
+    /// The verdict is not kept after that call. Not thread-safe; one call
+    /// uses it.
     /// </summary>
     internal sealed class PasswordListing
     {
@@ -627,17 +629,24 @@ internal static class Core
         private uint gid;
         private bool verdict;
 
-        /// <summary>The verdict for the account, listing the password database the first time.</summary>
+        /// <summary>
+        /// The verdict for the account, listing the password database on the
+        /// first request only; false for a request naming another account,
+        /// user id, or group than the first, and after a first listing that
+        /// was cancelled.
+        /// </summary>
         /// <exception cref="JacquardException">The token was cancelled while <c>getent</c> ran.</exception>
         internal bool OnlyUserHasPrimaryGroup(string name, uint uid, uint gid, CancellationToken cancellationToken)
         {
-            if (this.name is null || !string.Equals(this.name, name, StringComparison.Ordinal) || this.uid != uid || this.gid != gid)
+            if (this.name is null)
             {
-                bool listed = Core.OnlyUserHasPrimaryGroup(name, uid, gid, cancellationToken);
-                (this.name, this.uid, this.gid, verdict) = (name, uid, gid, listed);
+                // Recorded before listing, so no later request lists again, even after a cancelled first one.
+                (this.name, this.uid, this.gid) = (name, uid, gid);
+                verdict = Core.OnlyUserHasPrimaryGroup(name, uid, gid, cancellationToken);
+                return verdict;
             }
 
-            return verdict;
+            return verdict && string.Equals(this.name, name, StringComparison.Ordinal) && this.uid == uid && this.gid == gid;
         }
     }
 

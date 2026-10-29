@@ -999,6 +999,46 @@ public sealed class RuntimeTests
     }
 
     /// <summary>
+    /// The listing runs at most once in one preparation whatever the account
+    /// lookups answer: when the account is "alice" for the check before the
+    /// root is made and "alice-renamed" (same user id and group, each the
+    /// name of its private group, both listed) for the check after, the
+    /// password database is listed once and the second check refuses the
+    /// parent rather than listing again.
+    /// </summary>
+    [Test]
+    public void APreparationWhoseAccountChangesBetweenChecksListsOnceAndRefuses()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent")).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1F8);
+        string cache = Path.Combine(parent, "cache");
+        uint group = Unix.Stat(parent, follow: false).Group;
+        uint me = Unix.EffectiveUser();
+        string[] names = { "alice", "alice-renamed" };
+        int looked = 0;
+        string current = names[0];
+        Core.UserHook = uid =>
+        {
+            current = names[Math.Min(looked++, 1)];
+            return uid == me ? new Unix.Account(current, group) : null;
+        };
+        Core.GroupHook = gid => gid == group ? new Unix.GroupEntry(current, Array.Empty<string>()) : null;
+        Func<CancellationToken, CoreCommand.Output> listing = SdkSupport.Getent(SdkSupport.Passwd(names.Select(n => new Unix.PasswdEntry(n, me, group))));
+        int listed = 0;
+        Core.GetentHook = token =>
+        {
+            listed++;
+            return listing(token);
+        };
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = cache }))!.Message,
+            Is.EqualTo(Unsafe(cache, parent + " (" + NotPrivateGroup + ")")));
+        Assert.That(looked, Is.EqualTo(2), "both checks looked the account up");
+        Assert.That(listed, Is.EqualTo(1), "one listing");
+    }
+
+    /// <summary>
     /// The preparation's token reaches the password database listing: a
     /// listing that sees the token cancelled stops the preparation as
     /// cancelled, and nothing is made.
