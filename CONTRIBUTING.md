@@ -146,12 +146,15 @@ fails if they differ).
 
 ## .NET
 
-The independent .NET adapter lives in `dotnet/` as package `JacquardLang.Host`
-(`dotnet/src/JacquardHost`). It targets .NET 8, has no runtime dependencies
-beyond the .NET base class library, and does not call Python, Node.js, Go,
-Rust, or Java; it calls the C library's `poll(2)` and runs workers on Linux
-and macOS only. NUnit, its adapter, and the test SDK are its only (test)
-dependencies. The .NET 8 or 10 SDK is required.
+The independent .NET adapter and SDK live in `dotnet/` as package
+`JacquardLang.Host` (`dotnet/src/JacquardHost`, the SDK in its `Sdk/`
+directory). It targets .NET 8, has no runtime dependencies beyond the .NET base
+class library, and does not call Python, Node.js, Go, Rust, or Java; it calls
+the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`, `mkdir(2)`,
+and `statx(2)` or `stat(2)`) and runs on Linux and macOS only. On Linux the
+SDK runs Core's commands through util-linux `setsid` when one is installed.
+NUnit, its adapter, and the test SDK are its only (test) dependencies. The
+.NET 8 or 10 SDK is required.
 
 ```sh
 cd dotnet
@@ -159,17 +162,23 @@ dotnet test test/JacquardHost.Tests -f net8.0
 dotnet test test/JacquardHost.Tests -f net10.0   # with a .NET 10 SDK
 # With the pinned Core configured (eval "$(python3 ../scripts/core_pin.py install)"):
 JACQUARD_REQUIRE_LIVE=1 dotnet test test/JacquardHost.Tests -f net8.0
+dotnet build examples/JacquardExamples
+dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll quickstart
 ```
 
-CI runs the offline tests on .NET 8 and 10, and the live tests on both in the
-shared pinned-Core job. The build treats warnings as errors, with nullable
+CI runs the offline tests on .NET 8 and 10, and the live tests on both and the
+four example projects in the shared pinned-Core job. The build treats warnings as errors, with nullable
 reference types and the `8.0-recommended` analyzers.
 `dotnet/src/JacquardHost/Compat.cs` is generated and
 `dotnet/src/JacquardHost/kit/` is a byte copy of the pinned kit.
 `scripts/core_pin.py` maintains both; do not edit them by hand. The
 `JacquardHost.StandIn` program under `dotnet/test/` is a fixture for the
-offline tests. Copy the repository `NOTICE` to `dotnet/NOTICE` when it changes
-(a test fails if they differ).
+offline tests. The `JacquardExamples` command under `dotnet/examples/` reads the
+rules and inputs from `examples/` directly, so there is no copy to keep in
+sync. The README's C# examples are compiled test sources under
+`dotnet/test/JacquardHost.Tests/Readme/` (a test fails if they differ). Copy
+the repository `NOTICE` to `dotnet/NOTICE` when it changes (a test fails if
+they differ).
 
 ## Releasing
 

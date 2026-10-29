@@ -25,3 +25,5 @@ prune dotnet/test/JacquardHost.Tests/bin
 prune dotnet/test/JacquardHost.Tests/obj
 prune dotnet/test/JacquardHost.StandIn/bin
 prune dotnet/test/JacquardHost.StandIn/obj
+prune dotnet/examples/JacquardExamples/bin
+prune dotnet/examples/JacquardExamples/obj

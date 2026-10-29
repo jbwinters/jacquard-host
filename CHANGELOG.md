@@ -78,8 +78,7 @@
   codecs that parse integers exactly from their text, the session state
   machine, a bounded process carrier for `jacquard host worker`, and a `Host`
   with a closed operation registry. It carries the pinned kit as embedded
-  resources and replays all 21 recordings. It is protocol-level only, with no
-  SDK layer. .NET cannot start the worker in its own process group or
+  resources and replays all 21 recordings. .NET cannot start the worker in its own process group or
   interrupt a pipe read or write, so the carrier never calls one that can
   block: it waits on the C library's `poll(2)` and runs workers on Linux and
   macOS only. It kills the worker's process tree with `Process.Kill(true)`,
@@ -88,6 +87,22 @@
   `scripts/core_pin.py` now generates `dotnet/src/JacquardHost/Compat.cs` and
   keeps the .NET kit copy in sync, and CI runs the offline tests on .NET 8 and
   10 and the live tests against the pinned Core.
+- .NET SDK (`JacquardLang.Host.Sdk`): prepares and caches checked programs
+  with Core's public commands, maps .NET values through explicit `Codec<T>`
+  objects (records through field readers and a constructor function,
+  enumerations, type hierarchies, `Option<T>`, `Unit`, lazy codecs for
+  recursive types, and `Dynamic` for untyped code) without reflection, binds
+  handlers to exact operation identities with the `HandlerContext` and its
+  `CancellationToken`, checks arguments against the checked signature before a
+  worker starts, and keeps each invocation's raw evidence. `MapBatches` runs
+  explicit batches. There is no `decimal` mapping: money crosses as integer
+  minor units. Core's commands run on the caller's thread through `poll(2)`,
+  bounded in time and output, and on Linux through `setsid`, whose process
+  group is killed when a command exits or is stopped. The cache is owner-only
+  and verified, every binding derived again from Core's cached output on load.
+  The four example projects run through a `JacquardExamples` command in
+  `dotnet/examples/`, and CI runs them and the SDK's live tests against the
+  pinned Core.
 
 ## 0.2.0 — 2026-10-25
 

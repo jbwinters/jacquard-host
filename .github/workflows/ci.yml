@@ -213,10 +213,26 @@ jobs:
           dotnet-version: |
             8.0.x
             10.0.x
-      - name: Run independent .NET adapter against Core
+      - name: Run independent .NET adapter and SDK against Core
         run: |
           dotnet test test/JacquardHost.Tests -f net8.0
           dotnet test test/JacquardHost.Tests -f net10.0
         working-directory: dotnet
         env:
           JACQUARD_REQUIRE_LIVE: "1"
+      - name: Run the four example projects through the .NET SDK
+        working-directory: dotnet
+        run: |
+          set -euo pipefail
+          dotnet build examples/JacquardExamples
+          run() { dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll --workdir "$RUNNER_TEMP/dotnet-examples" "$@"; }
+          run quickstart
+          run planner | grep -q '"score": 16'
+          run triage | grep -q '"urgency": "WATCH"'
+          run fulfillment | grep -q '"$tag": "Fulfilled"'
+          run fulfillment | grep -q '"$tag": "DuplicateOrder"'
+          status=0
+          run --workdir "$RUNNER_TEMP/dotnet-recovery" --fault publish-failed fulfillment || status=$?
+          test "$status" = 1
+          run --workdir "$RUNNER_TEMP/dotnet-recovery" --deliver-pending fulfillment | grep -q '{"delivered":1}'
+          run --workdir "$RUNNER_TEMP/dotnet-recovery" --deliver-pending fulfillment | grep -q '{"delivered":0}'
