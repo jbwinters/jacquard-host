@@ -35,6 +35,7 @@ public sealed class BatchesTests
     {
         Function.ConformHook = null;
         Invocation.BeforeRenameHook = null;
+        Invocation.HandleStatHook = null;
         SdkSupport.NoAccounts();
         SdkSupport.RemoveScratch(root);
     }
@@ -410,5 +411,21 @@ public sealed class BatchesTests
         SdkSupport.Accounts(shared, "me", Array.Empty<string>());
         invocation.Save(target);
         Assert.That(Directory.EnumerateFileSystemEntries(shared).Select(Path.GetFileName), Is.EqualTo(new[] { "record.json" }));
+    }
+
+    /// <summary>
+    /// When the status of the new temporary file's handle cannot be read,
+    /// the error is raised and the file, still the empty one just created
+    /// exclusively, is removed by its path: nothing is left behind.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void SaveRemovesItsTemporaryFileWhenTheHandleCannotBeRead()
+    {
+        Invocation invocation = Ints().Invoke(Argument.Of(Codecs.List(Codecs.Int), new long[] { 1 }));
+        string target = Path.Combine(root, "record.json");
+        Invocation.HandleStatHook = handle => throw new IOException("fstat failed");
+        Assert.That(Support.Throws<IOException>(() => invocation.Save(target))!.Message, Is.EqualTo("fstat failed"));
+        Assert.That(Directory.EnumerateFiles(root), Is.Empty);
     }
 }

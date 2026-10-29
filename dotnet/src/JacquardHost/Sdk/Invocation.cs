@@ -87,6 +87,12 @@ public sealed class Invocation
     internal static volatile Action<string>? BeforeRenameHook;
 
     /// <summary>
+    /// Test seam: reads the status of the temporary file's handle in place
+    /// of <see cref="Unix.Stat(System.Runtime.InteropServices.SafeHandle)"/>. Null outside tests.
+    /// </summary>
+    internal static volatile Func<Microsoft.Win32.SafeHandles.SafeFileHandle, Unix.Status>? HandleStatHook;
+
+    /// <summary>
     /// Writes the invocation's frames and host evidence. The record contains
     /// argument and result values; it is written only when called. Where the
     /// file system has POSIX permissions, the target's directory and every
@@ -185,7 +191,19 @@ public sealed class Invocation
             {
                 if (Unix.Supported)
                 {
-                    written = Unix.Stat(stream.SafeFileHandle);
+                    try
+                    {
+                        written = HandleStatHook is { } stat ? stat(stream.SafeFileHandle) : Unix.Stat(stream.SafeFileHandle);
+                    }
+                    catch
+                    {
+                        // The handle's identity is unknown; the path's stands
+                        // in only while it is still an empty regular file of
+                        // this user's, as the one just created exclusively is,
+                        // so that file is removed.
+                        written = JustCreated(temporary);
+                        throw;
+                    }
                 }
 
                 if (!OperatingSystem.IsWindows())
@@ -223,6 +241,24 @@ public sealed class Invocation
             {
                 RemoveTemporary(temporary, written);
             }
+        }
+    }
+
+    /// <summary>
+    /// The status of <paramref name="temporary"/> when it is an empty
+    /// regular file this user owns, as the file just created exclusively
+    /// there is; default (nothing to remove) otherwise or when it cannot be read.
+    /// </summary>
+    private static Unix.Status JustCreated(string temporary)
+    {
+        try
+        {
+            Unix.Status status = Unix.Stat(temporary, follow: false);
+            return status.Kind == Unix.Kind.Regular && status.Size == 0 && status.Owner == Unix.EffectiveUser() ? status : default;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return default;
         }
     }
 
