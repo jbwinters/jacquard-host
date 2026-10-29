@@ -1,0 +1,183 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Threading;
+using JacquardLang.Host.Carrier;
+using JacquardLang.Host.Protocol;
+using NUnit.Framework;
+using static JacquardLang.Host.Tests.Support;
+
+namespace JacquardLang.Host.Tests;
+
+/// <summary>
+/// Open descriptors, adapter threads, and the heap across invocations and
+/// failures, read from <c>/proc</c>. The adapter starts no thread of its own
+/// except one per handler call, named <c>jacquard-handler</c>.
+/// </summary>
+[TestFixture]
+[Platform("Linux")]
+public sealed class DescriptorTests
+{
+    private static bool DescriptorsBackTo(int before) => Eventually(() => Descriptors() <= before);
+
+    [Test]
+    public void InvocationsReleaseTheirPipesAndThreads()
+    {
+        Assert.That(InvokeReady(Faulty("ok", TimeSpan.FromSeconds(10))).Ok, Is.True); // warm up lazily opened files
+        int before = Descriptors();
+        Assert.That(AdapterThreads(), Is.EqualTo(0));
+        for (int i = 0; i < 5; i++)
+        {
+            InvocationResult result = InvokeReady(Faulty("ok", TimeSpan.FromSeconds(10)));
+            Assert.That(result.Ok, Is.True, result.ToString());
+        }
+
+        Assert.That(DescriptorsBackTo(before), Is.True, "descriptors grew from " + before + " to " + Descriptors());
+        Assert.That(AdapterThreads(), Is.EqualTo(0), "adapter threads outlived their invocations");
+
+        // A daemonized descendant keeps holding stderr after the invocation
+        // returns; the host does not wait for it, and its pipes are closed.
+        InvocationResult escaped = InvokeReady(Faulty("escaped-descendant", TimeSpan.FromSeconds(10)));
+        int pid = Descendant("escaped-descendant", escaped.Stderr);
+        bool released = DescriptorsBackTo(before);
+        int threads = AdapterThreads();
+        Kill(pid);
+        Assert.That(released, Is.True, "escaped descendant: descriptors grew from " + before + " to " + Descriptors());
+        Assert.That(threads, Is.EqualTo(0), "escaped descendant: adapter threads remain");
+
+        // Handlers run on their own threads, which end with the handler; the
+        // count sees a handler thread while one runs.
+        int during = -1;
+        OperationRegistry registry = new OperationRegistry().Bind(Pinned.Identity("kit-world"), Pinned.Identity("send"), (context, args) =>
+        {
+            during = AdapterThreads();
+            return new TextValue("pong");
+        });
+        Host replaying = Replaying("one-once-effect-success");
+        for (int i = 0; i < 3; i++)
+        {
+            InvocationResult result = replaying.Invoke(Pinned.Identity("kit-echo"), Echo(), new Value[] { new TextValue("ping") }, registry);
+            Assert.That(result.Ok, Is.True, result.ToString());
+        }
+
+        Assert.That(during, Is.EqualTo(1), "the handler thread was not seen while it ran");
+        Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "handler threads remain");
+        Assert.That(DescriptorsBackTo(before), Is.True, "handlers: descriptors grew from " + before + " to " + Descriptors());
+
+        // Failure paths release the same resources: expiry, cancellation, a
+        // truncated frame, and a spawn failure.
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.That(Reason(InvokeReady(Faulty("silent", TimeSpan.FromMilliseconds(500)))), Is.EqualTo("deadline"));
+            using var cancelled = new CancellationTokenSource();
+            After(TimeSpan.FromMilliseconds(200), cancelled.Cancel);
+            Assert.That(Reason(InvokeReady(Faulty("silent", TimeSpan.FromSeconds(10)), cancelled.Token)), Is.EqualTo("aborted"));
+            Assert.That(InvokeReady(Faulty("truncated", TimeSpan.FromSeconds(10))).Ok, Is.False);
+            Assert.That(Reason(InvokeReady(new Host("unused", new HostOptions { Carrier = new WorkerOptions { Command = new[] { "/no/such/executable" } } }))), Is.EqualTo("worker_spawn_failed"));
+        }
+
+        Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "failure paths: adapter threads remain");
+        Assert.That(DescriptorsBackTo(before), Is.True, "failure paths: descriptors grew from " + before + " to " + Descriptors());
+    }
+
+    [Test]
+    public void AnEscapedDescendantHoldingStdinLeavesNoThreadOrDescriptor()
+    {
+        // The worker exits after the selection; its reparented child holds
+        // stdin and never reads, so the invoke frame cannot be written. The
+        // call ends at the deadline with the descendant still alive, and
+        // nothing of the host's stays behind with it.
+        Assert.That(InvokeReady(Faulty("ok", TimeSpan.FromSeconds(10))).Ok, Is.True); // warm up
+        int before = Descriptors();
+        InvocationResult result = Within(TimeSpan.FromSeconds(15), () => Faulty("stdin-descendant", TimeSpan.FromSeconds(2))
+            .Invoke(Pinned.Identity("kit-ready"), Echo(withWorld: false), new Value[] { new TextValue(new string('x', 220_000)) }, new OperationRegistry()));
+        int pid = Descendant("stdin-descendant", result.Stderr);
+        try
+        {
+            Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
+            Assert.That(Alive(pid), Is.True);
+            Assert.That(AdapterThreads(), Is.EqualTo(0));
+            Assert.That(DescriptorsBackTo(before), Is.True, "descriptors grew from " + before + " to " + Descriptors());
+        }
+        finally
+        {
+            Kill(pid);
+        }
+    }
+
+    [Test]
+    public void AStderrFloodAfterTheWorkerExitsDoesNotHoldTheCaller() =>
+        AssertFloodDoesNotHold("(yes jacquard-flood >&2 & echo $! > \"$PIDFILE\"); sleep 0.3; exit 0", TimeSpan.FromSeconds(10), null);
+
+    [Test]
+    public void AStderrFloodDoesNotHoldExpiry() =>
+        AssertFloodDoesNotHold("(yes jacquard-flood >&2 & echo $! > \"$PIDFILE\"); exec sleep 30", TimeSpan.FromMilliseconds(500), null);
+
+    [Test]
+    public void AStderrFloodDoesNotHoldCancellation() =>
+        AssertFloodDoesNotHold("(yes jacquard-flood >&2 & echo $! > \"$PIDFILE\"); exec sleep 30", TimeSpan.FromSeconds(20), TimeSpan.FromMilliseconds(500));
+
+    [Test]
+    public void AStdoutFloodDoesNotHoldTheCaller() =>
+        AssertFloodDoesNotHold("(yes jacquard-flood & echo $! > \"$PIDFILE\"); exec sleep 30", TimeSpan.FromSeconds(10), null);
+
+    [Test]
+    public void ASilentDescendantHoldingStdoutAndStderrDoesNotHoldTheCaller() =>
+        AssertFloodDoesNotHold("(sleep 30 & echo $! > \"$PIDFILE\"); exit 0", TimeSpan.FromSeconds(10), null);
+
+    /// <summary>
+    /// The worker leaves a reparented descendant writing to its stdout or
+    /// stderr as fast as it can (or holding them silently); the kill cannot
+    /// find it. The invocation must return within its bound, keep no flood
+    /// in the heap, and leave the writer without a reader once it returns.
+    /// </summary>
+    private static void AssertFloodDoesNotHold(string script, TimeSpan deadline, TimeSpan? cancelAfter)
+    {
+        Assert.That(InvokeReady(Faulty("ok", TimeSpan.FromSeconds(10))).Ok, Is.True); // warm up
+        int before = Descriptors();
+        string dir = Directory.CreateTempSubdirectory("jacquard-flood-").FullName;
+        string pidFile = Path.Combine(dir, "pid");
+        var env = new Dictionary<string, string>
+        {
+            ["PATH"] = Environment.GetEnvironmentVariable("PATH") ?? "/usr/bin:/bin",
+            ["PIDFILE"] = pidFile,
+        };
+        var options = new WorkerOptions { Command = new[] { "sh", "-c", script }, Environment = env, Deadline = deadline };
+        long heapBefore = GC.GetTotalMemory(forceFullCollection: true);
+        using var cancel = new CancellationTokenSource();
+        if (cancelAfter is { } delay)
+        {
+            After(delay, cancel.Cancel);
+        }
+
+        var watch = Stopwatch.StartNew();
+        InvocationResult result = Within(TimeSpan.FromSeconds(30), () => new Host("unused", new HostOptions { Carrier = options }).ShutdownProbe(cancel.Token));
+        TimeSpan elapsed = watch.Elapsed;
+        long heapAfter = GC.GetTotalMemory(forceFullCollection: false);
+        Assert.That(Eventually(() => File.Exists(pidFile) && File.ReadAllText(pidFile).Trim().Length > 0), Is.True, "the descendant never started");
+        int pid = int.Parse(File.ReadAllText(pidFile).Trim(), CultureInfo.InvariantCulture);
+        try
+        {
+            Assert.That(result.Ok, Is.False, result.ToString());
+            TimeSpan bound = (cancelAfter ?? (deadline < TimeSpan.FromSeconds(1) ? deadline : TimeSpan.FromSeconds(1))) + TimeSpan.FromSeconds(3);
+            Assert.That(elapsed, Is.LessThan(bound), "returned after " + elapsed);
+            Assert.That(heapAfter - heapBefore, Is.LessThan(64L << 20), "the heap grew by " + ((heapAfter - heapBefore) >> 20) + " MiB");
+            if (script.Contains("yes", StringComparison.Ordinal))
+            {
+                // The host closed its end, so the writer's next write fails.
+                Assert.That(Eventually(() => !Alive(pid)), Is.True, "the flood still has a reader");
+            }
+        }
+        finally
+        {
+            Kill(pid);
+            File.Delete(pidFile);
+            Directory.Delete(dir);
+        }
+
+        Assert.That(Eventually(() => AdapterThreads() == 0), Is.True, "adapter threads remain");
+        Assert.That(DescriptorsBackTo(before), Is.True, "descriptors grew from " + before + " to " + Descriptors());
+    }
+}
