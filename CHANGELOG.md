@@ -112,9 +112,10 @@
   or root and not group- or world-writable unless it is sticky or the group
   is the user's private group (Debian OpenSSH's rule, which looks for
   another account with that primary group in the password database, listed
-  here by `getent passwd` in a separate process, bounded to 5 seconds and
-  16 MiB, stopped by the token, and refused on any failure or malformed
-  entry; with stricter conditions, so a clone made with a `umask` of 002
+  here by `getent passwd` in a separate process, with it and the `setsid`
+  it runs through root's alone, at most once per preparation or save,
+  limited to 5 seconds (then stopped within 750 ms) and 16 MiB, stopped by
+  the token, and refused on any failure or malformed entry; with stricter conditions, so a clone made with a `umask` of 002
   under user-private groups is accepted), a refusal names
   every such directory and creates nothing, and the root's device and inode
   are checked again before each use, each worker a prepared program starts

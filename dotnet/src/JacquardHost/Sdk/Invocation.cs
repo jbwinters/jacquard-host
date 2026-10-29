@@ -100,9 +100,10 @@ public sealed class Invocation
     /// directory above it must be owned by this user or root and not writable
     /// by its group or others, unless it is sticky (such as <c>/tmp</c>) or
     /// the group is this user's private group, as for the cache's
-    /// directories (the password database listing that rule needs takes at
-    /// most five seconds; Save takes no token, so it is not stopped
-    /// earlier); otherwise the save is refused, since another user could
+    /// directories (the password database listing that rule needs runs at
+    /// most once per Save, limited to 5 seconds and then stopped within
+    /// 750 ms, so at most about 5.75 seconds; Save takes no token, so it is
+    /// not stopped earlier); otherwise the save is refused, since another user could
     /// replace the file before or after it is renamed. The record is written
     /// through one handle to a new file, created exclusively (never through
     /// a link) in the target's directory, owned by this process's user and

@@ -175,10 +175,13 @@ primary group and no account of another user id with it; and, on Linux, the
 directory has no access ACL, whose mask is what its group bits show.
 Elsewhere a group-writable directory is refused. `getent` must be
 `/usr/bin/getent` or, if that is missing, `/bin/getent`, owned by root and not
-writable by group or others, as must every directory above it. It runs like
-Core's commands, for at most 5 seconds, with at most 16 MiB of output, and the
-preparation's token stops it (`Invocation.Save` takes no token, so there only
-the 5 seconds bound it). A timeout, a nonzero exit status, more output, output
+writable by group or others, as must every directory above it, and so must
+the `setsid` it runs through where `setsid` is installed. It runs like Core's
+commands, limited to 5 seconds (then stopped within 750 ms), with at most
+16 MiB of output, and the preparation's token stops it (`Invocation.Save`
+takes no token, so there only those limits bound it). It runs at most once
+per `Prepare` call and once per `Save` call, so each spends at most about
+5.75 seconds in it, and every such call lists the database again. A timeout, a nonzero exit status, more output, output
 that is not UTF-8 or not complete lines, more than 100,000 entries, a line
 that is not seven colon-separated fields with decimal ids, a name listed twice
 (also when two name services list one account), or your account missing or
