@@ -132,11 +132,22 @@ A stop that lands after that check is seen by the handler through its
 context. At the deadline, or when the caller's `CancellationToken` is
 cancelled, the host kills the worker's process tree and sends no late
 response. Cancellation is cooperative: `HandlerContext.IsCancelled` turns true
-as soon as the call is cancelled or its lifetime passes, and stays true once
-the invocation ends, and `HandlerContext.CancellationToken` is cancelled when
-the caller's token is, at the deadline, and when the invocation ends. A
-handler that ignores both keeps running on its thread until it returns.
-Nothing is retried.
+as soon as the call is cancelled or its lifetime passes (it reads the
+deadline exactly), and stays true once the invocation ends.
+`HandlerContext.CancellationToken` is cancelled when the caller's token is,
+shortly after the deadline (a timer, so up to a few milliseconds late), and
+when the invocation ends. Callbacks registered on that token run on a
+thread-pool thread, never on the caller's thread, the thread that cancelled
+the caller's token, or the timer; the host does not wait for them, and
+anything they throw is discarded. A callback that blocks holds only that
+pool thread. A handler that ignores both keeps running on its thread until it
+returns. Nothing is retried.
+
+`Invoke` advertises and dispatches one snapshot of the registry, taken when
+it is called: an operation bound during the invocation is not served by it.
+`HandlerException` refuses a category outside the four
+(`ArgumentOutOfRangeException`); one that reaches dispatch anyway is reported
+as completion unknown.
 
 ## Process carrier
 
@@ -147,7 +158,7 @@ thread. The carrier is built around both:
 
 - **No read or write ever blocks.** The caller's thread asks the C library's
   `poll(2)` (the one native call the adapter makes) whether a pipe is ready,
-  in waits of at most 5 ms, and only then reads the bytes already in the pipe,
+  in waits of at most 5 ms that never end after the deadline, and only then reads the bytes already in the pipe,
   or writes at most `PIPE_BUF` bytes (4096 on Linux, 512 on macOS), which a
   pipe that poll reports writable accepts at once. Every wait, whether for a
   frame, a write, a handler, or the exit, rechecks the one lifetime deadline,
@@ -165,7 +176,12 @@ thread. The carrier is built around both:
   stops the worker, lists its children from the process table, kills it, and
   does the same for each child. A descendant that was already reparented is
   not found and keeps running: one whose parent exited, or one that
-  daemonized. So is one started after its parent was listed.
+  daemonized. So is one started after its parent was listed. Descendants are
+  found and signalled by pid, so a descendant that exits, and is reaped,
+  between the listing and the signal can have its pid reused by an unrelated
+  process, which would then be signalled. The window is short, but the Java
+  host (process handles) and the Rust and Go hosts (process groups) do not
+  have it.
 - **A descendant holding the pipes after the exit is detected.** The runtime
   reaps the worker when it exits. If stdout or stderr still has a writer
   after that, a descendant holds it: the host waits up to one second for it to
@@ -179,7 +195,10 @@ thread. The carrier is built around both:
   exit status.
 
 What this guarantees: an invocation returns at its deadline plus bounded
-cleanup. Each cleanup wait is capped at one second: for a killed worker's exit
+cleanup. `WorkerOptions.Deadline` accepts any positive `TimeSpan`, up to
+`TimeSpan.MaxValue`; one longer than `Worker.MaxDeadline` (about 73 years) is
+clamped to it, and cancellation and disposal end the call promptly whatever
+the deadline. Each cleanup wait is capped at one second: for a killed worker's exit
 to be recorded, and for a still-running worker to exit at disposal. So in the
 worst case `Invoke` returns about two seconds after the deadline, plus the
 time .NET takes to list the process table for the kill (the tests allow three
