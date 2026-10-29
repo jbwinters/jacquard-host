@@ -914,6 +914,52 @@ public sealed class RuntimeTests
         Assert.That(fake.Calls("--version"), Is.EqualTo(0));
     }
 
+    /// <summary>A bindings dictionary that records whether the program's lock was held while it was read.</summary>
+    private sealed class Watching : IReadOnlyDictionary<string, Operations>
+    {
+        private readonly PreparedProgram program;
+        private readonly Operations service;
+
+        internal Watching(PreparedProgram program, Operations service)
+        {
+            this.program = program;
+            this.service = service;
+        }
+
+        internal bool? LockHeld { get; private set; }
+
+        public int Count => 1;
+
+        public IEnumerable<string> Keys => throw new NotSupportedException();
+
+        public IEnumerable<Operations> Values => throw new NotSupportedException();
+
+        public Operations this[string key] => throw new NotSupportedException();
+
+        public bool ContainsKey(string key) => throw new NotSupportedException();
+
+        public bool TryGetValue(string key, out Operations value) => throw new NotSupportedException();
+
+        public IEnumerator<KeyValuePair<string, Operations>> GetEnumerator()
+        {
+            LockHeld = program.LockHeld;
+            yield return new("Inventory", service);
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    /// <summary>The caller's bindings dictionary is read before the program's lock is taken, so its code cannot hold the lock.</summary>
+    [Test]
+    public void TheCallersBindingsAreReadOutsideTheProgramsLock()
+    {
+        using FakeCore fake = FakeCore.Effects(At("bindings"));
+        PreparedProgram program = fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, fake.Options);
+        var bindings = new Watching(program, new Operations().On("lookup", Codecs.Int, () => 1L));
+        Assert.That(program.Function("first", bindings).Name, Is.EqualTo("first"));
+        Assert.That(bindings.LockHeld, Is.False);
+    }
+
     /// <summary>
     /// A function, effect, or operation name over 4,096 chars is refused
     /// before it is looked up, quoting an excerpt; one of exactly 4,096

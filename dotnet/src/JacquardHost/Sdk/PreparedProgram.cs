@@ -124,6 +124,9 @@ public sealed class PreparedProgram
         }
     }
 
+    /// <summary>Test seam: whether the calling thread holds the program's lock.</summary>
+    internal bool LockHeld => System.Threading.Monitor.IsEntered(sync);
+
     /// <summary>Test seam: replaces the worker command for functions bound afterwards.</summary>
     internal void SetWorkerCommand(IReadOnlyList<string> command, IReadOnlyDictionary<string, string>? environment = null)
     {
@@ -175,6 +178,25 @@ public sealed class PreparedProgram
         ArgumentNullException.ThrowIfNull(name);
         Identities.Bounded(name, "function");
         bindings ??= new Dictionary<string, Operations>();
+
+        // The caller's dictionary is read here, before the program's lock is
+        // taken, so its code cannot hold that lock: its count once, and its
+        // entries only when they are no more than the program's effects, at
+        // most one past them. The effects are fixed when the program is made.
+        int declared = bindings.Count;
+        var given = new List<KeyValuePair<string, Operations>>();
+        if (declared <= effects.Count)
+        {
+            foreach (KeyValuePair<string, Operations> binding in bindings)
+            {
+                given.Add(binding);
+                if (given.Count > effects.Count)
+                {
+                    break;
+                }
+            }
+        }
+
         lock (sync)
         {
             if (!interfaces.TryGetValue(name, out CallInterface? signature))
@@ -200,18 +222,18 @@ public sealed class PreparedProgram
 
             // Each binding must name one of the function's effects, so more
             // bindings than effects are refused from the count, before any is read.
-            if (bindings.Count > selected.Count)
+            if (declared > selected.Count)
             {
-                throw JacquardException.Binding(name + ": " + bindings.Count.ToString(CultureInfo.InvariantCulture) + " bindings given, but it uses "
+                throw JacquardException.Binding(name + ": " + declared.ToString(CultureInfo.InvariantCulture) + " bindings given, but it uses "
                     + selected.Count.ToString(CultureInfo.InvariantCulture) + " effect" + (selected.Count == 1 ? string.Empty : "s")
                     + (selected.Count == 0 ? string.Empty : ": " + string.Join(", ", selected.Keys)));
             }
 
             var chosen = new SortedDictionary<string, Operations>(services, StringComparer.Ordinal);
             int read = 0;
-            foreach (KeyValuePair<string, Operations> binding in bindings)
+            foreach (KeyValuePair<string, Operations> binding in given)
             {
-                // A dictionary whose count understated its entries is not read past the bound.
+                // A dictionary whose count understated its entries was not read past the bound.
                 if (++read > selected.Count)
                 {
                     throw JacquardException.Binding(name + ": more bindings than effects");
