@@ -18,7 +18,9 @@ namespace JacquardLang.Host.Tests;
 /// stop exactly between two such reads, so the outcome does not depend on
 /// timing. Each case also asserts which check killed the worker, from the
 /// killing thread's stack: the handler wait's fault check, or the call's
-/// check after the handler returned.
+/// check after the handler returned. The methods named (<c>Respond</c>,
+/// <c>RunHandler</c>, <c>Await</c>, <c>WriteBytes</c>) are marked
+/// <c>NoInlining</c>, so their frames are on the stack in a Release build too.
 /// </summary>
 [TestFixture]
 public sealed class KillOrderTests

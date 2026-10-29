@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using JacquardLang.Host.Protocol;
 
@@ -737,6 +738,8 @@ public sealed class Worker : IDisposable
     /// blocks; between writes the caller waits under the lifetime.
     /// </summary>
     /// <exception cref="CarrierException">A loss: the input is closed, the write failed, or the lifetime ended.</exception>
+    // Not inlined, so the kill-order tests can name it on the killing thread's stack in any build.
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public void WriteBytes(ReadOnlySpan<byte> bytes)
     {
         lock (gate)
@@ -809,6 +812,8 @@ public sealed class Worker : IDisposable
     /// <see cref="StopNotice"/> before it kills the worker.
     /// </summary>
     /// <exception cref="CarrierException">The lifetime ended first.</exception>
+    // Not inlined, so the kill-order tests can name it on the killing thread's stack in any build.
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public void Await(Func<bool> isDone)
     {
         ArgumentNullException.ThrowIfNull(isDone);

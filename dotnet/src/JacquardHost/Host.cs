@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using JacquardLang.Host.Carrier;
@@ -422,6 +423,8 @@ public sealed class Host
         /// and renders the response. A handler still running at the deadline is
         /// abandoned: no late response is sent and nothing is retried.
         /// </summary>
+        // Not inlined, so the kill-order tests can name it on the killing thread's stack in any build.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private JsonObject Respond(EffectRequest request)
         {
             RequestDecodedHook?.Invoke();
@@ -475,6 +478,8 @@ public sealed class Host
             }
         }
 
+        // Not inlined, so the kill-order tests can name it on the killing thread's stack in any build.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private Answer RunHandler(Handler handler, IReadOnlyList<Value> arguments)
         {
             HandlerContext context = new(() => Worker.Stopping, () => ended, HandlerToken());
