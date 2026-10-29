@@ -225,13 +225,36 @@ jobs:
         run: |
           set -euo pipefail
           # The SDK refuses a program cache under a directory another user
-          # could write; check $RUNNER_TEMP's ancestry here, so a runner set up
-          # otherwise fails clearly rather than inside the SDK.
+          # could write; check $RUNNER_TEMP's ancestry here by the same rule,
+          # so a runner set up otherwise fails clearly rather than inside the
+          # SDK. A group-writable level passes only when its group is the
+          # user's private group: the user's primary group, named as the user,
+          # no other passwd entry with it as primary group, no other listed
+          # member, and no access ACL.
+          me=$(id -un); uid=$(id -u); gid=$(id -g)
+          private=no
+          if [ "$(getent group "$gid" | cut -d: -f1)" = "$me" ] \
+            && [ -z "$(getent passwd | awk -F: -v g="$gid" -v u="$uid" '$4 == g && $3 != u')" ] \
+            && [ -z "$(getent group "$gid" | cut -d: -f4 | tr , '\n' | grep -vx "$me")" ]; then
+            private=yes
+          fi
           d=$(realpath "$RUNNER_TEMP")
           while :; do
-            mode=$(stat -c %a "$d"); owner=$(stat -c %u "$d")
-            if { [ "$owner" != "$(id -u)" ] && [ "$owner" != 0 ]; } || { [ $((0$mode & 022)) != 0 ] && [ $((0$mode & 01000)) = 0 ]; }; then
-              echo "::error::$d (mode $mode, owner $owner) may be written by another user; the .NET SDK refuses a cache under it" >&2
+            mode=$(stat -c %a "$d"); owner=$(stat -c %u "$d"); group=$(stat -c %g "$d")
+            bad=
+            if [ "$owner" != "$uid" ] && [ "$owner" != 0 ]; then
+              bad="owned by another user"
+            elif [ $((0$mode & 01000)) = 0 ] && [ $((0$mode & 02)) != 0 ]; then
+              bad="writable by others"
+            elif [ $((0$mode & 01000)) = 0 ] && [ $((0$mode & 020)) != 0 ]; then
+              if [ "$group" != "$gid" ] || [ "$private" != yes ]; then
+                bad="writable by its group, which is not your private group"
+              elif ls -ld "$d" | cut -c11 | grep -q '+'; then
+                bad="writable by its group, with an access control list"
+              fi
+            fi
+            if [ -n "$bad" ]; then
+              echo "::error::$d (mode $mode, owner $owner, group $group) is $bad; the .NET SDK refuses a cache under it" >&2
               exit 1
             fi
             [ "$d" = / ] && break
