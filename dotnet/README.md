@@ -1,32 +1,479 @@
 # Jacquard Host for .NET
 
-An independent .NET adapter for Jacquard Core's experimental `jacquard-host-v0`
-protocol. It implements the pinned protocol on its own, without calling
-Python, Node.js, Go, Rust, or Java, and has no runtime dependencies beyond
-the .NET base class library. It targets .NET 8 and runs on .NET 8 and 10. It
-runs workers on Linux and macOS: the carrier calls the C library's `poll(2)`
-(see "Process carrier" below).
+Call checked Jacquard functions from .NET, bind .NET handlers to their
+declared operations, and inspect the exact protocol evidence. This is an
+independent .NET implementation of the pinned `jacquard-host-v0` boundary. It
+has no runtime dependencies beyond the .NET base class library and runs Core
+directly, without Python, Node.js, Go, Rust, or Java. It targets .NET 8 and
+runs on .NET 8 and 10.
 
-This is the protocol-level adapter, comparable to the Go `host` package, the
-Rust `host` module, and the Java adapter. It includes strict codecs, the host
-session state machine, and a bounded process carrier for `jacquard host
-worker`. It also provides a `Host` with a closed operation registry and a
-replayer for Core's pinned conformance kit. There is no SDK layer yet. It does
-not compile programs, map native types, or cache stores. You prepare a store
-with the Core CLI and pass exact identities and boundary types.
+The assembly has two layers:
+- **The SDK** (`JacquardLang.Host.Sdk`) prepares and caches checked programs,
+  maps .NET values through explicit codecs, and binds handlers to exact
+  operation identities. It is comparable to the Python, TypeScript, Go, Rust,
+  and Java SDKs.
+- **The protocol-level host** (`JacquardLang.Host`) takes exact identities,
+  boundary types, and protocol values for a store you prepare with the Core
+  CLI. It is comparable to the Go `host` package, the Rust `host` module, and
+  the Java adapter.
 
-**Experimental:** the protocol is Core's pinned `jacquard-host-v0`, and Core is
-installed separately. Each invocation runs one fresh, serial worker. The host
-and operating system are trusted. Linux is exercised; macOS should work but has
-no CI; Windows is not supported (the worker reports a spawn failure). See
+Linux is exercised. macOS should work but has no CI: the carrier and the SDK
+call the C library (`poll(2)`, and for the SDK `kill(2)`, `geteuid(2)`,
+`mkdir(2)`, and `stat(2)`; see [process carrier](#process-carrier) and
+[Core's commands](#cores-commands)), and the macOS status calls are compiled
+but not run by any test. Windows is not supported: the worker reports a spawn
+failure and `Prepare` refuses. **Experimental:** the protocol is Core's pinned
+`jacquard-host-v0`, and Core is installed separately. Each invocation runs one
+fresh, serial worker. The host and operating system are trusted. See
 [limits](../docs/LIMITS.md).
 
-## Use
+## Install
 
 The package is not published to a registry. Build it from a clone
 (`dotnet pack src/JacquardHost -c Release` in this directory) and reference
-the `JacquardLang.Host` package or the project. The example below invokes a
-checked function whose single operation is served by a .NET handler:
+the `JacquardLang.Host` package or the project.
+
+From a clone, install the pinned Core release (see [setup](../docs/SETUP.md)),
+then run the quickstart:
+
+```sh
+eval "$(python3 scripts/core_pin.py install)"
+cd dotnet
+dotnet build examples/JacquardExamples
+dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll quickstart
+```
+
+Expected output:
+
+```text
+Order total 35: shipping 5
+Order total 75: shipping 0
+```
+
+The same command runs the other example projects; see
+[run the projects](#run-the-projects).
+
+## Call a checked function
+
+```csharp
+using JacquardLang.Host.Sdk;
+
+public static class Shipping
+{
+    public static long Cost(string rules, string cacheDir, string inspection)
+    {
+        // Core is $JACQUARD_BIN and $JACQUARD_PRELUDE unless RuntimeOptions say otherwise.
+        var runtime = new Runtime();
+        PreparedProgram program = runtime.Prepare(new[] { rules }, new PrepareOptions { CacheDir = cacheDir });
+        Function shipping = program.Function("shipping-cost");
+
+        // A long converts to an Int argument; Call decodes the result.
+        long free = shipping.Call(Codecs.Int, 75L);
+
+        // Invoke keeps the raw frames and evidence, saved only on request.
+        Invocation invocation = shipping.Invoke(35L);
+        invocation.Save(inspection);
+        return invocation.Decode(Codecs.Int) + free;
+    }
+}
+```
+
+The shipping rule is the [quickstart source](../examples/quickstart/rules.jac).
+`Prepare` takes `.jac` paths (or `.jqd` paths) in dependency order. It uses
+Core's public `check`, `hash`, and `run` commands, and keeps a verified cache
+keyed by:
+- the source bytes;
+- the Core executable bytes;
+- every prelude file;
+- the protocol and preparation format.
+
+At most 1,024 sources are taken (`Runtime.SourceFiles`); a longer list is
+refused from its `Count` before any element is read, and the token is
+observed before each element is checked. A path that is empty, holds a NUL,
+or is longer than 4,096 chars as given or made absolute (a source, the cache
+directory, the prelude, the executable, or a save path) is refused with an
+excerpt before the file system sees it. Each source must be a regular file (a
+symbolic link to one is followed), and all of them together at most 16 MiB
+(`Runtime.SourceLimit`); both are checked from the files' status before a
+source is read, so a FIFO or device is refused rather than opened, and no read
+goes past the ceiling. The Core executable is fingerprinted in 64 KiB pieces
+up to 512 MiB: a larger file is refused from its size before it is read, the
+ceiling is enforced again while it is read, and the token is observed before
+each piece. The prelude and cache walks stream each directory on an explicit
+stack (no directory depth can exhaust the call stack) and read regular files
+only (no symbolic links, FIFOs, or devices), at most 100,000 entries (empty
+files and directories count) and 256 MiB under one root; each file's size is
+checked before it is read and the ceiling again while it is read, and the
+token is observed before each entry and after each piece. A source replaced by a
+FIFO between that check and its open can still block the open.
+
+A preparation stages its entry in a `prepare-*` directory of the cache root,
+created exclusively (`mkdir(2)`), so it never adopts a directory it did not
+make. One that fails removes that directory in a streamed walk of at most
+100,000 entries that ends at the first cancellation, so a stopped preparation
+leaves its staging directory behind. Such a directory is never loaded:
+entries are named by their identity digest. Nothing removes it later, because
+a name and an age cannot show that the SDK made a directory or that no
+preparation is using it; remove leftover `prepare-*` directories yourself when
+no preparation is running. Once an entry is published, its vacated staging
+path is not touched again. A cancellation that arrives as a preparation
+finishes, a warm load included, is reported as the stop, not as a program.
+
+A function whose checked signature nests types deeper than 64 levels (the
+protocol's value-depth limit, `max_json_depth`, so no such value could be
+passed), names more than 4,096 types, or has more than 16,384 tokens is
+refused before the parser recurses past that bound. Like a polymorphic
+function it is left unbound: preparation succeeds, the other functions bind,
+and `PreparedProgram.Function` on it fails with a `Binding` exception naming
+the limit. `check --print-sigs` prints no operation signatures, and the SDK
+parses none; an operation's arguments are checked by the protocol's limits
+when they arrive.
+
+The cache defaults to `.scratch/jacquard-host-dotnet` under the working
+directory; `PrepareOptions.CacheDir` changes it. A symbolic link at the cache
+root is followed once, and the directory it names is checked and used;
+nothing inside it is followed. A cache entry keeps Core's raw
+`check --print-sigs` output and the `hash` output for the source and each
+prelude file beside the store, and `program.json` records every file's digest.
+Every binding (names, constructors, signatures, and declaration groups) is
+derived from those outputs, on the first preparation and again on each load.
+A load refuses an entry whose files do not match the recorded digests, or
+whose `program.json` bindings differ from what the outputs give, rather than
+repairing it. So an accidental or partial change is refused. No record inside
+an entry can resist someone who can rewrite it (an output, its recorded
+digest, and the bindings changed together load), so the cache's owner is
+trusted and only the owner may write it: preparation refuses a cache root, an
+entry, or any file or directory in one that the current user does not own or
+that its group or others may write, both when it creates an entry and when it
+loads one, and it makes each new entry's directories and files owner-only
+(Core's store included). The owner and mode come from `statx(2)` on Linux and
+`stat(2)` on macOS, without following links. The cache root's parent
+directories are not checked. The `--version` check and prelude discovery run
+once per Core executable and prelude in the process, shared by every
+`Runtime` and thread. Each call runs one fresh worker. Prepare only
+first-party declaration sources: preparation runs Core's `run` command,
+without service bindings, to populate the store.
+
+`new Runtime()` uses `$JACQUARD_BIN` and `$JACQUARD_PRELUDE`; an empty option
+means unset. The runtime refuses a Core whose `--version` differs from the
+pinned release. Each Core command must finish within 30 seconds, and keeps at
+most 8 MiB of stdout and 4 KiB of stderr; see [Core's commands](#cores-commands).
+Cancelling the token `Prepare` takes kills the running command and its
+process group, and fails the preparation; a preparation waiting for another
+thread's version check or prelude discovery stops waiting too. The SDK
+observes only the token: `Thread.Interrupt` is not a stop signal, and the
+SDK's own waits (`poll(2)` sleeps) do not consume it.
+
+Arguments are `Argument`s. A `long` or `int` converts implicitly to an `Int`,
+a `double` to a `Real`, a `string` to a `Text`, and a `bool`, a protocol
+`Hash`, a protocol `Value`, or a `Dynamic` to itself; anything else, lists and
+records included, is `codec.Arg(value)`. There is deliberately no conversion
+from `decimal` (see [data](#data)). `Call` decodes the result with the codec
+you pass; `Invoke` keeps the whole `Invocation`. Overloads that take an
+argument list and a `CancellationToken` kill the worker when it is cancelled.
+`Invocation.Save` writes the frames and evidence, including argument and
+result values; a new file is created owner-only, and an existing file keeps
+its permissions. The API is synchronous; there are no `Task`-returning
+variants.
+
+## Data
+
+Values map through explicit `Codec<T>` objects, built with the factories on
+`Codecs`. A record is mapped by naming its constructor and giving, for each
+field in the constructor's positional order, a codec and a function that
+reads it, then a function that builds the record from the decoded fields.
+Records are mapped without reflection (enumerations use `Enum.GetValues` and
+`Enum.GetName`), and there is no attribute or source generator: a codec is an
+ordinary immutable, thread-safe object, so the library builds clean under the
+trimming and ahead-of-time analyzers (`IsAotCompatible`; a trimmed or
+native-AOT publish is not tested), and a binding that does not follow a
+convention (a constructor whose name differs from the type's, say) is one
+explicit expression. Before any worker starts, the encoded arguments are
+checked against the function's checked signature; Core always checks the
+actual wire types too.
+
+| .NET | Jacquard |
+|---|---|
+| `long` (`Codecs.Int`) | `Int`, Core's full 63-bit range; a `long` outside it is refused. `int` (`Codecs.Int32`) refuses a result that does not fit |
+| `double` (`Codecs.Real`) | `Real` as binary64 bits, including NaN payloads and signed zero; an integer at a `Real` parameter is refused |
+| `string`, `bool`, protocol `Hash` | `Text` (a lone surrogate is refused), `Bool`, `Hash` |
+| `IReadOnlyList<T>` (`Codecs.List`) | `List T`; decoding returns a new array |
+| `Option<T>` (`Codecs.Option`) | `Option T`; `Option<Option<T>>` keeps nested options distinct. `Codecs.Nullable` and `Codecs.NullableValue` map `null` to `None` for one level |
+| `Unit` (`Codecs.Unit`), value tuples (`Codecs.Tuple`, two to four items) | unit and tuples |
+| a record (`Codecs.Record`, `Codecs.Field`) | one constructor, named by public name, its fields in the order given |
+| an enumeration (`Codecs.Enum`) | nullary constructors by convention: member `PageNow` is the constructor `PageNow` (store spelling `page-now`), or an explicit map |
+| a type hierarchy (`Codecs.Union`) | the constructors of one data type: each case is a record, enumeration, or union codec of a subtype |
+| a recursive type (`Codecs.Lazy`) | a codec made once, thread-safely, on first use, so a field can refer to its own type's codec |
+| `Dynamic` (`Codecs.Dynamic`) | any of the above by public name, for code with no application type |
+| protocol `Value` (`Codecs.Value`) | passed through unchanged |
+
+```csharp
+using System.Collections.Generic;
+using JacquardLang.Host.Sdk;
+
+// type Incident = | Incident(id: Text, service: Text, severity: Int, age: Int, visible: Bool, owner: Option Text)
+// type Urgency = | PageNow | WorkToday | WatchOnly
+// type Triage = | Routed Text Text Urgency (List Text) | InvalidIncident Text
+public static class Incidents
+{
+    public sealed record Incident(string Id, string Service, long Severity, long Age, bool Visible, string? Owner);
+
+    public enum Urgency
+    {
+        PageNow,
+        WorkToday,
+        WatchOnly,
+    }
+
+    public abstract record Triage;
+
+    public sealed record Routed(string Id, string Team, Urgency Urgency, IReadOnlyList<string> Reasons) : Triage;
+
+    public sealed record InvalidIncident(string Id) : Triage;
+
+    // A record is one constructor: its fields in order, each with a codec and
+    // a reader, and a function that builds it from the decoded fields.
+    public static readonly RecordCodec<Incident> IncidentCodec = Codecs.Record(
+        "Incident",
+        Codecs.Field("id", Codecs.Text, (Incident incident) => incident.Id),
+        Codecs.Field("service", Codecs.Text, (Incident incident) => incident.Service),
+        Codecs.Field("severity", Codecs.Int, (Incident incident) => incident.Severity),
+        Codecs.Field("age", Codecs.Int, (Incident incident) => incident.Age),
+        Codecs.Field("visible", Codecs.Bool, (Incident incident) => incident.Visible),
+        Codecs.Field("owner", Codecs.Nullable(Codecs.Text), (Incident incident) => incident.Owner),
+        (id, service, severity, age, visible, owner) => new Incident(id, service, severity, age, visible, owner));
+
+    // An enumeration's members name nullary constructors: PageNow is page-now.
+    // A union's cases are records, enumerations, or unions of its subtypes.
+    public static readonly UnionCodec<Triage> TriageCodec = Codecs.Union<Triage>(
+        Codecs.Record(
+            "Routed",
+            Codecs.Field("id", Codecs.Text, (Routed routed) => routed.Id),
+            Codecs.Field("team", Codecs.Text, (Routed routed) => routed.Team),
+            Codecs.Field("urgency", Codecs.Enum<Urgency>(), (Routed routed) => routed.Urgency),
+            Codecs.Field("reasons", Codecs.List(Codecs.Text), (Routed routed) => routed.Reasons),
+            (id, team, urgency, reasons) => new Routed(id, team, urgency, reasons)),
+        Codecs.Record("InvalidIncident", Codecs.Field("id", Codecs.Text, (InvalidIncident invalid) => invalid.Id), id => new InvalidIncident(id)));
+
+    // triage.batch : (TriagePolicy, List Incident) ->{} List Triage, run in
+    // explicit batches of eight; each batch is checked before any runs.
+    public static IReadOnlyList<Triage> Route(Function batch, Dynamic policy, IReadOnlyList<Incident> incidents) =>
+        batch.MapBatches(TriageCodec, IncidentCodec, incidents, 8, new Argument[] { policy });
+}
+```
+
+The fields given must follow the Jacquard constructor's positional order; the
+pinned CLI exports no field types, so the order is not checked against Core.
+Constructor names may use display spelling (`WorkToday`) or store spelling
+(`work-today`). A constructor that is not in the prepared program is refused
+when a value is encoded, and a result built by a different constructor fails
+to decode. `null` is never a Jacquard value (except through a nullable
+codec). **Money crosses as integer minor units** (cents, say) in an `Int`:
+Jacquard's `Int` is 63-bit and its `Real` is a binary64 `double`, and there is
+no decimal type. The SDK has no `decimal` codec and no conversion from
+`decimal`, so a `decimal` is never converted silently; a test checks that none
+exists.
+
+Every encoding is bounded by the selected limits as it goes: the JSON depth
+the wire form needs, `max_collection_items` for each list, tuple, and
+constructor, `max_value_nodes` values, `max_text_bytes` (in UTF-8 bytes) for
+each text, and `max_frame_bytes` for all texts together. A list, tuple,
+record, or constructor over its count limit is refused from its count before
+its items or fields are read, a text over its limit before it is scanned, and
+nesting before the nested value is encoded, so a small .NET value that denotes
+a huge one (1024 references to one tuple of 1024 references, say) costs no
+more than one frame, and no value or codec nesting can recurse past the depth
+limit. `ProgramData.Decode` measures a value within the same node and depth
+limits before it decodes it. A custom codec may return a `Value` it built
+itself rather than through the `Encoder`; such a value is still measured:
+before a function call checks the arguments' types, it walks every argument
+value under one shared budget (nodes, collection items, text bytes alone and
+together, and depth), whatever codec built it, so a small shared graph that
+stands for a huge value is refused before the type check walks it. The invoke
+frame is then measured as it is rendered, before any worker starts, and the
+host measures a handler's result the same way. A value returned by
+`ProgramData.Encode` is not measured again. Raw values, decoded values,
+nested unions (flattened on first use to their distinct cases), chains of
+lazy codecs, and a `Dynamic`'s equality and text are walked iteratively, so
+none can exhaust the call stack. `PreparedProgram.Data` gives each public
+name's exact identity. `ProgramData.Make` builds a `Dynamic.Variant` after
+checking that its constructor exists, and `Invocation.ToDynamic` decodes any
+result into `Dynamic`. A `Dynamic` list, tuple, or variant with more items
+than the v0 hard limit (1,024) is refused when it is made, from its count
+where the collection gives one and otherwise after at most one item past the
+limit.
+
+## Services and failures
+
+```csharp
+using System.Collections.Generic;
+using JacquardLang.Host;
+using JacquardLang.Host.Sdk;
+
+public static class Documents
+{
+    // summarize : (Text) ->{Documents} Text, where Documents has one operation,
+    // read-document : (Text) -> Text.
+    public static Function Summarize(PreparedProgram program)
+    {
+        Operations documents = new Operations().On("read-document", Codecs.Text, Codecs.Text, (context, key) =>
+        {
+            // The context reports a cancelled or ended invocation; its
+            // CancellationToken is cancelled then too.
+            if (context.IsCancelled)
+            {
+                throw HandlerException.CompletionUnknown("cancelled");
+            }
+
+            return key == "example" ? "A synthetic document supplied by .NET." : throw HandlerException.Refused("unknown document");
+        });
+        return program.Function("summarize", new Dictionary<string, Operations> { ["Documents"] = documents });
+    }
+}
+```
+
+An `Operations` value maps operation names (store spelling such as
+`read-document`, or display spelling; `_` is accepted for `-`) to handlers.
+One `Operations` may serve several effects.
+
+- **Parameters:** `On` takes one codec per parameter (up to six) and one for
+  the result. The handler may take the `HandlerContext` first; the remaining
+  parameters are decoded from the request. The context's `IsCancelled` and
+  `CancellationToken` report a cancelled, expired, or ended invocation (see
+  [handlers and cancellation](#handlers-and-cancellation)).
+- **Results:** the handler returns a value for its result codec
+  (`Unit.Value` for `Codecs.Unit`).
+- **Failures:** throw `HandlerException.Unsupported`, `Refused`,
+  `OutsideFailed`, or `CompletionUnknown` to report that failure. Any other
+  exception is reported to Core as completion unknown without its message.
+- **Binding:** every operation in each checked root effect needs a handler
+  before the first invocation, including operations a given path never
+  reaches. A name that is no operation of the program is refused, and a
+  service binding more names than the program has operations is refused from
+  its count before its handlers are copied. `PreparedProgram.Provide` shares
+  services across functions; each function receives only its own checked
+  effects.
+
+Handlers run on their own threads, so share state through a lock, as the
+fulfillment example's warehouse does. `RuntimeOptions.Deadline` (default
+30 s) bounds each worker lifetime.
+
+## Errors
+
+Every failure to prepare, bind, encode, call, or decode is a
+`JacquardException`, including any exception (other than
+`OutOfMemoryException`) thrown by your own codec, a record field's reader, a
+record's constructor function, or a lazy codec's factory: while a value is
+encoded, by a function or by `ProgramData.Encode`, it is an `InvalidArgument`
+naming the value, and while a value is decoded, by `ProgramData.Decode`,
+`Invocation.Decode`, `Call`, or `MapBatches`, a `Binding` failure (from
+`Invocation.Decode`, `Call`, and `MapBatches`, with the raw result kept);
+either way your exception is its `InnerException`. Names and exception
+messages the SDK quotes (a constructor, type, field, effect, operation, or
+executable name, or your exception's message) appear as an excerpt of at most
+64 chars and its length. A message you pass to `Encoder.Invalid` or
+`Decoder.Mapping` is kept as written, and no message is longer than
+`JacquardException.MessageLimit` (8,192 chars), the start kept and the whole
+length noted, once, however many prefixes are joined to it. Some failures
+keep their usual .NET types: passing `null` where an object is required
+throws `ArgumentNullException`; building a codec that cannot work (an
+enumeration map missing a member, a union case that is not a subtype) or a
+`Dynamic` over the hard limit throws `ArgumentException` at construction;
+`Invocation.Save` throws `IOException` or `UnauthorizedAccessException`; and
+an exception from a collection you pass (its `Count`, indexer, or
+enumerator) propagates unchanged, except for `MapBatches` rows, which are read
+while a batch is encoded and so are reported as a codec failure. A
+`JacquardException`'s `Kind` is:
+- `InvalidArgument`: a local refusal, such as a value of the wrong type or
+  one too large or too deep for a frame. No worker starts. `Invoke` throws
+  only this; otherwise the `Invocation` holds the raw result.
+- `Invocation`: the invocation ran and did not succeed, from `Call`,
+  `Invocation.Decode`, and `MapBatches`. `Failure` classifies it as
+  `DeadlineExceeded`, `WorkerLost`, `OperationFailed`, or `Other`, and
+  `Result` keeps the raw result.
+- `Binding`: such as an unknown name, a missing handler, invalid runtime
+  options, or a result that does not decode into the requested type. In the
+  decode case, `Result` keeps the successful Core result.
+- `Preparation`: checking, the cache, and the Core commands.
+
+`MapBatches` runs a pure function whose final parameter and result are Lists
+over explicit batches of rows, encoded with the row codec you pass, with any
+other arguments first. It validates every batch before the first runs and
+retries nothing. Validation keeps no batch's encoding: each batch is encoded
+and checked by a step that returns nothing, and encoded and checked again
+just before it runs. Before each batch, and once more after the last, it
+observes the token. As in the other SDKs, validation has no deadline of its
+own. A cancellation there is reported as the host's aborted invocation,
+without a worker. A failed batch's exception names it in `BatchIndex` (-1 when
+nothing ran: a batch was refused, or validation stopped) and keeps the decoded
+values of the batches that completed in `Completed`, read-only.
+
+A request argument that does not decode into a handler's parameter, or a
+wrong argument count, is reported as an outside failure, and that handler
+does not run. Neither does a handler whose invocation was cancelled, or whose
+lifetime passed, while its arguments were decoded. A result that cannot be
+encoded is also reported as an outside failure, but only after the handler
+returned, so any action it took has happened. None of these says anything
+about earlier operations in the invocation.
+
+## Run the projects
+
+```sh
+cd dotnet
+dotnet build examples/JacquardExamples
+RUN="dotnet examples/JacquardExamples/bin/Debug/net8.0/JacquardExamples.dll"
+$RUN planner
+$RUN triage
+$RUN fulfillment
+$RUN fulfillment
+```
+
+- Planner returns score 16.
+- Triage returns PAGE, TODAY, and WATCH.
+- Fulfillment returns Fulfilled, then DuplicateOrder with the same receipt.
+
+The command reads the rules and synthetic inputs from the repository's
+[`examples/`](../examples/README.md), from the repository root or `dotnet/`
+(or `JACQUARD_EXAMPLES=DIR`), so it runs from a clone. Custom input JSON may
+follow the project name. `--inspect PATH` saves frames; triage adds a
+numbered suffix per batch. State defaults to `.scratch/dotnet-examples/`. The
+exit status is 1 for a Jacquard or SDK failure and 2 for usage or other
+errors.
+
+Try explicit recovery in a fresh work directory:
+
+```sh
+$RUN --workdir .scratch/dotnet-recovery --fault publish-failed fulfillment
+$RUN --workdir .scratch/dotnet-recovery --deliver-pending fulfillment
+$RUN --workdir .scratch/dotnet-recovery --deliver-pending fulfillment
+```
+
+The first command exits 1 with E1613 and one pending booking. Reconciliation
+then delivers one receipt, and the next run delivers zero. The `after-commit`
+and `after-delivery` faults exercise E1612 around the snapshot commits.
+
+The example's `Warehouse` is a single-process service. It writes bookings and
+outbox entries together as one atomic JSON snapshot (a temporary file it
+creates exclusively, then renames; it removes that file only if it created it
+and did not rename it), and a simulated delivery sink deduplicates receipts.
+It has no cross-process locking and makes no power-loss durability claim.
+
+## Namespaces
+
+| Namespace | Contents |
+|---|---|
+| `JacquardLang.Host.Sdk` | The SDK: `Runtime`, `PreparedProgram`, `ProgramData`, `Function`, `Invocation`, `Operations`, `Codec<T>` and `Codecs`, `Dynamic`, `Option<T>`, `Unit`, `Argument`, and `JacquardException` |
+| `JacquardLang.Host` | Low-level `Host`, `OperationRegistry`, `HandlerException`, `HandlerContext`, and `InvocationResult` for exact identities |
+| `JacquardLang.Host.Carrier` | The bounded process carrier for `jacquard host worker` |
+| `JacquardLang.Host.Protocol` | Strict JSON, v0 values and types, limits, the `Session` state machine |
+| `JacquardLang.Host.Conformance` | The embedded copy of the pinned conformance kit and its replayer |
+
+`Compat` holds the generated pin constants.
+
+## The protocol-level host
+
+The example below invokes a checked function whose single operation is served
+by a .NET handler:
 
 ```csharp
 using System;
@@ -116,7 +563,7 @@ size of what a handler or caller hands over:
 
 ## Handlers and cancellation
 
-A handler returns a value or throws a `HandlerException`. The four structured
+These rules apply to SDK handlers and to low-level handlers. A handler returns a value or throws a `HandlerException`. The four structured
 categories are `Unsupported`, `Refused`, `OutsideFailed`, and
 `CompletionUnknown`. Any other exception a handler throws is reported to Core
 as completion unknown, and its message is never sent. A returned value with
@@ -176,7 +623,7 @@ Unix an anonymous pipe's asynchronous read is a blocking read on a pool
 thread. The carrier is built around both:
 
 - **No read or write ever blocks.** The caller's thread asks the C library's
-  `poll(2)` (the one native call the adapter makes) whether a pipe is ready,
+  `poll(2)` (the one native call the carrier makes) whether a pipe is ready,
   with a poll timeout of at most 5 ms that never ends after the deadline, and
   only then reads the bytes already in the pipe,
   or writes at most `PIPE_BUF` bytes (4096 on Linux, 512 on macOS), which a
@@ -237,6 +684,49 @@ invocations, and check that a reparented descendant flooding stdout or
 stderr holds neither the caller nor the heap, at a worker's own exit, at
 expiry, and at cancellation.
 
+## Core's commands
+
+The SDK runs Core's `--version`, `check`, `hash`, and `run` commands through
+its own bounded runner, which uses the carrier's approach to pipes: stdout and
+stderr are read only after `poll(2)` reports them ready, on the caller's
+thread, in waits of 1 to 5 ms that recheck the 30-second timeout and the
+token; .NET's own stream reads are never left waiting. Each read step takes
+at most 1 MiB of each stream, keeps at most 8 MiB of stdout (the rest is read
+and counted, and refused as "output exceeds 8 MiB") and 4 KiB of stderr, and
+after the exit at most 4 MiB more of each is read. The command's stdin is a
+pipe the host closes at once.
+
+On Linux, when a `setsid` is installed at `/usr/bin/setsid` or `/bin/setsid`
+(util-linux's, or a compatible one such as BusyBox's; any executable there is
+used), each command runs as `setsid -- <core>`. .NET's child is never a
+process group leader, so `setsid` starts a new session and execs Core without
+forking: Core keeps its pid and leads a new process group whose id is that pid
+(a test checks both). Every descendant that does not leave the group shares
+it. The host kills that group with `kill(-pgid, SIGKILL)` when the command
+exits, and on a timeout or cancellation (then also killing Core itself,
+waiting up to one second for its exit, and killing the group again for
+members forked meanwhile). So `sh -c 'sleep 300 & echo $!'` succeeds, as in
+the Rust SDK, and its child has been sent SIGKILL by the time it returns. Once .NET has reaped
+Core, a live process holding Core's pid means the id was reused, so the old
+group is empty and nothing is killed; a process that took Core's pid after a
+full pid wraparound, made its own group, and forked between that check and the
+kill could still have that group killed, the same window as the Rust SDK's
+`kill(-pgid)`. When `setsid` cannot exec Core (exit status 126 or 127 with its
+own `setsid: ` message), the command is reported as a start failure. A
+descendant that leaves the group (calls `setsid` itself) is neither detected
+nor killed; the host does not wait for the end of the output after the exit,
+and closes its ends, so that descendant's next write fails and it cannot hold
+the caller.
+
+Without `setsid` (Linux without one at those paths), the command's
+descendants are recorded from `/proc` about every 10 ms, by pid and start
+time, and every recorded descendant still alive with that start time is
+killed when the command returns (the start time is read just before the
+kill, as the JDK's process handles do); a stop also calls
+`Process.Kill(true)`. A descendant started and reparented between two records
+keeps running. macOS has no `/proc`, so nothing is recorded there: only the
+tree kill on a stop applies.
+
 ## Conformance kit
 
 `Kit.Load()` verifies the embedded copy of the kit against the pinned digests.
@@ -257,16 +747,20 @@ dotnet test test/JacquardHost.Tests -f net10.0
 JACQUARD_REQUIRE_LIVE=1 dotnet test test/JacquardHost.Tests -f net8.0
 ```
 
-The live tests in `LiveTests` are ignored without `JACQUARD_BIN` and
-`JACQUARD_PRELUDE` (set `JACQUARD_REQUIRE_LIVE` to make them fail instead).
-The offline tests drive `test/JacquardHost.StandIn`, a console program that
-replays recordings or simulates faulty workers in a fresh process. Its
-descendant modes use `sh` and `sleep`, so those tests run on Unix only, and
-the descriptor tests run on Linux only. The build treats warnings as errors,
+The live tests (`LiveTests`, `SdkLiveTests`, and the live `ExamplesTests`)
+are ignored without `JACQUARD_BIN` and `JACQUARD_PRELUDE` (set
+`JACQUARD_REQUIRE_LIVE` to make them fail instead). The offline tests drive
+`test/JacquardHost.StandIn`, a console program that replays recordings or
+simulates faulty workers in a fresh process, and a fake Core (a shell script)
+for the SDK's preparation. Their descendant modes use `sh` and `sleep`, so
+those tests run on Unix only, and the descriptor, Core command, and
+preparation tests run on Linux only. The build treats warnings as errors,
 with nullable reference types and the `8.0-recommended` analyzers.
 
 `src/JacquardHost/Compat.cs` is generated, and
 `src/JacquardHost/kit/host-protocol-v0/` is a byte copy of the pinned kit.
 `scripts/core_pin.py` maintains both; do not edit them by hand. `NOTICE` must
-stay identical to the repository's `NOTICE`, and the README example must stay
-identical to `test/JacquardHost.Tests/Readme/Echo.cs`; tests check both.
+stay identical to the repository's `NOTICE`, and the README's examples must
+stay identical to `test/JacquardHost.Tests/Readme/` (`Shipping.cs`,
+`Incidents.cs`, `Documents.cs`, and `Echo.cs`, in that order), which the live
+tests run; tests check both.

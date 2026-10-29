@@ -103,8 +103,8 @@ public sealed class Field<TRecord, TField> : Builtins.IField<TRecord>
 /// The codec factories: built-in types, lists, options, tuples, records,
 /// enumerations, unions, lazy (recursive) codecs, raw protocol values, and
 /// <see cref="Sdk.Dynamic"/>. Records are mapped by explicit field readers and
-/// a constructor function rather than by reflection, so mapping works under
-/// trimming and ahead-of-time compilation.
+/// a constructor function rather than by reflection, so the library stays
+/// clean under the trimming and ahead-of-time analyzers.
 /// </summary>
 public static class Codecs
 {
