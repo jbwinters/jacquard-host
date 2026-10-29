@@ -995,6 +995,67 @@ public sealed class RuntimeTests
         Assert.That(fake.Calls("--version"), Is.EqualTo(0));
     }
 
+    /// <summary>A source list whose count, or else whose indexer, throws <c>Error</c>.</summary>
+    private sealed class ThrowingSources(bool count) : IReadOnlyList<string>
+    {
+        internal static readonly InvalidOperationException Error = new("list failed");
+
+        public int Count => count ? throw Error : 1;
+
+        public string this[int index] => throw Error;
+
+        public IEnumerator<string> GetEnumerator() => throw Error;
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    /// <summary>A bindings dictionary whose count, or else whose enumerator, throws <see cref="ThrowingSources.Error"/>.</summary>
+    private sealed class ThrowingBindings(bool count) : IReadOnlyDictionary<string, Operations>
+    {
+        public int Count => count ? throw ThrowingSources.Error : 1;
+
+        public IEnumerable<string> Keys => throw new NotSupportedException();
+
+        public IEnumerable<Operations> Values => throw new NotSupportedException();
+
+        public Operations this[string key] => throw new NotSupportedException();
+
+        public bool ContainsKey(string key) => throw new NotSupportedException();
+
+        public bool TryGetValue(string key, out Operations value) => throw new NotSupportedException();
+
+        public IEnumerator<KeyValuePair<string, Operations>> GetEnumerator() => throw ThrowingSources.Error;
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    /// <summary>
+    /// An exception from the caller's source list (its count or an element)
+    /// or bindings dictionary (its count or enumerator) is wrapped in the
+    /// SDK's exception, keeping the cause, as other caller code is.
+    /// </summary>
+    [Test]
+    public void ACallersFailingSourceListOrBindingsIsWrappedWithTheCause()
+    {
+        using FakeCore fake = FakeCore.Effects(At("throwing"));
+        foreach (bool count in new[] { true, false })
+        {
+            JacquardException sources = Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new ThrowingSources(count), fake.Options))!;
+            Assert.That(sources.Kind, Is.EqualTo(JacquardErrorKind.Preparation));
+            Assert.That(sources.Message, Is.EqualTo("reading the source list failed: System.InvalidOperationException: list failed"));
+            Assert.That(sources.InnerException, Is.SameAs(ThrowingSources.Error));
+        }
+
+        PreparedProgram program = fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, fake.Options);
+        foreach (bool count in new[] { true, false })
+        {
+            JacquardException bindings = Support.Throws<JacquardException>(() => program.Function("first", new ThrowingBindings(count)))!;
+            Assert.That(bindings.Kind, Is.EqualTo(JacquardErrorKind.Binding));
+            Assert.That(bindings.Message, Is.EqualTo("first: reading the bindings failed: System.InvalidOperationException: list failed"));
+            Assert.That(bindings.InnerException, Is.SameAs(ThrowingSources.Error));
+        }
+    }
+
     /// <summary>A bindings dictionary that records whether the program's lock was held while it was read.</summary>
     private sealed class Watching : IReadOnlyDictionary<string, Operations>
     {

@@ -146,6 +146,9 @@ public sealed class JacquardException : Exception
 
     internal static JacquardException Preparation(string message) => new(JacquardErrorKind.Preparation, message, null, null, -1, Nothing);
 
+    /// <summary>A preparation failure caused by <paramref name="cause"/>, such as a caller's source list that threw.</summary>
+    internal static JacquardException Preparation(string message, Exception? cause) => new(JacquardErrorKind.Preparation, message, null, cause, -1, Nothing);
+
     internal static JacquardException Binding(string message) => new(JacquardErrorKind.Binding, message, null, null, -1, Nothing);
 
     /// <summary>A binding failure caused by <paramref name="cause"/>, such as a caller's codec that threw.</summary>

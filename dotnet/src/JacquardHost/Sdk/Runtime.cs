@@ -416,8 +416,21 @@ public sealed class Runtime
     {
         JacquardException Usage() => JacquardException.Preparation("pass .jac files or .jqd files in dependency order");
 
+        // The caller's list runs the caller's code; what it throws is wrapped with the cause.
+        static T Read<T>(Func<T> read)
+        {
+            try
+            {
+                return read();
+            }
+            catch (Exception error) when (Caller.Wraps(error))
+            {
+                throw JacquardException.Preparation("reading the source list failed: " + Identities.Describe(error), error);
+            }
+        }
+
         // The count comes from Count alone, before any element is read.
-        int count = sources.Count;
+        int count = Read(() => sources.Count);
         if (count == 0)
         {
             throw Usage();
@@ -439,7 +452,8 @@ public sealed class Runtime
                 throw JacquardException.Preparation(Core.Aborted);
             }
 
-            string source = Core.CheckedPath(sources[i], "source");
+            int index = i;
+            string source = Core.CheckedPath(Read(() => sources[index]), "source");
             checkedSources.Add(source);
             string kind = Extension(source);
             syntax ??= kind;

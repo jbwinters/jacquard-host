@@ -187,18 +187,27 @@ public sealed class PreparedProgram
         // taken, so its code cannot hold that lock: its count once, and its
         // entries only when they are no more than the program's effects, at
         // most one past them. The effects are fixed when the program is made.
-        int declared = bindings.Count;
+        // What it throws is wrapped with the cause, as for other caller code.
+        int declared;
         var given = new List<KeyValuePair<string, Operations>>();
-        if (declared <= effects.Count)
+        try
         {
-            foreach (KeyValuePair<string, Operations> binding in bindings)
+            declared = bindings.Count;
+            if (declared <= effects.Count)
             {
-                given.Add(binding);
-                if (given.Count > effects.Count)
+                foreach (KeyValuePair<string, Operations> binding in bindings)
                 {
-                    break;
+                    given.Add(binding);
+                    if (given.Count > effects.Count)
+                    {
+                        break;
+                    }
                 }
             }
+        }
+        catch (Exception error) when (Caller.Wraps(error))
+        {
+            throw JacquardException.Binding(Identities.Excerpt(name) + ": reading the bindings failed: " + Identities.Describe(error), error);
         }
 
         lock (sync)
