@@ -45,8 +45,7 @@ public sealed class RuntimeTests
         Core.DigestChunkHook = null;
         Core.TreeFileHook = null;
         Core.TreeEntryCap = Core.TreeEntries;
-        Core.UserHook = null;
-        Core.GroupHook = null;
+        SdkSupport.NoAccounts();
         SdkSupport.RemoveScratch(scratch);
     }
 
@@ -870,13 +869,12 @@ public sealed class RuntimeTests
         + " Make each of these writable only by you (for example chmod go-w DIR), or use a location under directories only you or root may write: "
         + string.Join("; ", levels);
 
-    /// <summary>Answers the private-group lookups as a user "me" whose primary group <paramref name="directory"/>'s group is, named <paramref name="name"/> with <paramref name="members"/>.</summary>
-    private static void Accounts(string directory, string name, params string[] members)
-    {
-        uint group = Unix.Stat(directory, follow: false).Group;
-        Core.UserHook = uid => uid == Unix.EffectiveUser() ? new Unix.Account("me", group) : null;
-        Core.GroupHook = gid => gid == group ? new Unix.GroupEntry(name, members) : null;
-    }
+    /// <summary>
+    /// Answers the private-group lookups as a user "me" whose primary group
+    /// <paramref name="directory"/>'s group is, named <paramref name="name"/>
+    /// with <paramref name="members"/>, and the only account with it.
+    /// </summary>
+    private static void Accounts(string directory, string name, params string[] members) => SdkSupport.Accounts(directory, name, members);
 
     /// <summary>Answers the lookups so that <paramref name="directory"/>'s group is not the user's private group.</summary>
     private static void NotPrivate(string directory) => Accounts(directory, "staff");
@@ -940,6 +938,161 @@ public sealed class RuntimeTests
         Core.GroupHook = gid => null;
         Refused("an unknown group");
         Assert.That(Directory.Exists(Path.Combine(parent, "cache")), Is.False, "a refused preparation made the root");
+    }
+
+    /// <summary>
+    /// The group database's member list omits accounts whose primary group a
+    /// group is, so the password database is enumerated as well: a 0770
+    /// parent whose group is the user's private group, listing no members,
+    /// is refused when another account ("attacker", another uid) has that
+    /// group as its primary group, and accepted when only the user has it
+    /// (other accounts with other primary groups do not matter).
+    /// </summary>
+    [Test]
+    public void ACacheParentIsRefusedWhenAnotherAccountHasThePrivateGroupAsItsPrimaryGroup()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent")).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1F8);
+        uint group = Unix.Stat(parent, follow: false).Group;
+        uint other = Unix.EffectiveUser() + 1;
+        string cache = Path.Combine(parent, "cache");
+        var options = new PrepareOptions { CacheDir = cache };
+        SdkSupport.Accounts(parent, "me", Array.Empty<string>(), new Unix.PasswdEntry("attacker", other, group));
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options))!.Message,
+            Is.EqualTo(Unsafe(cache, parent + " (" + NotPrivateGroup + ")")));
+        Assert.That(Directory.Exists(cache), Is.False, "a refused preparation made the root");
+
+        SdkSupport.Accounts(parent, "me", Array.Empty<string>(), new Unix.PasswdEntry("daemon", other, group + 1));
+        Assert.That(fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options).Directory, Does.StartWith(cache + "/"));
+    }
+
+    /// <summary>
+    /// The password database enumeration is bounded and fails closed: a pass
+    /// reading more than <see cref="Core.PasswdEntries"/> entries, a lookup
+    /// error (a null entry) anywhere in it, a name listed twice (as a pass
+    /// restarted by another enumeration in the process would show), a
+    /// database that does not list the user with the group, and two passes
+    /// that differ (as a position moved by another enumeration would make
+    /// them) each mean "not private"; exactly the cap is accepted.
+    /// </summary>
+    [Test]
+    public void ThePasswordDatabaseScanRefusesOnItsCapAnErrorOrInterference()
+    {
+        uint me = Unix.EffectiveUser();
+        const uint Group = 4242;
+        var self = new Unix.PasswdEntry("me", me, Group);
+        IEnumerable<Unix.PasswdEntry?> Others(int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                yield return new Unix.PasswdEntry("user" + i.ToString(CultureInfo.InvariantCulture), me + 1 + (uint)i, Group + 1);
+            }
+        }
+
+        bool Verdict(Func<IEnumerable<Unix.PasswdEntry?>> source)
+        {
+            Core.PasswdHook = source;
+            return Core.OnlyUserHasPrimaryGroup(me, Group);
+        }
+
+        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self }), Is.True, "only the user");
+        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self }.Concat(Others(Core.PasswdEntries - 1))), Is.True, "exactly the cap");
+        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self }.Concat(Others(Core.PasswdEntries))), Is.False, "one past the cap");
+        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self, null }), Is.False, "a lookup error after the user");
+        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { null, self }), Is.False, "a lookup error before the user");
+        Assert.That(Verdict(() => new Unix.PasswdEntry?[] { self, self }), Is.False, "a name listed twice");
+        Assert.That(Verdict(() => Others(3)), Is.False, "the user is not listed with the group");
+        int passes = 0;
+        Assert.That(Verdict(() => ++passes == 1 ? new Unix.PasswdEntry?[] { self } : new Unix.PasswdEntry?[] { self }.Concat(Others(1))), Is.False, "the passes differ");
+        Assert.That(passes, Is.EqualTo(2));
+    }
+
+    /// <summary>
+    /// The real password database enumerates without a lookup error, lists
+    /// this user with its primary group, and includes every account
+    /// <c>/etc/passwd</c> gives that primary group; the verdict is whether
+    /// any of those is another account.
+    /// </summary>
+    [Test]
+    public void ThePasswordDatabaseScanReadsTheRealDatabase()
+    {
+        uint me = Unix.EffectiveUser();
+        Unix.Account account = Unix.User(me) ?? throw new AssertionException("no passwd entry for this user");
+        List<Unix.PasswdEntry?> entries;
+        lock (Unix.PasswdLock)
+        {
+            entries = Unix.Passwd().Take(Core.PasswdEntries + 1).ToList();
+        }
+
+        Assert.That(entries, Has.None.Null, "a lookup error");
+        Assert.That(entries, Has.Count.LessThanOrEqualTo(Core.PasswdEntries));
+        Assert.That(entries, Does.Contain(new Unix.PasswdEntry(account.Name, me, account.Group)));
+        foreach (string line in File.ReadLines("/etc/passwd"))
+        {
+            string[] fields = line.Split(':');
+            if (fields.Length >= 4 && fields[3] == account.Group.ToString(CultureInfo.InvariantCulture))
+            {
+                Assert.That(entries.Select(e => e!.Value.Name), Does.Contain(fields[0]), "/etc/passwd lists " + fields[0]);
+            }
+        }
+
+        bool others = entries.Any(e => e!.Value.Group == account.Group && e.Value.Uid != me);
+        Assert.That(Core.OnlyUserHasPrimaryGroup(me, account.Group), Is.EqualTo(!others));
+    }
+
+    /// <summary>
+    /// The account records libc fills are read only within the buffer the
+    /// SDK gave it: a name, a member array, a member slot, or a member name
+    /// outside it, or a string without its NUL inside it, is a lookup error
+    /// (null), never read through. Here the pointers are crafted; the
+    /// outside memory is another valid array, so reading it would succeed.
+    /// </summary>
+    [Test]
+    public unsafe void TheAccountRecordsAreReadOnlyWithinTheirBuffer()
+    {
+        byte[] buffer = new byte[64];
+        byte[] outside = Encoding.ASCII.GetBytes("outside\0\0\0\0\0\0\0\0\0");
+        byte[] entry = new byte[256];
+        fixed (byte* data = buffer)
+        fixed (byte* far = outside)
+        fixed (byte* record = entry)
+        {
+            // "me\0" at 0, "you\0" at 8, the member array { 8, null } at 16.
+            Encoding.ASCII.GetBytes("me\0").CopyTo(buffer, 0);
+            Encoding.ASCII.GetBytes("you\0").CopyTo(buffer, 8);
+            *(IntPtr*)(record + 0) = (IntPtr)(data);
+            *(IntPtr*)(record + 24) = (IntPtr)(data + 16);
+            *(IntPtr*)(data + 16) = (IntPtr)(data + 8);
+            *(IntPtr*)(data + 24) = IntPtr.Zero;
+            *(uint*)(record + 16) = 7;
+            *(uint*)(record + 20) = 9;
+            Assert.That(Unix.ReadAccount(record, data, buffer.Length), Is.EqualTo(new Unix.PasswdEntry("me", 7, 9)));
+            Unix.GroupEntry group = Unix.ReadGroup(record, data, buffer.Length)!;
+            Assert.That((group.Name, string.Join(",", group.Members)), Is.EqualTo(("me", "you")));
+
+            *(IntPtr*)(record + 0) = (IntPtr)(far);
+            Assert.That(Unix.ReadAccount(record, data, buffer.Length), Is.Null, "a name outside the buffer");
+            Assert.That(Unix.ReadGroup(record, data, buffer.Length), Is.Null, "a group name outside the buffer");
+            *(IntPtr*)(record + 0) = (IntPtr)(data);
+            *(IntPtr*)(data + 16) = (IntPtr)(far);
+            Assert.That(Unix.ReadGroup(record, data, buffer.Length), Is.Null, "a member name outside the buffer");
+            *(IntPtr*)(data + 16) = (IntPtr)(data + 8);
+            *(IntPtr*)(record + 24) = (IntPtr)(far);
+            Assert.That(Unix.ReadGroup(record, data, buffer.Length), Is.Null, "a member array outside the buffer");
+
+            // A member array whose terminating slot would lie past the end.
+            *(IntPtr*)(record + 24) = (IntPtr)(data + buffer.Length - 8);
+            *(IntPtr*)(data + buffer.Length - 8) = (IntPtr)(data + 8);
+            Assert.That(Unix.ReadGroup(record, data, buffer.Length), Is.Null, "a member array running past the buffer");
+
+            // A name with no NUL before the end of the buffer.
+            new Span<byte>(data + 40, 16).Fill((byte)'x');
+            *(IntPtr*)(record + 0) = (IntPtr)(data + 40);
+            *(IntPtr*)(record + 24) = IntPtr.Zero;
+            Assert.That(Unix.ReadAccount(record, data, 56), Is.Null, "a name without its NUL in the buffer");
+        }
     }
 
     /// <summary>

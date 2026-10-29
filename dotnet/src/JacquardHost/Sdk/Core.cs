@@ -625,6 +625,16 @@ internal static class Core
     /// </summary>
     internal static volatile Func<uint, Unix.GroupEntry?>? GroupHook;
 
+    /// <summary>
+    /// Test seam: supplies the password database enumeration of the
+    /// private-group rule in place of <see cref="Unix.Passwd"/>, once per
+    /// pass (a null element is a lookup error). Null outside tests.
+    /// </summary>
+    internal static volatile Func<IEnumerable<Unix.PasswdEntry?>>? PasswdHook;
+
+    /// <summary>The most password database entries one pass of the private-group rule reads; more is refused.</summary>
+    internal const int PasswdEntries = 100_000;
+
     /// <summary>The most unsafe directories one refusal names; the rest are counted.</summary>
     internal const int UnsafeListed = 16;
 
@@ -637,11 +647,17 @@ internal static class Core
     /// user's private group. In a sticky directory only the owner of an entry
     /// (or the directory's owner, or root) may rename or remove it, and the
     /// next directory down is checked in turn. The private group is Debian
-    /// OpenSSH's rule: the directory's group is the user's primary group,
-    /// that group's name is the user's name, and it lists no members or only
-    /// the user, and the directory has no access ACL (whose mask, on Linux,
-    /// is what the group bits show). Every unsafe directory is named, nearest first, up to
-    /// <see cref="UnsafeListed"/>.
+    /// OpenSSH's rule (no account but the user has the group as its primary
+    /// group, and the group lists no member but the user) with stricter
+    /// conditions: the directory's group is the user's primary group, that
+    /// group's name is the user's name, it lists no members or only the
+    /// user, the password database as enumerated lists the user with that
+    /// primary group and no other account with it (see
+    /// <see cref="OnlyUserHasPrimaryGroup"/>), and the directory has no
+    /// access ACL (whose mask, on Linux, is what the group bits show). Every
+    /// unsafe directory is named, nearest first, up to
+    /// <see cref="UnsafeListed"/>. The enumeration runs at most once per
+    /// call, and its verdict is not kept after the call.
     /// </summary>
     /// <param name="first">The nearest directory to check.</param>
     /// <param name="subject">What the directories hold, which starts the message.</param>
@@ -658,6 +674,7 @@ internal static class Core
         bool looked = false;
         Unix.Account? account = null;
         Unix.GroupEntry? group = null;
+        bool? sole = null;
         var unsafeOnes = new List<string>();
         int count = 0;
         for (string? directory = first; directory is not null; directory = Path.GetDirectoryName(directory))
@@ -691,7 +708,7 @@ internal static class Core
                         }
                     }
 
-                    if (!PrivateGroup(status, account, group))
+                    if (!PrivateGroup(status, account, group) || !(sole ??= OnlyUserHasPrimaryGroup(user, status.Group)))
                     {
                         reason = "writable by its group, which is not your private group";
                     }
@@ -725,10 +742,73 @@ internal static class Core
             + string.Join("; ", unsafeOnes) + more;
     }
 
-    /// <summary>Debian OpenSSH's private-group rule for a group-writable <paramref name="status"/>.</summary>
+    /// <summary>
+    /// The group-database half of the private-group rule for a
+    /// group-writable <paramref name="status"/>; the password database half
+    /// is <see cref="OnlyUserHasPrimaryGroup"/>.
+    /// </summary>
     private static bool PrivateGroup(Unix.Status status, Unix.Account? account, Unix.GroupEntry? group) =>
         account is { } user && group is not null
         && status.Group == user.Group
         && string.Equals(group.Name, user.Name, StringComparison.Ordinal)
         && (group.Members.Count == 0 || (group.Members.Count == 1 && string.Equals(group.Members[0], user.Name, StringComparison.Ordinal)));
+
+    /// <summary>
+    /// Whether the password database, enumerated twice under
+    /// <see cref="Unix.PasswdLock"/>, lists <paramref name="uid"/> with
+    /// primary group <paramref name="gid"/> and no other account with that
+    /// primary group (<c>gr_mem</c> omits primary-group members, so this is
+    /// what shows them), as Debian OpenSSH's <c>secure_permissions</c> scans
+    /// with <c>getpwent</c>. False, so the directory is refused, when a pass
+    /// reads more than <see cref="PasswdEntries"/> entries, meets a lookup
+    /// error, lists a name twice (as a pass restarted by another
+    /// <c>setpwent</c> or <c>endpwent</c> in the process would), or does not
+    /// list the user with the group, or when the two passes differ (as they
+    /// would if another enumeration in the process moved the position during
+    /// either). Accounts a source does not enumerate cannot be seen.
+    /// </summary>
+    internal static bool OnlyUserHasPrimaryGroup(uint uid, uint gid)
+    {
+        Func<IEnumerable<Unix.PasswdEntry?>> source = PasswdHook ?? Unix.Passwd;
+        lock (Unix.PasswdLock)
+        {
+            return OnePass(source(), uid, gid) is { } first
+                && OnePass(source(), uid, gid) is { } second
+                && first.AsSpan().SequenceEqual(second);
+        }
+    }
+
+    /// <summary>One pass of <see cref="OnlyUserHasPrimaryGroup"/>: a digest of every entry read when it holds, null otherwise.</summary>
+    private static byte[]? OnePass(IEnumerable<Unix.PasswdEntry?> entries, uint uid, uint gid)
+    {
+        using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        int read = 0;
+        bool listed = false;
+        Span<byte> numbers = stackalloc byte[8];
+        foreach (Unix.PasswdEntry? item in entries)
+        {
+            if (item is not { } entry || ++read > PasswdEntries || !names.Add(entry.Name))
+            {
+                return null;
+            }
+
+            if (entry.Group == gid)
+            {
+                if (entry.Uid != uid)
+                {
+                    return null;
+                }
+
+                listed = true;
+            }
+
+            digest.AppendData(Encoding.UTF8.GetBytes(entry.Name + "\0"));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(numbers, entry.Uid);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(numbers[4..], entry.Group);
+            digest.AppendData(numbers);
+        }
+
+        return listed ? digest.GetHashAndReset() : null;
+    }
 }

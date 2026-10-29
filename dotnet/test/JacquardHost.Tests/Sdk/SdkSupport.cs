@@ -1,8 +1,10 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
+using JacquardLang.Host.Sdk;
 using NUnit.Framework;
 
 namespace JacquardLang.Host.Tests.Sdk;
@@ -46,6 +48,30 @@ internal static class SdkSupport
 
     /// <summary>A fresh scratch directory.</summary>
     internal static string Scratch(string prefix) => Directory.CreateTempSubdirectory("jacquard-dotnet-sdk-" + prefix + "-").FullName;
+
+    /// <summary>
+    /// Answers the private-group lookups as a user "me" whose primary group
+    /// is <paramref name="directory"/>'s group, named
+    /// <paramref name="name"/> with <paramref name="members"/>, and a
+    /// password database listing "me" with that primary group followed by
+    /// <paramref name="others"/>.
+    /// </summary>
+    internal static void Accounts(string directory, string name, string[] members, params Unix.PasswdEntry?[] others)
+    {
+        uint group = Unix.Stat(directory, follow: false).Group;
+        uint me = Unix.EffectiveUser();
+        Core.UserHook = uid => uid == me ? new Unix.Account("me", group) : null;
+        Core.GroupHook = gid => gid == group ? new Unix.GroupEntry(name, members) : null;
+        Core.PasswdHook = () => new Unix.PasswdEntry?[] { new Unix.PasswdEntry("me", me, group) }.Concat(others);
+    }
+
+    /// <summary>Clears the private-group seams.</summary>
+    internal static void NoAccounts()
+    {
+        Core.UserHook = null;
+        Core.GroupHook = null;
+        Core.PasswdHook = null;
+    }
 
     /// <summary>
     /// Removes a scratch directory, first restoring owner permissions on

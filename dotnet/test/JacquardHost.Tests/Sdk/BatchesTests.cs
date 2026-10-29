@@ -35,6 +35,7 @@ public sealed class BatchesTests
     {
         Function.ConformHook = null;
         Invocation.BeforeRenameHook = null;
+        SdkSupport.NoAccounts();
         SdkSupport.RemoveScratch(root);
     }
 
@@ -380,5 +381,34 @@ public sealed class BatchesTests
         invocation.Save(target);
         Assert.That(File.ReadAllText(target), Does.StartWith("{").And.EndWith("}\n"));
         Assert.That(Directory.EnumerateFiles(root).Select(Path.GetFileName), Is.EquivalentTo(new[] { "record.json" }));
+    }
+
+    /// <summary>
+    /// Save applies the private-group rule with its password database scan:
+    /// a 0770 target directory whose group is the user's private group,
+    /// listing no members, is refused when another account has that group as
+    /// its primary group (nothing is written), and used when only the user
+    /// has it. The account answers come from a seam.
+    /// </summary>
+    [Test]
+    [Platform("Linux")]
+    public void SaveRefusesAPrivateGroupDirectoryAnotherAccountHasAsItsPrimaryGroup()
+    {
+        Invocation invocation = Ints().Invoke(Argument.Of(Codecs.List(Codecs.Int), new long[] { 1 }));
+        string shared = Directory.CreateDirectory(Path.Combine(root, "shared")).FullName;
+        File.SetUnixFileMode(shared, (UnixFileMode)0x1F8);
+        uint group = Unix.Stat(shared, follow: false).Group;
+        string target = Path.Combine(shared, "record.json");
+        SdkSupport.Accounts(shared, "me", Array.Empty<string>(), new Unix.PasswdEntry("attacker", Unix.EffectiveUser() + 1, group));
+        IOException error = Support.Throws<IOException>(() => invocation.Save(target))!;
+        Assert.That(error.Message, Is.EqualTo(
+            "save target " + target + " could be replaced by another user through the directories above it."
+            + " Make each of these writable only by you (for example chmod go-w DIR), or use a location under directories only you or root may write: "
+            + shared + " (writable by its group, which is not your private group)"));
+        Assert.That(Directory.EnumerateFileSystemEntries(shared), Is.Empty);
+
+        SdkSupport.Accounts(shared, "me", Array.Empty<string>());
+        invocation.Save(target);
+        Assert.That(Directory.EnumerateFileSystemEntries(shared).Select(Path.GetFileName), Is.EqualTo(new[] { "record.json" }));
     }
 }
