@@ -125,6 +125,13 @@ public sealed class Worker : IDisposable
     /// </summary>
     internal static volatile Func<long>? ClockHook;
 
+    /// <summary>
+    /// Test seam: runs on the caller's thread when the worker's lifetime
+    /// ends by expiry or cancellation, before its process tree is killed.
+    /// Process-global; null outside tests.
+    /// </summary>
+    internal static volatile Action? ExpireHook;
+
     /// <summary>The lifetime clock: <see cref="Stopwatch.GetTimestamp"/> outside tests.</summary>
     private static long Now() => ClockHook is { } clock ? clock() : Stopwatch.GetTimestamp();
 
@@ -316,6 +323,7 @@ public sealed class Worker : IDisposable
     /// <summary>Kills the worker's process tree and closes its input.</summary>
     private void Expire()
     {
+        ExpireHook?.Invoke();
         expired = true;
         KillTree();
         CloseInputCore();
@@ -663,7 +671,10 @@ public sealed class Worker : IDisposable
     /// <summary>
     /// Waits until <paramref name="isDone"/> returns true, the deadline
     /// passes, the call is cancelled, or the worker is disposed, reading
-    /// stderr meanwhile.
+    /// stderr meanwhile. <paramref name="isDone"/> is asked before each
+    /// check, so a condition that includes <see cref="Stopping"/> returns
+    /// before the worker is killed; the caller must then check
+    /// <see cref="Fault"/>.
     /// </summary>
     /// <exception cref="CarrierException">The lifetime ended first.</exception>
     public void Await(Func<bool> isDone)
@@ -673,11 +684,12 @@ public sealed class Worker : IDisposable
         {
             while (true)
             {
-                ThrowIfFault();
                 if (isDone())
                 {
                     return;
                 }
+
+                ThrowIfFault();
 
                 Pause(-1, 0);
             }

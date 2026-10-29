@@ -20,7 +20,11 @@ namespace JacquardLang.Host.Tests;
 public sealed class HandlerTokenTests
 {
     [TearDown]
-    public void ClearSeams() => Worker.ClockHook = null;
+    public void ClearSeams()
+    {
+        Worker.ClockHook = null;
+        Worker.ExpireHook = null;
+    }
 
     private static InvocationResult InvokeEcho(Host host, Handler handler, CancellationToken cancellationToken = default) =>
         host.Invoke(
@@ -251,8 +255,10 @@ public sealed class HandlerTokenTests
             Interlocked.Exchange(ref offset, Ticks(lifetime - TimeSpan.FromSeconds(1)));
             cancelledJustBefore = context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(300));
             flaggedJustBefore = context.IsCancelled;
+            var latency = Stopwatch.StartNew();
             Interlocked.Exchange(ref offset, Ticks(lifetime));
             cancelledAtTheDeadline = context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));
+            TestContext.Progress.WriteLine("token cancelled " + latency.Elapsed.TotalMilliseconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + " ms after the clock reached the deadline");
             return new TextValue("late");
         }));
         Assert.That(Volatile.Read(ref cancelledAfterADay), Is.False, "the token was cancelled a day into the lifetime");
@@ -392,5 +398,64 @@ public sealed class HandlerTokenTests
             Assert.That(witness.Cancelled(TimeSpan.FromSeconds(10)), Is.True, "the token was not cancelled");
             Assert.That(witness.PoolRanFirst, Is.False, "the token was cancelled only after the starved pool ran");
         }
+    }
+
+    [Test]
+    public void CallbacksRunOnTheHostsCancellingThreadUnlessRegisteredAfterTheCancellation()
+    {
+        // A callback registered before the cancellation runs on the host's
+        // dedicated cancelling thread, not a pool thread. One registered
+        // after it runs at once on the registering (handler) thread, as
+        // CancellationToken.Register does for any cancelled token.
+        string? before = null;
+        bool beforeOnPool = true;
+        int handlerThread = -1;
+        int lateThread = -2;
+        using var done = new ManualResetEventSlim();
+        InvocationResult result = Within(TimeSpan.FromSeconds(15), () => InvokeEcho(Replaying("one-once-effect-success", TimeSpan.FromSeconds(1)), (context, args) =>
+        {
+            handlerThread = Environment.CurrentManagedThreadId;
+            context.CancellationToken.Register(() =>
+            {
+                before = Thread.CurrentThread.Name;
+                beforeOnPool = Thread.CurrentThread.IsThreadPoolThread;
+            });
+            context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(10));
+            context.CancellationToken.Register(() => lateThread = Environment.CurrentManagedThreadId);
+            done.Set();
+            return new TextValue("late");
+        }));
+        Assert.That(Reason(result), Is.EqualTo("deadline"), result.ToString());
+        Assert.That(done.Wait(TimeSpan.FromSeconds(10)), Is.True, "the handler did not see its token cancelled");
+        Assert.That(Volatile.Read(ref before), Is.EqualTo("jacquard-handler-cancel"));
+        Assert.That(Volatile.Read(ref beforeOnPool), Is.False);
+        Assert.That(Volatile.Read(ref lateThread), Is.EqualTo(Volatile.Read(ref handlerThread)), "a late registration did not run on the handler's thread");
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public void TheTokenIsCancelledBeforeTheWorkerIsKilled(bool callerCancels)
+    {
+        // The seam holds the kill until the token's callback has run, for up
+        // to five seconds. If the kill came first, the callback would not run
+        // until after it, and the wait would time out.
+        using var cancelled = new ManualResetEventSlim();
+        using var cancel = new CancellationTokenSource();
+        bool cancelledBeforeKill = false;
+        Worker.ExpireHook = () => Volatile.Write(ref cancelledBeforeKill, cancelled.Wait(TimeSpan.FromSeconds(5)));
+        TimeSpan deadline = callerCancels ? TimeSpan.FromSeconds(30) : TimeSpan.FromSeconds(1);
+        InvocationResult result = Within(TimeSpan.FromSeconds(20), () => InvokeEcho(Replaying("one-once-effect-success", deadline), (context, args) =>
+        {
+            context.CancellationToken.Register(cancelled.Set);
+            if (callerCancels)
+            {
+                _ = new Canceller(cancel, TimeSpan.FromMilliseconds(300));
+            }
+
+            context.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(15));
+            return new TextValue("late");
+        }, cancel.Token));
+        Assert.That(Reason(result), Is.EqualTo(callerCancels ? "aborted" : "deadline"), result.ToString());
+        Assert.That(Volatile.Read(ref cancelledBeforeKill), Is.True, "the worker was killed before the token was cancelled");
     }
 }
