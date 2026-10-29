@@ -141,6 +141,31 @@ public sealed class CoreCommandTests
         Assert.That(Support.Alive(survivor), Is.True, "without the exit kill the child should survive");
     }
 
+    /// <summary>
+    /// Once the leader has exited and been reaped, a live process holding its
+    /// pid means the id was reused: the old group is empty, and the group
+    /// kill sends nothing. Here an unrelated group leader stands for the
+    /// process that took the pid after a wraparound; without the check the
+    /// kill would end its group.
+    /// </summary>
+    [Test]
+    public void AGroupIdReusedAfterTheLeaderIsReapedIsNotKilled()
+    {
+        Assume.That(HasSetsid, "no setsid at /usr/bin or /bin");
+        using Process leader = Process.Start(new ProcessStartInfo("/bin/true") { UseShellExecute = false })!;
+        leader.WaitForExit();
+        Assert.That(leader.HasExited, Is.True);
+        string pidFile = PidPath("reused");
+        using Process other = Process.Start(new ProcessStartInfo("/bin/sh", new[] { "-c", "exec " + CoreCommand.Setsid + " sh -c 'echo $$ > \"" + pidFile + "\"; exec sleep 300'" })
+        {
+            UseShellExecute = false,
+        })!;
+        int unrelated = SdkSupport.PidFile(pidFile);
+        CoreCommand.KillGroup(unrelated, leader);
+        Thread.Sleep(200);
+        Assert.That(Support.Alive(unrelated), Is.True, "a group whose id was reused was killed");
+    }
+
     /// <summary>A child that closed its output and keeps running is in the group, so it is killed at the exit too.</summary>
     [Test]
     public void ABackgroundChildThatClosedItsOutputIsKilled()

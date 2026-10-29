@@ -414,7 +414,7 @@ internal static class CoreCommand
     /// while a group has members its id cannot be reused, so a reaped
     /// leader's pid held by a live process means the old group is empty.
     /// </summary>
-    private static void KillGroup(int group, Process leader)
+    internal static void KillGroup(int group, Process leader)
     {
         if (HasExited(leader) && ReadStat("/proc/" + group.ToString(CultureInfo.InvariantCulture)) is { Zombie: false })
         {
