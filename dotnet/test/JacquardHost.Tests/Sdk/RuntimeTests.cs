@@ -45,6 +45,8 @@ public sealed class RuntimeTests
         Core.DigestChunkHook = null;
         Core.TreeFileHook = null;
         Core.TreeEntryCap = Core.TreeEntries;
+        Core.UserHook = null;
+        Core.GroupHook = null;
         SdkSupport.RemoveScratch(scratch);
     }
 
@@ -827,6 +829,7 @@ public sealed class RuntimeTests
     {
         using FakeCore fake = FakeCore.Programs(At("root"));
         string parent = Directory.CreateDirectory(At("parent"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute).FullName;
+        NotPrivate(parent);
         var options = new PrepareOptions { CacheDir = Path.Combine(parent, "cache") };
         string Refused(UnixFileMode mode)
         {
@@ -835,17 +838,16 @@ public sealed class RuntimeTests
         }
 
         const UnixFileMode Owner = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
-        string expected = "cache directory parent " + parent + " is group- or world-writable without the sticky bit,"
-            + " so another user could replace the cache (make it, for example, chmod go-w " + parent + ")";
-        Assert.That(Refused(Owner | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute), Is.EqualTo(expected), "others may write");
-        Assert.That(Refused(Owner | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute), Is.EqualTo(expected), "the group may write");
+        string cache = Path.Combine(parent, "cache");
+        Assert.That(Refused(Owner | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute), Is.EqualTo(Unsafe(cache, parent + " (writable by others)")), "others may write");
+        Assert.That(Refused(Owner | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute), Is.EqualTo(Unsafe(cache, parent + " (" + NotPrivateGroup + ")")), "the group may write");
 
         // A grandparent is checked as well.
         string nested = Directory.CreateDirectory(Path.Combine(parent, "nested"), Owner).FullName;
         File.SetUnixFileMode(parent, (UnixFileMode)0x1FF);
         Assert.That(
             Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = Path.Combine(nested, "cache") }))!.Message,
-            Is.EqualTo(expected));
+            Is.EqualTo(Unsafe(Path.Combine(nested, "cache"), parent + " (writable by others)")));
 
         // Sticky and world-writable, as /tmp is: accepted.
         File.SetUnixFileMode(parent, (UnixFileMode)0x3FF);
@@ -858,6 +860,142 @@ public sealed class RuntimeTests
         File.CreateSymbolicLink(link, parent);
         PreparedProgram linked = fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = Path.Combine(link, "cache") });
         Assert.That(linked.Directory, Does.StartWith(Path.Combine(parent, "cache") + "/"));
+    }
+
+    private const string NotPrivateGroup = "writable by its group, which is not your private group";
+
+    /// <summary>The refusal of a cache at <paramref name="cache"/> listing <paramref name="levels"/>.</summary>
+    private static string Unsafe(string cache, params string[] levels) =>
+        "cache directory " + cache + " could be replaced by another user through the directories above it."
+        + " Make each of these writable only by you (for example chmod go-w DIR), or use a location under directories only you or root may write: "
+        + string.Join("; ", levels);
+
+    /// <summary>Answers the private-group lookups as a user "me" whose primary group <paramref name="directory"/>'s group is, named <paramref name="name"/> with <paramref name="members"/>.</summary>
+    private static void Accounts(string directory, string name, params string[] members)
+    {
+        uint group = Unix.Stat(directory, follow: false).Group;
+        Core.UserHook = uid => uid == Unix.EffectiveUser() ? new Unix.Account("me", group) : null;
+        Core.GroupHook = gid => gid == group ? new Unix.GroupEntry(name, members) : null;
+    }
+
+    /// <summary>Answers the lookups so that <paramref name="directory"/>'s group is not the user's private group.</summary>
+    private static void NotPrivate(string directory) => Accounts(directory, "staff");
+
+    /// <summary>
+    /// A group-writable directory above the cache is accepted when its group
+    /// is the user's private group (Debian OpenSSH's rule): the directory's
+    /// group is the user's primary group, the group's name is the user's
+    /// name, and it lists no members or only the user. The password and
+    /// group answers come from a seam; the directory is 0770.
+    /// </summary>
+    [Test]
+    public void ACacheParentWritableByThePrivateGroupIsAccepted()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent"), (UnixFileMode)0x1F8).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1F8);
+        var options = new PrepareOptions { CacheDir = Path.Combine(parent, "cache") };
+        Accounts(parent, "me");
+        Assert.That(fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options).Directory, Does.StartWith(Path.Combine(parent, "cache") + "/"), "no members");
+        Accounts(parent, "me", "me");
+        Assert.That(fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options).Directory, Does.StartWith(Path.Combine(parent, "cache") + "/"), "the user alone");
+
+        // The private group does not excuse others' write.
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1FA);
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options))!.Message,
+            Is.EqualTo(Unsafe(Path.Combine(parent, "cache"), parent + " (writable by others)")));
+    }
+
+    /// <summary>
+    /// Any other group-writable directory above the cache is refused: a
+    /// group that is not the user's primary group, a group named otherwise,
+    /// a group with another member (alone or beside the user), and a user or
+    /// group the databases do not know.
+    /// </summary>
+    [Test]
+    public void ACacheParentWritableByAnyOtherGroupIsRefused()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string parent = Directory.CreateDirectory(At("parent"), (UnixFileMode)0x1F8).FullName;
+        File.SetUnixFileMode(parent, (UnixFileMode)0x1F8);
+        var options = new PrepareOptions { CacheDir = Path.Combine(parent, "cache") };
+        uint group = Unix.Stat(parent, follow: false).Group;
+        string expected = Unsafe(Path.Combine(parent, "cache"), parent + " (" + NotPrivateGroup + ")");
+        void Refused(string what) =>
+            Assert.That(Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, options))!.Message, Is.EqualTo(expected), what);
+
+        Core.UserHook = uid => new Unix.Account("me", group + 1);
+        Core.GroupHook = gid => new Unix.GroupEntry("me", Array.Empty<string>());
+        Refused("another primary group");
+        Accounts(parent, "staff");
+        Refused("a group named otherwise");
+        Accounts(parent, "me", "other");
+        Refused("another member");
+        Accounts(parent, "me", "me", "other");
+        Refused("another member beside the user");
+        Core.UserHook = uid => null;
+        Refused("an unknown user");
+        Accounts(parent, "me");
+        Core.GroupHook = gid => null;
+        Refused("an unknown group");
+        Assert.That(Directory.Exists(Path.Combine(parent, "cache")), Is.False, "a refused preparation made the root");
+    }
+
+    /// <summary>
+    /// The real password and group databases answer for this user: its name
+    /// is the one .NET reports, and its primary group has an entry.
+    /// </summary>
+    [Test]
+    public void TheAccountLookupsReadTheRealDatabases()
+    {
+        Unix.Account account = Unix.User(Unix.EffectiveUser()) ?? throw new AssertionException("no passwd entry for this user");
+        Assert.That(account.Name, Is.EqualTo(Environment.UserName));
+        Unix.GroupEntry group = Unix.GroupOf(account.Group) ?? throw new AssertionException("no group entry for the primary group");
+        Assert.That(group.Name, Is.Not.Empty);
+        Assert.That(group.Members.Count, Is.LessThan(Unix.AccountBytes));
+    }
+
+    /// <summary>
+    /// A refusal names every unsafe directory above the cache, nearest
+    /// first, with its reason, not only the first found; beyond 16 it counts
+    /// the rest.
+    /// </summary>
+    [Test]
+    public void ARefusalListsEveryUnsafeDirectoryAboveTheCache()
+    {
+        using FakeCore fake = FakeCore.Programs(At("root"));
+        string a = Directory.CreateDirectory(At("a")).FullName;
+        string b = Directory.CreateDirectory(Path.Combine(a, "b")).FullName;
+        string c = Directory.CreateDirectory(Path.Combine(b, "c")).FullName;
+        File.SetUnixFileMode(a, (UnixFileMode)0x1FF);
+        File.SetUnixFileMode(b, (UnixFileMode)0x1F8);
+        File.SetUnixFileMode(c, (UnixFileMode)0x1C0);
+        NotPrivate(b);
+        string cache = Path.Combine(c, "cache");
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = cache }))!.Message,
+            Is.EqualTo(Unsafe(cache, b + " (" + NotPrivateGroup + ")", a + " (writable by others)")));
+
+        // Eighteen unsafe levels: sixteen are named and two counted.
+        string deep = Directory.CreateDirectory(At("deep"), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute).FullName;
+        var levels = new List<string>();
+        for (int i = 0; i < 18; i++)
+        {
+            deep = Directory.CreateDirectory(Path.Combine(deep, "d")).FullName;
+            levels.Add(deep);
+        }
+
+        foreach (string level in levels)
+        {
+            File.SetUnixFileMode(level, (UnixFileMode)0x1FF);
+        }
+
+        string deepCache = Path.Combine(deep, "cache");
+        levels.Reverse();
+        Assert.That(
+            Support.Throws<JacquardException>(() => fake.Runtime.Prepare(new[] { fake.Source("rules.jac") }, new PrepareOptions { CacheDir = deepCache }))!.Message,
+            Is.EqualTo(Unsafe(deepCache, levels.Take(16).Select(level => level + " (writable by others)").ToArray()) + "; and 2 more"));
     }
 
     /// <summary>

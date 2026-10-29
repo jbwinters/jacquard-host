@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -13,8 +14,9 @@ namespace JacquardLang.Host.Sdk;
 /// <c>lstat(2)</c> on macOS) for the cache's owner check, for file kinds and
 /// sizes, and for the identities that detect a replaced file,
 /// <c>access(2)</c> for the execute permission, <c>mkdir(2)</c> to
-/// create a staging directory exclusively, and <c>realpath(3)</c> to resolve
-/// the cache root's path once.
+/// create a staging directory exclusively, <c>realpath(3)</c> to resolve
+/// the cache root's path once, and <c>getpwuid_r(3)</c> and
+/// <c>getgrgid_r(3)</c> to recognize the user's private group.
 /// </summary>
 /// <remarks>
 /// The macOS calls use the 64-bit-inode <c>struct stat</c> layout; they are
@@ -33,6 +35,11 @@ internal static partial class Unix
     private const int Eexist = 17;
     private const int AtFdcwd = -100;
     private const int AtSymlinkNofollow = 0x100;
+    private const int AtEmptyPath = 0x1000;
+    private const int Erange = 34;
+
+    /// <summary>The most bytes a user or group lookup may use; a larger entry is treated as not found.</summary>
+    internal const int AccountBytes = 64 * 1024;
     private const uint StatxBasicStats = 0x7ff;
     private const int FileTypeMask = 0xF000;
     private const int RegularType = 0x8000;
@@ -51,11 +58,14 @@ internal static partial class Unix
 
     /// <summary>
     /// What the status call reports: the kind, size, owner, and permission
-    /// bits, and the file's identity: its device and inode, and its
-    /// modification and status-change times in nanoseconds.
+    /// bits, the file's identity: its device and inode, and its
+    /// modification and status-change times in nanoseconds; and its group.
     /// </summary>
-    internal readonly record struct Status(Kind Kind, long Size, uint Owner, int Mode, ulong Device = 0, ulong Inode = 0, long Modified = 0, long Changed = 0)
+    internal readonly record struct Status(Kind Kind, long Size, uint Owner, int Mode, ulong Device = 0, ulong Inode = 0, long Modified = 0, long Changed = 0, uint Group = 0)
     {
+        /// <summary>Whether <paramref name="other"/> is the same file: kind, device, and inode.</summary>
+        internal bool SameInode(Status other) => Kind == other.Kind && Device == other.Device && Inode == other.Inode;
+
         /// <summary>
         /// Whether <paramref name="other"/> describes the same file in the
         /// same state: kind, device, inode, size, mode, owner, and both times.
@@ -87,6 +97,21 @@ internal static partial class Unix
 
     [LibraryImport("libc", EntryPoint = "statx", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static unsafe partial int NativeStatx(int dirfd, string path, int flags, uint mask, byte* buffer);
+
+    [LibraryImport("libc", EntryPoint = "statx", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    private static unsafe partial int NativeFstatx(int dirfd, string path, int flags, uint mask, byte* buffer);
+
+    [LibraryImport("libc", EntryPoint = "fstat", SetLastError = true)]
+    private static unsafe partial int MacFstatArm(int descriptor, byte* buffer);
+
+    [LibraryImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
+    private static unsafe partial int MacFstatIntel(int descriptor, byte* buffer);
+
+    [LibraryImport("libc", EntryPoint = "getpwuid_r")]
+    private static unsafe partial int NativeGetpwuid(uint uid, byte* entry, byte* buffer, nuint length, byte** result);
+
+    [LibraryImport("libc", EntryPoint = "getgrgid_r")]
+    private static unsafe partial int NativeGetgrgid(uint gid, byte* entry, byte* buffer, nuint length, byte** result);
 
     [LibraryImport("libc", EntryPoint = "stat", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static unsafe partial int MacStatArm(string path, byte* buffer);
@@ -192,13 +217,6 @@ internal static partial class Unix
         byte* buffer = stackalloc byte[256];
         new Span<byte>(buffer, 256).Clear();
         int result;
-        int modeOffset;
-        int ownerOffset;
-        int sizeOffset;
-        ulong device;
-        ulong inode;
-        long modified;
-        long changed;
         if (OperatingSystem.IsMacOS())
         {
             bool arm = RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
@@ -209,30 +227,10 @@ internal static partial class Unix
                 (true, false) => MacStatIntel(path, buffer),
                 _ => MacLstatIntel(path, buffer),
             };
-            modeOffset = 4;
-            ownerOffset = 16;
-            sizeOffset = 96;
-
-            // st_dev (int32) at 0, st_ino at 8, st_mtimespec at 48, st_ctimespec at 64.
-            device = *(uint*)buffer;
-            inode = *(ulong*)(buffer + 8);
-            modified = Nanoseconds(*(long*)(buffer + 48), *(long*)(buffer + 56));
-            changed = Nanoseconds(*(long*)(buffer + 64), *(long*)(buffer + 72));
         }
         else
         {
             result = NativeStatx(AtFdcwd, path, follow ? 0 : AtSymlinkNofollow, StatxBasicStats, buffer);
-            modeOffset = 28;
-            ownerOffset = 20;
-            sizeOffset = 40;
-
-            // stx_ino at 32, stx_ctime at 96, stx_mtime at 112 (each a
-            // 64-bit second and a 32-bit nanosecond), stx_dev_major and
-            // stx_dev_minor at 136 and 140.
-            inode = *(ulong*)(buffer + 32);
-            changed = Nanoseconds(*(long*)(buffer + 96), *(uint*)(buffer + 104));
-            modified = Nanoseconds(*(long*)(buffer + 112), *(uint*)(buffer + 120));
-            device = ((ulong)*(uint*)(buffer + 136) << 32) | *(uint*)(buffer + 140);
         }
 
         if (result != 0)
@@ -246,8 +244,88 @@ internal static partial class Unix
             throw new IOException("cannot read its status (errno " + error.ToString(CultureInfo.InvariantCulture) + ")");
         }
 
+        return Decode(buffer);
+    }
+
+    /// <summary>The status of the open file <paramref name="handle"/> (<c>fstat(2)</c>).</summary>
+    /// <exception cref="IOException">The status cannot be read.</exception>
+    internal static unsafe Status Stat(SafeHandle handle)
+    {
+        byte* buffer = stackalloc byte[256];
+        new Span<byte>(buffer, 256).Clear();
+        bool added = false;
+        int result;
+        try
+        {
+            handle.DangerousAddRef(ref added);
+            int descriptor = (int)handle.DangerousGetHandle();
+            if (OperatingSystem.IsMacOS())
+            {
+                result = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? MacFstatArm(descriptor, buffer) : MacFstatIntel(descriptor, buffer);
+            }
+            else
+            {
+                result = NativeFstatx(descriptor, string.Empty, AtEmptyPath, StatxBasicStats, buffer);
+            }
+
+            if (result != 0)
+            {
+                throw new IOException("cannot read its status (errno " + Marshal.GetLastPInvokeError().ToString(CultureInfo.InvariantCulture) + ")");
+            }
+        }
+        finally
+        {
+            if (added)
+            {
+                handle.DangerousRelease();
+            }
+        }
+
+        return Decode(buffer);
+    }
+
+    private static unsafe Status Decode(byte* buffer)
+    {
+        int modeOffset;
+        int ownerOffset;
+        int groupOffset;
+        int sizeOffset;
+        ulong device;
+        ulong inode;
+        long modified;
+        long changed;
+        if (OperatingSystem.IsMacOS())
+        {
+            modeOffset = 4;
+            ownerOffset = 16;
+            groupOffset = 20;
+            sizeOffset = 96;
+
+            // st_dev (int32) at 0, st_ino at 8, st_mtimespec at 48, st_ctimespec at 64.
+            device = *(uint*)buffer;
+            inode = *(ulong*)(buffer + 8);
+            modified = Nanoseconds(*(long*)(buffer + 48), *(long*)(buffer + 56));
+            changed = Nanoseconds(*(long*)(buffer + 64), *(long*)(buffer + 72));
+        }
+        else
+        {
+            modeOffset = 28;
+            ownerOffset = 20;
+            groupOffset = 24;
+            sizeOffset = 40;
+
+            // stx_ino at 32, stx_ctime at 96, stx_mtime at 112 (each a
+            // 64-bit second and a 32-bit nanosecond), stx_dev_major and
+            // stx_dev_minor at 136 and 140.
+            inode = *(ulong*)(buffer + 32);
+            changed = Nanoseconds(*(long*)(buffer + 96), *(uint*)(buffer + 104));
+            modified = Nanoseconds(*(long*)(buffer + 112), *(uint*)(buffer + 120));
+            device = ((ulong)*(uint*)(buffer + 136) << 32) | *(uint*)(buffer + 140);
+        }
+
         int mode = *(ushort*)(buffer + modeOffset);
         uint owner = *(uint*)(buffer + ownerOffset);
+        uint group = *(uint*)(buffer + groupOffset);
         long size = *(long*)(buffer + sizeOffset);
         Kind kind = (mode & FileTypeMask) switch
         {
@@ -256,7 +334,113 @@ internal static partial class Unix
             LinkType => Kind.Link,
             _ => Kind.Other,
         };
-        return new Status(kind, size, owner, mode & 0xFFF, device, inode, modified, changed);
+        return new Status(kind, size, owner, mode & 0xFFF, device, inode, modified, changed, group);
+    }
+
+    /// <summary>A user's name and primary group, from the password database.</summary>
+    internal readonly record struct Account(string Name, uint Group);
+
+    /// <summary>A group's name and its listed members (<c>gr_mem</c>), from the group database.</summary>
+    internal sealed record GroupEntry(string Name, IReadOnlyList<string> Members);
+
+    /// <summary>
+    /// The password database entry of <paramref name="uid"/>
+    /// (<c>getpwuid_r(3)</c>); null when there is none, it cannot be read,
+    /// or it needs more than <see cref="AccountBytes"/>.
+    /// </summary>
+    internal static unsafe Account? User(uint uid)
+    {
+        if (IntPtr.Size != 8)
+        {
+            return null;
+        }
+
+        // struct passwd on Linux and macOS (LP64): pw_name at 0, pw_uid at 16, pw_gid at 20.
+        byte* entry = stackalloc byte[256];
+        for (int length = 1024; length <= AccountBytes; length *= 2)
+        {
+            byte[] buffer = new byte[length];
+            byte* result = null;
+            int error;
+            fixed (byte* data = buffer)
+            {
+                error = NativeGetpwuid(uid, entry, data, (nuint)length, &result);
+                if (error == 0)
+                {
+                    if (result == null)
+                    {
+                        return null;
+                    }
+
+                    string? name = Marshal.PtrToStringUTF8(*(IntPtr*)entry);
+                    return name is null ? null : new Account(name, *(uint*)(entry + 20));
+                }
+            }
+
+            if (error != Erange)
+            {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The group database entry of <paramref name="gid"/>
+    /// (<c>getgrgid_r(3)</c>); null when there is none, it cannot be read,
+    /// or it needs more than <see cref="AccountBytes"/>.
+    /// </summary>
+    internal static unsafe GroupEntry? GroupOf(uint gid)
+    {
+        if (IntPtr.Size != 8)
+        {
+            return null;
+        }
+
+        // struct group on Linux and macOS (LP64): gr_name at 0, gr_gid at 16, gr_mem at 24.
+        byte* entry = stackalloc byte[256];
+        for (int length = 1024; length <= AccountBytes; length *= 2)
+        {
+            byte[] buffer = new byte[length];
+            byte* result = null;
+            int error;
+            fixed (byte* data = buffer)
+            {
+                error = NativeGetgrgid(gid, entry, data, (nuint)length, &result);
+                if (error == 0)
+                {
+                    if (result == null)
+                    {
+                        return null;
+                    }
+
+                    string? name = Marshal.PtrToStringUTF8(*(IntPtr*)entry);
+                    IntPtr* members = *(IntPtr**)(entry + 24);
+                    var list = new List<string>();
+
+                    // Each member's pointer and name lie in the bounded buffer, so the list is bounded by it.
+                    for (int i = 0; members != null && members[i] != IntPtr.Zero; i++)
+                    {
+                        if (i >= length / IntPtr.Size)
+                        {
+                            return null;
+                        }
+
+                        list.Add(Marshal.PtrToStringUTF8(members[i]) ?? string.Empty);
+                    }
+
+                    return name is null ? null : new GroupEntry(name, list);
+                }
+            }
+
+            if (error != Erange)
+            {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     private static long Nanoseconds(long seconds, long nanoseconds) => unchecked((seconds * 1_000_000_000L) + nanoseconds);

@@ -584,47 +584,145 @@ internal static class Core
 
     /// <summary>
     /// Refuses the cache root <paramref name="root"/>, a real path with no
-    /// links in it, unless every directory above it, up to <c>/</c>, is owned
-    /// by this user or by root, and neither its group nor others may write it
-    /// unless it has the sticky bit (as OpenSSH checks the directories above
-    /// its configuration). Otherwise another user could rename the root away
-    /// and put another directory at its path at any time, and every later
-    /// use of the path, a prepared program's workers included, would use it.
-    /// In a sticky directory only the owner of an entry (or root) may rename
-    /// it, and the next directory down is checked in turn.
+    /// links in it, unless every directory above it, up to <c>/</c>, is safe
+    /// (see <see cref="UnsafeDirectories"/>). Otherwise another user could
+    /// rename the root away and put another directory at its path at any
+    /// time, and every later use of the path, a prepared program's workers
+    /// included, would use it.
     /// </summary>
-    /// <exception cref="JacquardException">A preparation failure naming the directory.</exception>
+    /// <exception cref="JacquardException">A preparation failure naming every unsafe directory.</exception>
     internal static void CheckAncestors(string root)
+    {
+        if (Path.GetDirectoryName(root) is { } parent && UnsafeDirectories(parent, "cache directory " + root) is { } problem)
+        {
+            throw JacquardException.Preparation(problem);
+        }
+    }
+
+    /// <summary>
+    /// Refuses <paramref name="directory"/>, a real path with no links in it,
+    /// and the directories above it before any missing level below it is
+    /// made, so a refused preparation makes nothing.
+    /// </summary>
+    /// <exception cref="JacquardException">A preparation failure naming every unsafe directory.</exception>
+    internal static void CheckDirectories(string directory, string root)
+    {
+        if (UnsafeDirectories(directory, "cache directory " + root) is { } problem)
+        {
+            throw JacquardException.Preparation(problem);
+        }
+    }
+
+    /// <summary>
+    /// Test seam: answers the password database lookups of the private-group
+    /// rule in place of <see cref="Unix.User"/>. Null outside tests.
+    /// </summary>
+    internal static volatile Func<uint, Unix.Account?>? UserHook;
+
+    /// <summary>
+    /// Test seam: answers the group database lookups of the private-group
+    /// rule in place of <see cref="Unix.GroupOf"/>. Null outside tests.
+    /// </summary>
+    internal static volatile Func<uint, Unix.GroupEntry?>? GroupHook;
+
+    /// <summary>The most unsafe directories one refusal names; the rest are counted.</summary>
+    internal const int UnsafeListed = 16;
+
+    /// <summary>
+    /// Checks <paramref name="first"/>, a real path with no links in it, and
+    /// every directory above it up to <c>/</c>, with <c>lstat</c>: each must
+    /// be a directory owned by this user or by root, and neither its group
+    /// nor others may write it, unless it has the sticky bit (as OpenSSH
+    /// checks the directories above its configuration) or the group is this
+    /// user's private group. In a sticky directory only the owner of an entry
+    /// (or the directory's owner, or root) may rename or remove it, and the
+    /// next directory down is checked in turn. The private group is Debian
+    /// OpenSSH's rule: the directory's group is the user's primary group,
+    /// that group's name is the user's name, and it lists no members or only
+    /// the user. Every unsafe directory is named, nearest first, up to
+    /// <see cref="UnsafeListed"/>.
+    /// </summary>
+    /// <param name="first">The nearest directory to check.</param>
+    /// <param name="subject">What the directories hold, which starts the message.</param>
+    /// <returns>The refusal naming every unsafe directory, or null when all are safe or there are no POSIX permissions.</returns>
+    /// <exception cref="JacquardException">A directory's status cannot be read.</exception>
+    internal static string? UnsafeDirectories(string first, string subject)
     {
         if (!Unix.Supported)
         {
-            return;
+            return null;
         }
 
         uint user = Unix.EffectiveUser();
-        string? directory = Path.GetDirectoryName(root);
-        while (directory is not null)
+        bool looked = false;
+        Unix.Account? account = null;
+        Unix.GroupEntry? group = null;
+        var unsafeOnes = new List<string>();
+        int count = 0;
+        for (string? directory = first; directory is not null; directory = Path.GetDirectoryName(directory))
         {
             Unix.Status status = StatOrFail(directory, follow: false, "cannot read ");
+            string? reason = null;
             if (status.Kind != Unix.Kind.Directory)
             {
-                throw JacquardException.Preparation("cache directory parent " + directory + " is not a directory");
+                reason = "not a directory";
             }
-
-            if (status.Owner != user && status.Owner != 0)
+            else if (status.Owner != user && status.Owner != 0)
             {
-                throw JacquardException.Preparation("cache directory parent " + directory + " is owned by another user, who could replace the cache;"
-                    + " keep the cache under directories owned by you or root");
+                reason = "owned by another user";
             }
-
-            // 0o022: group or other write; 0o1000: sticky.
-            if ((status.Mode & 0x12) != 0 && (status.Mode & 0x200) == 0)
+            else if ((status.Mode & 0x200) == 0)
             {
-                throw JacquardException.Preparation("cache directory parent " + directory + " is group- or world-writable without the sticky bit,"
-                    + " so another user could replace the cache (make it, for example, chmod go-w " + directory + ")");
+                // 0o002: other write; 0o020: group write; 0o1000: sticky.
+                if ((status.Mode & 0x2) != 0)
+                {
+                    reason = "writable by others";
+                }
+                else if ((status.Mode & 0x10) != 0)
+                {
+                    if (!looked)
+                    {
+                        looked = true;
+                        account = UserHook is { } users ? users(user) : Unix.User(user);
+                        if (account is { } known)
+                        {
+                            group = GroupHook is { } groups ? groups(known.Group) : Unix.GroupOf(known.Group);
+                        }
+                    }
+
+                    if (!PrivateGroup(status, account, group))
+                    {
+                        reason = "writable by its group, which is not your private group";
+                    }
+                }
             }
 
-            directory = Path.GetDirectoryName(directory);
+            if (reason is not null)
+            {
+                if (++count <= UnsafeListed)
+                {
+                    unsafeOnes.Add(directory + " (" + reason + ")");
+                }
+            }
         }
+
+        if (count == 0)
+        {
+            return null;
+        }
+
+        string more = count > UnsafeListed ? "; and " + (count - UnsafeListed).ToString(CultureInfo.InvariantCulture) + " more" : string.Empty;
+
+        // The remedy comes before the list, so a message cut at its limit keeps it.
+        return subject + " could be replaced by another user through the directories above it."
+            + " Make each of these writable only by you (for example chmod go-w DIR), or use a location under directories only you or root may write: "
+            + string.Join("; ", unsafeOnes) + more;
     }
+
+    /// <summary>Debian OpenSSH's private-group rule for a group-writable <paramref name="status"/>.</summary>
+    private static bool PrivateGroup(Unix.Status status, Unix.Account? account, Unix.GroupEntry? group) =>
+        account is { } user && group is not null
+        && status.Group == user.Group
+        && string.Equals(group.Name, user.Name, StringComparison.Ordinal)
+        && (group.Members.Count == 0 || (group.Members.Count == 1 && string.Equals(group.Members[0], user.Name, StringComparison.Ordinal)));
 }
