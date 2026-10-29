@@ -636,6 +636,13 @@ internal static class Core
     /// <summary>Test seam: where <c>getent</c> is looked for, in order; the first present is used.</summary>
     internal static volatile string[] GetentPaths = { "/usr/bin/getent", "/bin/getent" };
 
+    /// <summary>
+    /// Test seam: reads the status (not following a final link) of the
+    /// <c>getent</c> file and the directories above it in place of
+    /// <see cref="Unix.Stat(string, bool)"/>. Null outside tests.
+    /// </summary>
+    internal static volatile Func<string, Unix.Status>? GetentStatHook;
+
     /// <summary>Test seam: the arguments <c>getent</c> runs with.</summary>
     internal static volatile string[] GetentArguments = { "passwd" };
 
@@ -847,14 +854,14 @@ internal static class Core
             }
 
             string real = Unix.RealPath(candidate);
-            if (Unix.Stat(real, follow: false) is not { Kind: Unix.Kind.Regular } file || !RootOnly(file))
+            if (Lstat(real) is not { Kind: Unix.Kind.Regular } file || !RootOnly(file))
             {
                 return null;
             }
 
             for (string? directory = Path.GetDirectoryName(real); directory is not null; directory = Path.GetDirectoryName(directory))
             {
-                if (Unix.Stat(directory, follow: false) is not { Kind: Unix.Kind.Directory } level || !RootOnly(level))
+                if (Lstat(directory) is not { Kind: Unix.Kind.Directory } level || !RootOnly(level))
                 {
                     return null;
                 }
@@ -864,6 +871,8 @@ internal static class Core
         }
 
         return null;
+
+        static Unix.Status Lstat(string path) => GetentStatHook is { } hook ? hook(path) : Unix.Stat(path, follow: false);
     }
 
     /// <summary>Whether <paramref name="status"/> is root's and neither its group nor others may write it.</summary>

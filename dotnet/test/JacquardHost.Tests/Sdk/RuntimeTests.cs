@@ -1122,9 +1122,10 @@ public sealed class RuntimeTests
     /// <c>getent</c> is the first of the configured paths present, and it
     /// must be root's and not writable by group or others: a missing path is
     /// passed over, an executable this user owns (which would print a valid
-    /// listing) is refused without falling through to a later path, and the
-    /// ownership rule refuses a file or directory another user owns or that
-    /// group or others may write.
+    /// listing) is refused without falling through to a later path, and
+    /// getent is refused when its file (not a regular file) or a directory
+    /// above it is another user's or writable by group or others (statuses
+    /// altered through a seam).
     /// </summary>
     [Test]
     [Platform("Linux")]
@@ -1142,6 +1143,30 @@ public sealed class RuntimeTests
         Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.False, "a getent this user owns");
         Core.GetentPaths = new[] { missing, "/usr/bin/getent" };
         Assert.That(Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None), Is.EqualTo(ExpectedVerdict(account.Name, me, account.Group)), "the first present is used");
+
+        // The real getent's file or a directory above it, as another user's or writable by group or others.
+        string getent = Unix.RealPath("/usr/bin/getent");
+        bool Altered(string path, Func<Unix.Status, Unix.Status> change)
+        {
+            Core.GetentPaths = new[] { "/usr/bin/getent" };
+            Core.GetentStatHook = p => p == path ? change(Unix.Stat(p, follow: false)) : Unix.Stat(p, follow: false);
+            try
+            {
+                return Core.OnlyUserHasPrimaryGroup(account.Name, me, account.Group, CancellationToken.None);
+            }
+            finally
+            {
+                Core.GetentStatHook = null;
+            }
+        }
+
+        Assert.That(Altered(getent, s => s), Is.EqualTo(ExpectedVerdict(account.Name, me, account.Group)), "unaltered");
+        Assert.That(Altered(getent, s => s with { Owner = me == 0 ? 1u : me }), Is.False, "getent owned by another user");
+        Assert.That(Altered(getent, s => s with { Mode = s.Mode | 0x10 }), Is.False, "getent writable by its group");
+        Assert.That(Altered(getent, s => s with { Mode = s.Mode | 0x2 }), Is.False, "getent writable by others");
+        Assert.That(Altered(getent, s => s with { Kind = Unix.Kind.Other }), Is.False, "getent not a regular file");
+        Assert.That(Altered(Path.GetDirectoryName(getent)!, s => s with { Mode = s.Mode | 0x10 }), Is.False, "its directory writable by its group");
+        Assert.That(Altered("/", s => s with { Owner = me == 0 ? 1u : me }), Is.False, "the root directory owned by another user");
 
         Assert.That(Core.RootOnly(new Unix.Status(Unix.Kind.Regular, 0, 0, 0x1ED)), Is.True, "root's 0755");
         Assert.That(Core.RootOnly(new Unix.Status(Unix.Kind.Regular, 0, me == 0 ? 1u : me, 0x1ED)), Is.False, "another owner");

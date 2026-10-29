@@ -150,6 +150,7 @@ internal static partial class SdkSupport
         Core.UserHook = null;
         Core.GroupHook = null;
         Core.GetentHook = null;
+        Core.GetentStatHook = null;
         Core.GetentPaths = new[] { "/usr/bin/getent", "/bin/getent" };
         Core.GetentArguments = new[] { "passwd" };
         Core.GetentTimeoutCap = Core.GetentTimeoutMs;
